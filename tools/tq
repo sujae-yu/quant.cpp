@@ -230,7 +230,7 @@ commands:
   bench                 Run performance benchmark
   +memory MODEL CTX     Calculate memory savings
   +compare              Run A/B comparison (requires build)
-  demo                  Interactive chat with Qwen3.5-0.8B
+  demo                  Chat with Qwen3.5-0.8B (native C engine)
 
 examples:
   tq info
@@ -239,6 +239,7 @@ examples:
   tq +memory llama-3.2-3b 65536
   tq +memory qwen3.5-0.8b 131072 --json
   tq demo "What is quantization?"
+  tq demo --engine pytorch "What is quantization?"
 """)
     parser.add_argument("--json", dest="json_output", action="store_true", help="JSON output (for AI agents)")
     sub = parser.add_subparsers(dest="command")
@@ -263,8 +264,10 @@ examples:
     sub.add_parser("+compare", help="Run A/B comparison")
 
     # demo
-    p_demo = sub.add_parser("demo", help="Chat with Qwen3.5-0.8B")
+    p_demo = sub.add_parser("demo", help="Chat with Qwen3.5-0.8B (native C engine)")
     p_demo.add_argument("question", nargs="?", help="Question (interactive if omitted)")
+    p_demo.add_argument("--engine", choices=["native", "pytorch"], default="native",
+                        help="Inference engine: native (tq_run, default) or pytorch")
 
     args = parser.parse_args()
 
@@ -281,9 +284,12 @@ examples:
     elif args.command == "+compare":
         return cmd_compare(args)
     elif args.command == "demo":
+        demo_args = ["--engine", args.engine]
+        if args.question:
+            demo_args.append(args.question)
         os.execvp(sys.executable, [sys.executable,
             os.path.join(os.path.dirname(__file__), "tq_chat.py"),
-            *([] if not args.question else [args.question])])
+            *demo_args])
     return EXIT_OK
 
 
