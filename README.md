@@ -127,12 +127,12 @@ Built on techniques validated by r/LocalLLaMA community and llama.cpp Discussion
 
 | Document | Description |
 |----------|-------------|
+| **[Getting Started](docs/getting-started.md)** | **Build, CLI, Python, C API, llama.cpp — all in one page** |
 | [Architecture](docs/architecture.md) | 4-layer design, type system, dispatch |
 | [Qwen3.5 Validation](docs/qwen35_validation_results.md) | Real model A/B test results |
 | [Integration Guide](docs/integration_guide.md) | llama.cpp, vLLM, Python |
 | [llama.cpp Plugin](integrations/llamacpp/README.md) | Step-by-step llama.cpp integration |
 | [Format Spec](spec/tq_format_v1.md) | Block structure, bit packing |
-| [Performance Deep Dive](bench/speed_int_vs_float_v2.c) | Integer vs FP32 benchmark |
 | [Changelog](CHANGELOG.md) | Full release notes |
 
 ---

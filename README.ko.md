@@ -127,12 +127,12 @@ r/LocalLLaMA 커뮤니티와 llama.cpp Discussion #20969에서 검증된 기법:
 
 | 문서 | 설명 |
 |------|------|
+| **[시작 가이드](docs/getting-started.md)** | **빌드, CLI, Python, C API, llama.cpp — 한 페이지에 모두** |
 | [아키텍처](docs/architecture.md) | 4-layer 설계, 타입 시스템, 디스패치 |
 | [Qwen3.5 검증](docs/qwen35_validation_results.md) | 실제 모델 A/B 테스트 결과 |
 | [통합 가이드](docs/integration_guide.md) | llama.cpp, vLLM, Python |
 | [llama.cpp 플러그인](integrations/llamacpp/README.md) | llama.cpp 통합 단계별 가이드 |
 | [포맷 사양](spec/tq_format_v1.md) | 블록 구조, 비트 패킹 |
-| [성능 심층 분석](bench/speed_int_vs_float_v2.c) | 정수 vs FP32 벤치마크 |
 | [변경 이력](CHANGELOG.md) | 전체 릴리즈 노트 |
 
 ---
