@@ -128,9 +128,18 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
     memcpy(s->x, model->token_embedding + (size_t)token * dim,
            dim * sizeof(float));
 
-    /* Step 2: Transformer layers */
+    /* Step 2: Transformer layers
+     * For hybrid models (Qwen3.5), skip layers without self_attn weights.
+     * DeltaNet layers don't have standard QKV projections. */
     for (int l = 0; l < c->n_layers; l++) {
         tq_layer_weights_t* layer = &model->layers[l];
+
+        /* Skip layers without attention weights (e.g., DeltaNet in Qwen3.5) */
+        if (!layer->wq || !layer->wk || !layer->wv) {
+            /* For now, pass through: output = input (identity) */
+            /* TODO: implement DeltaNet forward pass */
+            continue;
+        }
 
         /* ---- Self-Attention Block ---- */
 

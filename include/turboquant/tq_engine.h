@@ -53,9 +53,15 @@ typedef struct {
     float* output_norm;       /* [hidden_dim] */
     float* output_weight;     /* [vocab_size, hidden_dim] (may be tied to embedding) */
 
+    /* Hybrid architecture support (e.g., Qwen3.5 with DeltaNet layers) */
+    int n_attn_layers;        /* number of layers with standard self_attn */
+    int* attn_layer_indices;  /* which layer indices have self_attn [n_attn_layers] */
+
     /* Memory management */
     void* _mmap_data;
     size_t _mmap_size;
+    void* _converted_data;    /* heap buffer for dtype-converted tensors (e.g., BF16->FP32) */
+    size_t _converted_size;
 } tq_model_t;
 
 /* ============================================================
