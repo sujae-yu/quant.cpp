@@ -1,134 +1,143 @@
 /**
- * TurboQuant.cpp -- llama.cpp KV cache backend integration
+ * TurboQuant <-> llama.cpp Integration
  *
- * This file provides the glue between TurboQuant's quantization types and
- * llama.cpp's GGML type system. It registers custom GGML type IDs for each
- * TurboQuant quantization format and provides from_float / to_float / vec_dot
- * wrappers that delegate to the TurboQuant C API.
+ * This file provides the glue between TurboQuant's quantization types
+ * and llama.cpp's GGML type system.
  *
- * Build: compile alongside llama.cpp, linking against libturboquant.
- *   g++ -std=c++17 -c tq_kv_cache.cpp -I../../include
- *
- * Usage in llama.cpp:
- *   1. Call tq_ggml_register_types() once at startup.
- *   2. Use --kv-cache-type turbo3 (or turbo4, polar3, qjl1) on CLI.
+ * Integration steps for llama.cpp users:
+ * 1. Add TurboQuant as a subdirectory in CMakeLists.txt
+ * 2. #include "integrations/llamacpp/tq_kv_cache.cpp"
+ * 3. Call tq_ggml_register_types() during initialization
+ * 4. Use --kv-cache-type turbo3 CLI option
  */
 
 #include "tq_ggml_type.h"
+
+extern "C" {
+#include "turboquant/turboquant.h"
+}
 
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
 
 /* ============================================================
- * Hypothetical GGML type IDs for TurboQuant types.
- * In a real integration these would be added to ggml.h's
- * ggml_type enum. We define them as offsets from a base ID
- * that sits above the last upstream GGML type.
+ * GGML type IDs for TurboQuant types
+ *
+ * Standard GGML uses IDs 0-40 (as of the current ggml.h).
+ * We use IDs starting at 256 to avoid any conflicts with
+ * upstream additions or vendor extensions.
  * ============================================================ */
 
-#define GGML_TYPE_TQ_BASE      256
+#define GGML_TYPE_TQ_BASE       256
 
 enum {
-    GGML_TYPE_TQ_POLAR_3B  = GGML_TYPE_TQ_BASE + 0,
-    GGML_TYPE_TQ_POLAR_4B  = GGML_TYPE_TQ_BASE + 1,
-    GGML_TYPE_TQ_QJL_1B    = GGML_TYPE_TQ_BASE + 2,
-    GGML_TYPE_TQ_TURBO_3B  = GGML_TYPE_TQ_BASE + 3,
-    GGML_TYPE_TQ_TURBO_4B  = GGML_TYPE_TQ_BASE + 4,
-    GGML_TYPE_TQ_UNIFORM_4B= GGML_TYPE_TQ_BASE + 5,
-    GGML_TYPE_TQ_UNIFORM_2B= GGML_TYPE_TQ_BASE + 6,
-    GGML_TYPE_TQ_COUNT     = 7,
+    GGML_TYPE_TQ_POLAR_3B   = GGML_TYPE_TQ_BASE + 0,
+    GGML_TYPE_TQ_POLAR_4B   = GGML_TYPE_TQ_BASE + 1,
+    GGML_TYPE_TQ_QJL_1B     = GGML_TYPE_TQ_BASE + 2,
+    GGML_TYPE_TQ_TURBO_3B   = GGML_TYPE_TQ_BASE + 3,
+    GGML_TYPE_TQ_TURBO_4B   = GGML_TYPE_TQ_BASE + 4,
+    GGML_TYPE_TQ_UNIFORM_4B = GGML_TYPE_TQ_BASE + 5,
+    GGML_TYPE_TQ_UNIFORM_2B = GGML_TYPE_TQ_BASE + 6,
+    GGML_TYPE_TQ_COUNT      = 7,
 };
 
 /* ============================================================
- * GGML type-trait function wrappers
- *
- * GGML expects three core callbacks per quantized type:
- *   from_float(src_fp32, dst_quant, n_elements)
- *   to_float  (src_quant, dst_fp32, n_elements)
- *   vec_dot   (n, result, src_quant, src_fp32)
- *
- * We map these to TurboQuant's quantize / dequantize / attention
- * functions via the TQ_TRAITS dispatch table.
+ * Mapping helpers
  * ============================================================ */
 
-/* --- from_float wrappers (FP32 -> quantized) --- */
-
-static void tq_ggml_from_float_polar_3b(const float* src, void* dst, int64_t n) {
-    tq_quantize_fn qfn = TQ_TRAITS[TQ_TYPE_POLAR_3B].quantize;
-    if (qfn) qfn(src, dst, (int)n);
+static int tq_to_ggml_type(tq_type type) {
+    switch (type) {
+        case TQ_TYPE_POLAR_3B:   return GGML_TYPE_TQ_POLAR_3B;
+        case TQ_TYPE_POLAR_4B:   return GGML_TYPE_TQ_POLAR_4B;
+        case TQ_TYPE_QJL_1B:     return GGML_TYPE_TQ_QJL_1B;
+        case TQ_TYPE_TURBO_3B:   return GGML_TYPE_TQ_TURBO_3B;
+        case TQ_TYPE_TURBO_4B:   return GGML_TYPE_TQ_TURBO_4B;
+        case TQ_TYPE_UNIFORM_4B: return GGML_TYPE_TQ_UNIFORM_4B;
+        case TQ_TYPE_UNIFORM_2B: return GGML_TYPE_TQ_UNIFORM_2B;
+        default: return -1;
+    }
 }
 
-static void tq_ggml_from_float_polar_4b(const float* src, void* dst, int64_t n) {
-    tq_quantize_fn qfn = TQ_TRAITS[TQ_TYPE_POLAR_4B].quantize;
-    if (qfn) qfn(src, dst, (int)n);
+static tq_type ggml_to_tq_type(int ggml_id) {
+    switch (ggml_id) {
+        case GGML_TYPE_TQ_POLAR_3B:   return TQ_TYPE_POLAR_3B;
+        case GGML_TYPE_TQ_POLAR_4B:   return TQ_TYPE_POLAR_4B;
+        case GGML_TYPE_TQ_QJL_1B:     return TQ_TYPE_QJL_1B;
+        case GGML_TYPE_TQ_TURBO_3B:   return TQ_TYPE_TURBO_3B;
+        case GGML_TYPE_TQ_TURBO_4B:   return TQ_TYPE_TURBO_4B;
+        case GGML_TYPE_TQ_UNIFORM_4B: return TQ_TYPE_UNIFORM_4B;
+        case GGML_TYPE_TQ_UNIFORM_2B: return TQ_TYPE_UNIFORM_2B;
+        default: return TQ_TYPE_COUNT;
+    }
 }
 
-static void tq_ggml_from_float_qjl_1b(const float* src, void* dst, int64_t n) {
-    tq_quantize_fn qfn = TQ_TRAITS[TQ_TYPE_QJL_1B].quantize;
-    if (qfn) qfn(src, dst, (int)n);
+/* ============================================================
+ * GGML-compatible from_float / to_float wrappers
+ *
+ * GGML expects:
+ *   from_float(src_fp32, dst_quant, n_elements)
+ *   to_float  (src_quant, dst_fp32, n_elements)
+ *
+ * These process n elements in block-sized chunks using the
+ * TQ_TRAITS dispatch table.
+ * ============================================================ */
+
+static void tq_ggml_from_float(const float* src, void* dst, int64_t n, tq_type type) {
+    int block_size = (int)tq_type_block_size(type);
+    int type_size  = (int)tq_type_type_size(type);
+    int num_blocks = (int)(n / block_size);
+
+    const tq_type_traits_t* traits = &TQ_TRAITS[type];
+    if (!traits->quantize) return;
+
+    char* out = (char*)dst;
+    for (int b = 0; b < num_blocks; b++) {
+        traits->quantize(src + b * block_size, out + b * type_size, block_size);
+    }
 }
 
-static void tq_ggml_from_float_turbo_3b(const float* src, void* dst, int64_t n) {
-    tq_quantize_fn qfn = TQ_TRAITS[TQ_TYPE_TURBO_3B].quantize;
-    if (qfn) qfn(src, dst, (int)n);
+static void tq_ggml_to_float(const void* src, float* dst, int64_t n, tq_type type) {
+    int block_size = (int)tq_type_block_size(type);
+    int type_size  = (int)tq_type_type_size(type);
+    int num_blocks = (int)(n / block_size);
+
+    const tq_type_traits_t* traits = &TQ_TRAITS[type];
+    if (!traits->dequantize) return;
+
+    const char* in = (const char*)src;
+    for (int b = 0; b < num_blocks; b++) {
+        traits->dequantize(in + b * type_size, dst + b * block_size, block_size);
+    }
 }
 
-static void tq_ggml_from_float_turbo_4b(const float* src, void* dst, int64_t n) {
-    tq_quantize_fn qfn = TQ_TRAITS[TQ_TYPE_TURBO_4B].quantize;
-    if (qfn) qfn(src, dst, (int)n);
-}
+/* Type-specific wrappers for GGML function pointer compatibility */
+#define TQ_GGML_WRAPPERS(NAME, TYPE)                                              \
+    static void tq_ggml_from_float_##NAME(const float* src, void* dst, int64_t n) { \
+        tq_ggml_from_float(src, dst, n, TYPE);                                      \
+    }                                                                                \
+    static void tq_ggml_to_float_##NAME(const void* src, float* dst, int64_t n) {   \
+        tq_ggml_to_float(src, dst, n, TYPE);                                         \
+    }
 
-static void tq_ggml_from_float_uniform_4b(const float* src, void* dst, int64_t n) {
-    tq_quantize_fn qfn = TQ_TRAITS[TQ_TYPE_UNIFORM_4B].quantize;
-    if (qfn) qfn(src, dst, (int)n);
-}
+TQ_GGML_WRAPPERS(polar_3b,   TQ_TYPE_POLAR_3B)
+TQ_GGML_WRAPPERS(polar_4b,   TQ_TYPE_POLAR_4B)
+TQ_GGML_WRAPPERS(qjl_1b,     TQ_TYPE_QJL_1B)
+TQ_GGML_WRAPPERS(turbo_3b,   TQ_TYPE_TURBO_3B)
+TQ_GGML_WRAPPERS(turbo_4b,   TQ_TYPE_TURBO_4B)
+TQ_GGML_WRAPPERS(uniform_4b, TQ_TYPE_UNIFORM_4B)
+TQ_GGML_WRAPPERS(uniform_2b, TQ_TYPE_UNIFORM_2B)
 
-static void tq_ggml_from_float_uniform_2b(const float* src, void* dst, int64_t n) {
-    tq_quantize_fn qfn = TQ_TRAITS[TQ_TYPE_UNIFORM_2B].quantize;
-    if (qfn) qfn(src, dst, (int)n);
-}
-
-/* --- to_float wrappers (quantized -> FP32) --- */
-
-static void tq_ggml_to_float_polar_3b(const void* src, float* dst, int64_t n) {
-    tq_dequantize_fn dfn = TQ_TRAITS[TQ_TYPE_POLAR_3B].dequantize;
-    if (dfn) dfn(src, dst, (int)n);
-}
-
-static void tq_ggml_to_float_polar_4b(const void* src, float* dst, int64_t n) {
-    tq_dequantize_fn dfn = TQ_TRAITS[TQ_TYPE_POLAR_4B].dequantize;
-    if (dfn) dfn(src, dst, (int)n);
-}
-
-static void tq_ggml_to_float_qjl_1b(const void* src, float* dst, int64_t n) {
-    tq_dequantize_fn dfn = TQ_TRAITS[TQ_TYPE_QJL_1B].dequantize;
-    if (dfn) dfn(src, dst, (int)n);
-}
-
-static void tq_ggml_to_float_turbo_3b(const void* src, float* dst, int64_t n) {
-    tq_dequantize_fn dfn = TQ_TRAITS[TQ_TYPE_TURBO_3B].dequantize;
-    if (dfn) dfn(src, dst, (int)n);
-}
-
-static void tq_ggml_to_float_turbo_4b(const void* src, float* dst, int64_t n) {
-    tq_dequantize_fn dfn = TQ_TRAITS[TQ_TYPE_TURBO_4B].dequantize;
-    if (dfn) dfn(src, dst, (int)n);
-}
-
-static void tq_ggml_to_float_uniform_4b(const void* src, float* dst, int64_t n) {
-    tq_dequantize_fn dfn = TQ_TRAITS[TQ_TYPE_UNIFORM_4B].dequantize;
-    if (dfn) dfn(src, dst, (int)n);
-}
-
-static void tq_ggml_to_float_uniform_2b(const void* src, float* dst, int64_t n) {
-    tq_dequantize_fn dfn = TQ_TRAITS[TQ_TYPE_UNIFORM_2B].dequantize;
-    if (dfn) dfn(src, dst, (int)n);
-}
-
-/* --- vec_dot wrappers (quantized key . FP32 query -> scalar) --- */
-/* GGML vec_dot signature: void vec_dot(int n, float* s, const void* x, const float* y)
- * We compute a single dot product by dequantizing x and dotting with y. */
+/* ============================================================
+ * vec_dot wrappers (quantized key . FP32 query -> scalar)
+ *
+ * GGML vec_dot signature:
+ *   void vec_dot(int n, float* result, const void* x, const float* y)
+ *
+ * We dequantize x into a temporary buffer and compute the dot
+ * product with y. Stack allocation handles head_dim <= 512;
+ * larger dimensions fall back to heap allocation.
+ * ============================================================ */
 
 static void tq_ggml_vec_dot_generic(tq_type type, int n, float* result,
                                      const void* x, const float* y) {
@@ -137,7 +146,7 @@ static void tq_ggml_vec_dot_generic(tq_type type, int n, float* result,
         *result = 0.0f;
         return;
     }
-    /* Stack-allocate temp buffer for typical head_dim sizes (up to 512) */
+
     float tmp[512];
     float* buf = (n <= 512) ? tmp : (float*)malloc((size_t)n * sizeof(float));
     if (!buf) { *result = 0.0f; return; }
@@ -153,39 +162,26 @@ static void tq_ggml_vec_dot_generic(tq_type type, int n, float* result,
     if (buf != tmp) free(buf);
 }
 
-static void tq_ggml_vec_dot_polar_3b(int n, float* s, const void* x, const float* y) {
-    tq_ggml_vec_dot_generic(TQ_TYPE_POLAR_3B, n, s, x, y);
-}
+#define TQ_GGML_VEC_DOT(NAME, TYPE)                                                \
+    static void tq_ggml_vec_dot_##NAME(int n, float* s, const void* x, const float* y) { \
+        tq_ggml_vec_dot_generic(TYPE, n, s, x, y);                                  \
+    }
 
-static void tq_ggml_vec_dot_polar_4b(int n, float* s, const void* x, const float* y) {
-    tq_ggml_vec_dot_generic(TQ_TYPE_POLAR_4B, n, s, x, y);
-}
-
-static void tq_ggml_vec_dot_qjl_1b(int n, float* s, const void* x, const float* y) {
-    tq_ggml_vec_dot_generic(TQ_TYPE_QJL_1B, n, s, x, y);
-}
-
-static void tq_ggml_vec_dot_turbo_3b(int n, float* s, const void* x, const float* y) {
-    tq_ggml_vec_dot_generic(TQ_TYPE_TURBO_3B, n, s, x, y);
-}
-
-static void tq_ggml_vec_dot_turbo_4b(int n, float* s, const void* x, const float* y) {
-    tq_ggml_vec_dot_generic(TQ_TYPE_TURBO_4B, n, s, x, y);
-}
-
-static void tq_ggml_vec_dot_uniform_4b(int n, float* s, const void* x, const float* y) {
-    tq_ggml_vec_dot_generic(TQ_TYPE_UNIFORM_4B, n, s, x, y);
-}
-
-static void tq_ggml_vec_dot_uniform_2b(int n, float* s, const void* x, const float* y) {
-    tq_ggml_vec_dot_generic(TQ_TYPE_UNIFORM_2B, n, s, x, y);
-}
+TQ_GGML_VEC_DOT(polar_3b,   TQ_TYPE_POLAR_3B)
+TQ_GGML_VEC_DOT(polar_4b,   TQ_TYPE_POLAR_4B)
+TQ_GGML_VEC_DOT(qjl_1b,     TQ_TYPE_QJL_1B)
+TQ_GGML_VEC_DOT(turbo_3b,   TQ_TYPE_TURBO_3B)
+TQ_GGML_VEC_DOT(turbo_4b,   TQ_TYPE_TURBO_4B)
+TQ_GGML_VEC_DOT(uniform_4b, TQ_TYPE_UNIFORM_4B)
+TQ_GGML_VEC_DOT(uniform_2b, TQ_TYPE_UNIFORM_2B)
 
 /* ============================================================
- * GGML type trait table for TurboQuant types
+ * GGML type trait table
  *
- * In a real llama.cpp integration this struct would match
- * ggml_type_traits_t. We define a compatible struct here.
+ * In a real llama.cpp integration this struct maps 1:1 to
+ * ggml_type_traits_t / ggml_type_traits_cpu. We define a
+ * compatible struct here so the integration can be tested
+ * independently.
  * ============================================================ */
 
 typedef void (*ggml_from_float_fn)(const float* src, void* dst, int64_t n);
@@ -193,11 +189,12 @@ typedef void (*ggml_to_float_fn)(const void* src, float* dst, int64_t n);
 typedef void (*ggml_vec_dot_fn)(int n, float* s, const void* x, const float* y);
 
 struct tq_ggml_type_trait {
-    const char*       type_name;
-    int               ggml_type_id;
-    size_t            type_size;       /* bytes per block */
-    size_t            block_size;      /* elements per block */
-    float             bpe;             /* bits per element */
+    const char*        type_name;
+    int                ggml_type_id;
+    tq_type            tq_type_id;
+    size_t             type_size;       /* bytes per block */
+    size_t             block_size;      /* elements per block */
+    float              bpe;             /* bits per element (with metadata) */
     ggml_from_float_fn from_float;
     ggml_to_float_fn   to_float;
     ggml_vec_dot_fn    vec_dot;
@@ -205,55 +202,57 @@ struct tq_ggml_type_trait {
 
 static const tq_ggml_type_trait TQ_GGML_TRAITS[GGML_TYPE_TQ_COUNT] = {
     {
-        "tq_polar_3b", GGML_TYPE_TQ_POLAR_3B,
+        "tq_polar_3b", GGML_TYPE_TQ_POLAR_3B, TQ_TYPE_POLAR_3B,
         sizeof(block_tq_polar), TQ_BK, 4.5f,
         tq_ggml_from_float_polar_3b,
         tq_ggml_to_float_polar_3b,
         tq_ggml_vec_dot_polar_3b,
     },
     {
-        "tq_polar_4b", GGML_TYPE_TQ_POLAR_4B,
+        "tq_polar_4b", GGML_TYPE_TQ_POLAR_4B, TQ_TYPE_POLAR_4B,
         sizeof(block_tq_polar), TQ_BK, 4.5f,
         tq_ggml_from_float_polar_4b,
         tq_ggml_to_float_polar_4b,
         tq_ggml_vec_dot_polar_4b,
     },
     {
-        "tq_qjl_1b", GGML_TYPE_TQ_QJL_1B,
+        "tq_qjl_1b", GGML_TYPE_TQ_QJL_1B, TQ_TYPE_QJL_1B,
         sizeof(block_tq_qjl), TQ_BK_QJL, 1.25f,
         tq_ggml_from_float_qjl_1b,
         tq_ggml_to_float_qjl_1b,
         tq_ggml_vec_dot_qjl_1b,
     },
     {
-        "tq_turbo_3b", GGML_TYPE_TQ_TURBO_3B,
+        "tq_turbo_3b", GGML_TYPE_TQ_TURBO_3B, TQ_TYPE_TURBO_3B,
         sizeof(block_tq_turbo), TQ_BK, 5.75f,
         tq_ggml_from_float_turbo_3b,
         tq_ggml_to_float_turbo_3b,
         tq_ggml_vec_dot_turbo_3b,
     },
     {
-        "tq_turbo_4b", GGML_TYPE_TQ_TURBO_4B,
+        "tq_turbo_4b", GGML_TYPE_TQ_TURBO_4B, TQ_TYPE_TURBO_4B,
         sizeof(block_tq_turbo), TQ_BK, 5.75f,
         tq_ggml_from_float_turbo_4b,
         tq_ggml_to_float_turbo_4b,
         tq_ggml_vec_dot_turbo_4b,
     },
     {
-        "tq_uniform_4b", GGML_TYPE_TQ_UNIFORM_4B,
+        "tq_uniform_4b", GGML_TYPE_TQ_UNIFORM_4B, TQ_TYPE_UNIFORM_4B,
         sizeof(block_tq_uniform_4b), TQ_BK, 4.25f,
         tq_ggml_from_float_uniform_4b,
         tq_ggml_to_float_uniform_4b,
         tq_ggml_vec_dot_uniform_4b,
     },
     {
-        "tq_uniform_2b", GGML_TYPE_TQ_UNIFORM_2B,
+        "tq_uniform_2b", GGML_TYPE_TQ_UNIFORM_2B, TQ_TYPE_UNIFORM_2B,
         sizeof(block_tq_uniform_2b), TQ_BK, 2.25f,
         tq_ggml_from_float_uniform_2b,
         tq_ggml_to_float_uniform_2b,
         tq_ggml_vec_dot_uniform_2b,
     },
 };
+
+#define TQ_GGML_NUM_TYPES (sizeof(TQ_GGML_TRAITS) / sizeof(TQ_GGML_TRAITS[0]))
 
 /* ============================================================
  * Registration
@@ -265,39 +264,38 @@ tq_status tq_ggml_register_types(void) {
     if (g_tq_registered) return TQ_OK;
 
     /*
-     * In a real llama.cpp integration, this function would call:
+     * In a real llama.cpp integration, this function would iterate
+     * TQ_GGML_TRAITS and call:
      *
-     *   ggml_register_custom_type(GGML_TYPE_TQ_POLAR_3B,
-     *       TQ_GGML_TRAITS[0].type_name,
-     *       TQ_GGML_TRAITS[0].type_size,
-     *       TQ_GGML_TRAITS[0].block_size,
-     *       TQ_GGML_TRAITS[0].from_float,
-     *       TQ_GGML_TRAITS[0].to_float,
-     *       TQ_GGML_TRAITS[0].vec_dot);
-     *
-     * for each type in TQ_GGML_TRAITS.
+     *   ggml_register_custom_type(trait->ggml_type_id,
+     *       trait->type_name,
+     *       trait->type_size,
+     *       trait->block_size,
+     *       trait->from_float,
+     *       trait->to_float,
+     *       trait->vec_dot);
      *
      * Since ggml_register_custom_type() is not available without
      * linking against llama.cpp, we validate the trait table here
      * and mark registration as complete.
      */
 
-    for (int i = 0; i < GGML_TYPE_TQ_COUNT; i++) {
+    for (size_t i = 0; i < TQ_GGML_NUM_TYPES; i++) {
         const tq_ggml_type_trait* t = &TQ_GGML_TRAITS[i];
         if (!t->type_name || !t->from_float || !t->to_float || !t->vec_dot) {
-            fprintf(stderr, "tq_ggml_register_types: trait %d incomplete\n", i);
+            fprintf(stderr, "tq_ggml_register_types: trait %zu incomplete\n", i);
             return TQ_ERR_NOT_IMPL;
         }
         if (t->type_size == 0 || t->block_size == 0) {
-            fprintf(stderr, "tq_ggml_register_types: trait %d has zero size\n", i);
+            fprintf(stderr, "tq_ggml_register_types: trait %zu has zero size\n", i);
             return TQ_ERR_INVALID_DIM;
         }
     }
 
     g_tq_registered = 1;
     fprintf(stderr, "[TurboQuant] Registered %d GGML types (IDs %d..%d)\n",
-            GGML_TYPE_TQ_COUNT, GGML_TYPE_TQ_BASE,
-            GGML_TYPE_TQ_BASE + GGML_TYPE_TQ_COUNT - 1);
+            (int)TQ_GGML_NUM_TYPES, GGML_TYPE_TQ_BASE,
+            GGML_TYPE_TQ_BASE + (int)TQ_GGML_NUM_TYPES - 1);
 
     return TQ_OK;
 }
@@ -312,21 +310,33 @@ tq_status tq_ggml_register_types(void) {
 tq_type tq_parse_kv_cache_type(const char* arg) {
     if (!arg) return TQ_TYPE_COUNT;
 
+    /* Try the canonical name first (via tq_type_from_name) */
+    tq_type result = tq_type_from_name(arg);
+    if (result != TQ_TYPE_COUNT) return result;
+
+    /* Then try common short aliases */
     struct { const char* name; tq_type type; } map[] = {
-        { "turbo3",    TQ_TYPE_TURBO_3B   },
-        { "turbo_3b",  TQ_TYPE_TURBO_3B   },
-        { "turbo4",    TQ_TYPE_TURBO_4B   },
-        { "turbo_4b",  TQ_TYPE_TURBO_4B   },
-        { "polar3",    TQ_TYPE_POLAR_3B   },
-        { "polar_3b",  TQ_TYPE_POLAR_3B   },
-        { "polar4",    TQ_TYPE_POLAR_4B   },
-        { "polar_4b",  TQ_TYPE_POLAR_4B   },
-        { "qjl1",      TQ_TYPE_QJL_1B     },
-        { "qjl_1b",    TQ_TYPE_QJL_1B     },
-        { "uniform4",  TQ_TYPE_UNIFORM_4B },
-        { "uniform_4b",TQ_TYPE_UNIFORM_4B },
-        { "uniform2",  TQ_TYPE_UNIFORM_2B },
-        { "uniform_2b",TQ_TYPE_UNIFORM_2B },
+        { "turbo3",       TQ_TYPE_TURBO_3B   },
+        { "turbo_3b",     TQ_TYPE_TURBO_3B   },
+        { "tq-turbo-3b",  TQ_TYPE_TURBO_3B   },
+        { "turbo4",       TQ_TYPE_TURBO_4B   },
+        { "turbo_4b",     TQ_TYPE_TURBO_4B   },
+        { "tq-turbo-4b",  TQ_TYPE_TURBO_4B   },
+        { "polar3",       TQ_TYPE_POLAR_3B   },
+        { "polar_3b",     TQ_TYPE_POLAR_3B   },
+        { "tq-polar-3b",  TQ_TYPE_POLAR_3B   },
+        { "polar4",       TQ_TYPE_POLAR_4B   },
+        { "polar_4b",     TQ_TYPE_POLAR_4B   },
+        { "tq-polar-4b",  TQ_TYPE_POLAR_4B   },
+        { "qjl1",         TQ_TYPE_QJL_1B     },
+        { "qjl_1b",       TQ_TYPE_QJL_1B     },
+        { "tq-qjl-1b",    TQ_TYPE_QJL_1B     },
+        { "uniform4",     TQ_TYPE_UNIFORM_4B },
+        { "uniform_4b",   TQ_TYPE_UNIFORM_4B },
+        { "tq-uniform-4b",TQ_TYPE_UNIFORM_4B },
+        { "uniform2",     TQ_TYPE_UNIFORM_2B },
+        { "uniform_2b",   TQ_TYPE_UNIFORM_2B },
+        { "tq-uniform-2b",TQ_TYPE_UNIFORM_2B },
     };
 
     for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
@@ -338,11 +348,22 @@ tq_type tq_parse_kv_cache_type(const char* arg) {
     return TQ_TYPE_COUNT;
 }
 
+/* Print all available TurboQuant KV cache types */
+void tq_print_kv_cache_types(void) {
+    fprintf(stderr, "Available TurboQuant KV cache types:\n");
+    for (int i = 0; i < TQ_TYPE_COUNT; i++) {
+        float bpe = tq_type_bpe((tq_type)i);
+        fprintf(stderr, "  %-14s  %.1f bpe  %.1fx compression\n",
+                tq_type_name((tq_type)i), bpe,
+                (bpe > 0.0f) ? 32.0f / bpe : 0.0f);
+    }
+}
+
 /* ============================================================
  * KV cache integration helpers
  *
- * These functions wrap TurboQuant's context-based API for use
- * within llama.cpp's KV cache management code.
+ * These wrap TurboQuant's context-based API for use within
+ * llama.cpp's KV cache management code.
  * ============================================================ */
 
 /**
@@ -450,7 +471,8 @@ void tq_llamacpp_print_config(tq_type key_type, int value_bits,
                                int n_heads, int head_dim, int max_seq_len) {
     size_t fp16_per_token = (size_t)head_dim * 2 * 2;  /* key + value, FP16 */
     size_t tq_per_token = tq_llamacpp_bytes_per_token(head_dim, key_type, value_bits);
-    double ratio = (double)fp16_per_token / (double)tq_per_token;
+    double ratio = (tq_per_token > 0) ?
+        (double)fp16_per_token / (double)tq_per_token : 0.0;
 
     size_t fp16_total = fp16_per_token * (size_t)n_heads * (size_t)max_seq_len;
     size_t tq_total   = tq_per_token   * (size_t)n_heads * (size_t)max_seq_len;

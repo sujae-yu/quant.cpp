@@ -22,8 +22,23 @@ add_library(turboquant STATIC
 target_include_directories(turboquant PUBLIC include)
 target_link_libraries(turboquant PRIVATE m)
 
+# Shared library for Python bindings
+add_library(turboquant_shared SHARED
+    ${TQ_CORE_SOURCES}
+    ${TQ_CACHE_SOURCES}
+    ${TQ_CPU_SOURCES}
+)
+target_include_directories(turboquant_shared PUBLIC include)
+target_link_libraries(turboquant_shared PRIVATE m)
+set_target_properties(turboquant_shared PROPERTIES
+    OUTPUT_NAME turboquant
+    POSITION_INDEPENDENT_CODE ON)
+
 # Compiler warnings
 target_compile_options(turboquant PRIVATE
+    -Wall -Wextra -Wpedantic -Wno-unused-parameter
+)
+target_compile_options(turboquant_shared PRIVATE
     -Wall -Wextra -Wpedantic -Wno-unused-parameter
 )
 
@@ -44,6 +59,15 @@ if(TQ_BUILD_TESTS)
         target_link_libraries(${test_name} turboquant GTest::gtest_main)
         add_test(NAME ${test_name} COMMAND ${test_name})
     endforeach()
+
+    # llama.cpp integration test
+    add_executable(test_llamacpp_integration
+        integrations/llamacpp/test_integration.cpp)
+    target_include_directories(test_llamacpp_integration PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/integrations/llamacpp)
+    target_link_libraries(test_llamacpp_integration turboquant GTest::gtest_main)
+    add_test(NAME test_llamacpp_integration COMMAND test_llamacpp_integration)
 endif()
 
 # Benchmarks
