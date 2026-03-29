@@ -27,7 +27,7 @@
 
 ---
 
-## Try It Now (30 seconds)
+## Try It Now
 
 ```bash
 git clone https://github.com/quantumaikr/TurboQuant.cpp
@@ -36,13 +36,13 @@ cd TurboQuant.cpp
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DTQ_BUILD_TESTS=ON -DTQ_BUILD_BENCH=ON
 cmake --build build -j$(sysctl -n hw.ncpu 2>/dev/null || nproc)
 
-# See the A/B comparison yourself
+# Run Qwen3.5-0.8B (download model first — see Getting Started)
+./build/tq_run model.safetensors -t tokenizer.json -p "What is AI?" -j 4 -q
+
+# A/B comparison: FP16 vs quantized
 ./build/ab_test
 
-# Memory savings for real LLM models
-./build/demo_real_model
-
-# Speed: Integer attention vs FP32
+# Benchmarks
 ./build/speed_int_vs_float
 ```
 
