@@ -32,10 +32,7 @@ static void print_usage(const char* prog) {
 }
 
 int main(int argc, char** argv) {
-    if (argc < 2) {
-        print_usage(argv[0]);
-        return 1;
-    }
+    /* argc < 2 is OK — auto-detect will find model */
 
     const char* model_path = NULL;
     const char* tokenizer_path = NULL;
