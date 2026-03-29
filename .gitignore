@@ -36,4 +36,4 @@ Testing/
 spec/test_vectors/*.bin
 
 # Etc.
-refs/
+refs/.venv/
