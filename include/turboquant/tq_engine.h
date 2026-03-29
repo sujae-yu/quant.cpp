@@ -75,6 +75,25 @@ typedef struct {
     int8_t*  delta_in_proj_b_q8;   float* delta_in_proj_b_q8s;
     int8_t*  delta_out_proj_q8;    float* delta_out_proj_q8s;
 
+    /* Q4_0 quantized weights: packed 4-bit data + per-block float scale (block_size=32)
+     * Each block of 32 values stored as 16 packed bytes + 1 float scale.
+     * Values are unsigned [0,15], centered at 8: actual = (q - 8) * scale.
+     * When use_q4 is set, these replace FP32 pointers (set to NULL). */
+    uint8_t* wq_q4;     float* wq_q4s;    /* Q4 q_proj */
+    uint8_t* wk_q4;     float* wk_q4s;    /* Q4 k_proj */
+    uint8_t* wv_q4;     float* wv_q4s;    /* Q4 v_proj */
+    uint8_t* wo_q4;     float* wo_q4s;    /* Q4 o_proj */
+    uint8_t* w_gate_q4; float* w_gate_q4s;/* Q4 gate_proj */
+    uint8_t* w_up_q4;   float* w_up_q4s;  /* Q4 up_proj */
+    uint8_t* w_down_q4; float* w_down_q4s;/* Q4 down_proj */
+
+    /* DeltaNet Q4 weights */
+    uint8_t* delta_in_proj_qkv_q4; float* delta_in_proj_qkv_q4s;
+    uint8_t* delta_in_proj_z_q4;   float* delta_in_proj_z_q4s;
+    uint8_t* delta_in_proj_a_q4;   float* delta_in_proj_a_q4s;
+    uint8_t* delta_in_proj_b_q4;   float* delta_in_proj_b_q4s;
+    uint8_t* delta_out_proj_q4;    float* delta_out_proj_q4s;
+
     /* DeltaNet (linear_attention) weights (NULL for self_attn layers) */
     float* delta_a_log;       /* [delta_n_heads] decay parameter (log scale) */
     float* delta_conv1d;      /* [qkv_dim, 1, conv_width] */
@@ -113,6 +132,11 @@ typedef struct {
     int use_q8_weights;       /* 1 if layer weights are Q8-quantized */
     void* _q8_data;           /* heap buffer for all Q8 quantized weights */
     size_t _q8_size;
+
+    /* Q4 weight quantization */
+    int use_q4_weights;       /* 1 if layer weights are Q4-quantized */
+    void* _q4_data;           /* heap buffer for all Q4 quantized weights */
+    size_t _q4_size;
 
     /* Memory management */
     void* _mmap_data;
@@ -231,6 +255,10 @@ void tq_matmul_q8(float* out, const float* x, const int8_t* w_qs, const float* w
                    int n, int d);
 void tq_quantize_row_q8(const float* src, int8_t* dst_qs, float* dst_scales, int n);
 void tq_quantize_weights(tq_model_t* model);
+void tq_matmul_q4(float* out, const float* x, const uint8_t* w_qs, const float* w_scales,
+                   int n, int d);
+void tq_quantize_row_q4(const float* src, uint8_t* dst_qs, float* dst_scales, int n);
+void tq_quantize_weights_q4(tq_model_t* model);
 void tq_rmsnorm(float* out, const float* x, const float* weight, int n, float eps);
 void tq_rope(float* q, float* k, int pos, int head_dim,
              int n_heads, int n_kv_heads, float freq_base);

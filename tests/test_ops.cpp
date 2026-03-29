@@ -966,3 +966,166 @@ TEST(TqOps, MiniForwardPass) {
     delete[] model.output_weight;
     delete[] model.layers;
 }
+
+/* ============================================================
+ * Q4 quantization and matmul tests
+ * ============================================================ */
+
+TEST(TqOps, QuantizeRowQ4Basic) {
+    /* Quantize a simple row and verify round-trip */
+    const int n = 64;
+    std::vector<float> src(n);
+    std::vector<uint8_t> qs(n / 2);  /* 16 bytes per block of 32 */
+    std::vector<float> scales(n / 32);
+
+    fill_random(src.data(), n, 42);
+
+    tq_quantize_row_q4(src.data(), qs.data(), scales.data(), n);
+
+    /* Dequantize and check MSE */
+    double mse = 0.0;
+    for (int b = 0; b < n / 32; b++) {
+        for (int j = 0; j < 16; j++) {
+            int q0 = (qs[b * 16 + j] & 0x0F) - 8;
+            int q1 = (qs[b * 16 + j] >> 4) - 8;
+            float deq0 = (float)q0 * scales[b];
+            float deq1 = (float)q1 * scales[b];
+            double err0 = (double)(src[b * 32 + 2 * j] - deq0);
+            double err1 = (double)(src[b * 32 + 2 * j + 1] - deq1);
+            mse += err0 * err0 + err1 * err1;
+        }
+    }
+    mse /= n;
+    /* Q4 has higher error than Q8 but should still be reasonable for [-1, 1] range */
+    EXPECT_LT(mse, 0.02);
+}
+
+TEST(TqOps, QuantizeRowQ4Zero) {
+    /* All zeros */
+    const int n = 32;
+    std::vector<float> src(n, 0.0f);
+    std::vector<uint8_t> qs(16);
+    std::vector<float> scales(1);
+
+    tq_quantize_row_q4(src.data(), qs.data(), scales.data(), n);
+
+    EXPECT_NEAR(scales[0], 0.0f, 1e-10f);
+    /* All values should be 8 (zero point) packed as 0x88 */
+    for (int i = 0; i < 16; i++) {
+        EXPECT_EQ(qs[i], 0x88) << "Expected zero-centered packing at byte " << i;
+    }
+}
+
+TEST(TqOps, MatMulQ4Small) {
+    /* Test Q4 matmul against reference FP32 matmul */
+    const int n = 4, d = 64;  /* d must be multiple of 32 */
+    std::vector<float> w(n * d), x(d), out_fp32(n), out_q4(n);
+    std::vector<uint8_t> w_qs(n * (d / 32) * 16);
+    std::vector<float> w_scales(n * (d / 32));
+
+    fill_random(w.data(), n * d, 100);
+    fill_random(x.data(), d, 200);
+
+    /* Reference FP32 */
+    tq_matmul(out_fp32.data(), x.data(), w.data(), n, d);
+
+    /* Quantize weights row by row */
+    for (int i = 0; i < n; i++) {
+        tq_quantize_row_q4(w.data() + i * d,
+                            w_qs.data() + i * (d / 32) * 16,
+                            w_scales.data() + i * (d / 32),
+                            d);
+    }
+
+    /* Q4 matmul */
+    tq_matmul_q4(out_q4.data(), x.data(), w_qs.data(), w_scales.data(), n, d);
+
+    /* Q4 should be reasonably close to FP32 (wider tolerance than Q8) */
+    for (int i = 0; i < n; i++) {
+        EXPECT_NEAR(out_q4[i], out_fp32[i],
+                    std::abs(out_fp32[i]) * 0.1f + 0.5f)
+            << "Mismatch at index " << i;
+    }
+}
+
+TEST(TqOps, MatMulQ4Large) {
+    /* Realistic size: 128 x 256 */
+    const int n = 128, d = 256;
+    std::vector<float> w(n * d), x(d), out_fp32(n), out_q4(n);
+    int n_blocks = d / 32;
+    std::vector<uint8_t> w_qs(n * n_blocks * 16);
+    std::vector<float> w_scales(n * n_blocks);
+
+    fill_random(w.data(), n * d, 300);
+    fill_random(x.data(), d, 400);
+
+    tq_matmul(out_fp32.data(), x.data(), w.data(), n, d);
+
+    for (int i = 0; i < n; i++) {
+        tq_quantize_row_q4(w.data() + i * d,
+                            w_qs.data() + i * n_blocks * 16,
+                            w_scales.data() + i * n_blocks,
+                            d);
+    }
+
+    tq_matmul_q4(out_q4.data(), x.data(), w_qs.data(), w_scales.data(), n, d);
+
+    /* Compute cosine similarity between Q4 and FP32 outputs */
+    double dot = 0, norm_a = 0, norm_b = 0;
+    for (int i = 0; i < n; i++) {
+        dot += (double)out_q4[i] * out_fp32[i];
+        norm_a += (double)out_q4[i] * out_q4[i];
+        norm_b += (double)out_fp32[i] * out_fp32[i];
+    }
+    double cosine = dot / (std::sqrt(norm_a) * std::sqrt(norm_b) + 1e-12);
+    EXPECT_GT(cosine, 0.995) << "Q4 vs FP32 cosine similarity too low";
+
+    /* Also check absolute errors are bounded */
+    for (int i = 0; i < n; i++) {
+        EXPECT_NEAR(out_q4[i], out_fp32[i],
+                    std::abs(out_fp32[i]) * 0.1f + 1.0f)
+            << "Mismatch at row " << i;
+    }
+}
+
+TEST(TqOps, MatMulQ4MultiThreaded) {
+    /* Large enough to trigger multi-threading (n >= 256) */
+    const int n = 512, d = 256;
+    int n_blocks = d / 32;
+    std::vector<float> w(n * d), x(d), out_fp32(n), out_q4(n);
+    std::vector<uint8_t> w_qs(n * n_blocks * 16);
+    std::vector<float> w_scales(n * n_blocks);
+
+    fill_random(w.data(), n * d, 500);
+    fill_random(x.data(), d, 600);
+
+    tq_matmul(out_fp32.data(), x.data(), w.data(), n, d);
+
+    for (int i = 0; i < n; i++) {
+        tq_quantize_row_q4(w.data() + i * d,
+                            w_qs.data() + i * n_blocks * 16,
+                            w_scales.data() + i * n_blocks,
+                            d);
+    }
+
+    tq_set_threads(4);
+    tq_matmul_q4(out_q4.data(), x.data(), w_qs.data(), w_scales.data(), n, d);
+    tq_set_threads(1);
+
+    /* Q4xQ8 integer dot product has compounded quantization error;
+     * verify via cosine similarity (structural correctness) */
+    double dot = 0, norm_a = 0, norm_b = 0;
+    for (int i = 0; i < n; i++) {
+        dot += (double)out_q4[i] * out_fp32[i];
+        norm_a += (double)out_q4[i] * out_q4[i];
+        norm_b += (double)out_fp32[i] * out_fp32[i];
+    }
+    double cosine = dot / (std::sqrt(norm_a) * std::sqrt(norm_b) + 1e-12);
+    EXPECT_GT(cosine, 0.995) << "Q4 multi-threaded vs FP32 cosine similarity too low";
+
+    for (int i = 0; i < n; i++) {
+        EXPECT_NEAR(out_q4[i], out_fp32[i],
+                    std::abs(out_fp32[i]) * 0.15f + 1.5f)
+            << "Mismatch at row " << i;
+    }
+}

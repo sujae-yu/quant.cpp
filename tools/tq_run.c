@@ -59,7 +59,8 @@ static void print_usage(const char* prog) {
     fprintf(stderr, "  -k <kv_type>     KV cache quantization type\n");
     fprintf(stderr, "  -j <threads>     Number of threads for matmul (default: 4)\n");
     fprintf(stderr, "  -s <seed>        Random seed (default: 42)\n");
-    fprintf(stderr, "  -q               Quantize weights to Q8 (int8, ~2x memory reduction)\n");
+    fprintf(stderr, "  -q <type>        Quantize weights: q4 (4-bit, ~6x reduction, default),\n");
+    fprintf(stderr, "                   q8 (int8, ~3.5x reduction), or none (FP32)\n");
     fprintf(stderr, "  --info           Print model info and exit\n");
 }
 
@@ -78,7 +79,7 @@ int main(int argc, char** argv) {
     float top_p = 0.9f;
     tq_type kv_type = TQ_TYPE_UNIFORM_4B;
     int n_threads = 4;
-    int use_q8 = 0;
+    int quant_mode = 0;   /* 0 = none (default), 4 = Q4, 8 = Q8 */
     int info_only = 0;
 
     for (int i = 1; i < argc; i++) {
@@ -99,7 +100,21 @@ int main(int argc, char** argv) {
         } else if (strcmp(argv[i], "-j") == 0 && i + 1 < argc) {
             n_threads = atoi(argv[++i]);
         } else if (strcmp(argv[i], "-q") == 0) {
-            use_q8 = 1;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                const char* qarg = argv[++i];
+                if (strcmp(qarg, "q4") == 0 || strcmp(qarg, "4") == 0) {
+                    quant_mode = 4;
+                } else if (strcmp(qarg, "q8") == 0 || strcmp(qarg, "8") == 0) {
+                    quant_mode = 8;
+                } else if (strcmp(qarg, "none") == 0 || strcmp(qarg, "fp32") == 0) {
+                    quant_mode = 0;
+                } else {
+                    fprintf(stderr, "Unknown quant type: %s (using q4)\n", qarg);
+                    quant_mode = 4;
+                }
+            } else {
+                quant_mode = 4;  /* -q alone defaults to Q4 */
+            }
         } else if (strcmp(argv[i], "--info") == 0) {
             info_only = 1;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -130,7 +145,10 @@ int main(int argc, char** argv) {
     fprintf(stderr, "KV cache type: %s\n",
             kv_type < TQ_TYPE_COUNT ? tq_type_name(kv_type) : "fp32");
 
-    if (use_q8) {
+    if (quant_mode == 4) {
+        fprintf(stderr, "Quantizing weights to Q4 (4-bit)...\n");
+        tq_quantize_weights_q4(model);
+    } else if (quant_mode == 8) {
         fprintf(stderr, "Quantizing weights to Q8 (int8)...\n");
         tq_quantize_weights(model);
     }
@@ -182,8 +200,9 @@ int main(int argc, char** argv) {
     fprintf(stderr, "\n---\n");
     if (n_generated > 0 && elapsed > 0.0) {
         double tok_per_sec = (double)n_generated / elapsed;
-        fprintf(stderr, "%d tokens in %.1fs (%.1f tok/s, %d threads, kv=%s)\n",
-                n_generated, elapsed, tok_per_sec, tq_get_threads(),
+        const char* wq_name = quant_mode == 4 ? "Q4" : (quant_mode == 8 ? "Q8" : "FP32");
+        fprintf(stderr, "%d tokens in %.1fs (%.1f tok/s, %d threads, weights=%s, kv=%s)\n",
+                n_generated, elapsed, tok_per_sec, tq_get_threads(), wq_name,
                 kv_type < TQ_TYPE_COUNT ? tq_type_name(kv_type) : "fp32");
     } else {
         fprintf(stderr, "Generated %d tokens\n", n_generated);

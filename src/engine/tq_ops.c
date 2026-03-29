@@ -8,6 +8,7 @@
 
 #include "turboquant/tq_engine.h"
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 #include <float.h>
 #include <pthread.h>
@@ -331,6 +332,221 @@ void tq_matmul_q8(float* out, const float* x, const int8_t* w_qs, const float* w
     for (int t = 0; t < n_threads; t++) {
         pthread_join(threads[t], NULL);
     }
+}
+
+/* ============================================================
+ * Q4_0 quantization: float -> packed 4-bit + per-block scale (block_size=32)
+ *
+ * For each block of 32 values:
+ *   scale = max(|x_i|) / 7.0  (symmetric 4-bit: [-7, 7] maps to [1,15])
+ *   q_i = round(x_i / scale) + 8, clamped to [0, 15]
+ * Packed: two 4-bit values per byte, low nibble first.
+ * ============================================================ */
+void tq_quantize_row_q4(const float* src, uint8_t* dst_qs, float* dst_scales, int n) {
+    int n_blocks = n / 32;
+    for (int b = 0; b < n_blocks; b++) {
+        const float* block = src + b * 32;
+        float amax = 0.0f;
+#ifdef __ARM_NEON
+        float32x4_t vmax = vdupq_n_f32(0.0f);
+        for (int j = 0; j < 32; j += 4) {
+            float32x4_t v = vld1q_f32(block + j);
+            vmax = vmaxq_f32(vmax, vabsq_f32(v));
+        }
+        amax = vmaxvq_f32(vmax);
+#else
+        for (int j = 0; j < 32; j++) {
+            float a = fabsf(block[j]);
+            if (a > amax) amax = a;
+        }
+#endif
+        float d = amax / 7.0f;
+        dst_scales[b] = d;
+        float id = (d > 1e-10f) ? 1.0f / d : 0.0f;
+
+        uint8_t* qb = dst_qs + b * 16;
+        for (int j = 0; j < 16; j++) {
+            int q0 = (int)roundf(block[2 * j] * id) + 8;
+            int q1 = (int)roundf(block[2 * j + 1] * id) + 8;
+            if (q0 < 0) q0 = 0; if (q0 > 15) q0 = 15;
+            if (q1 < 0) q1 = 0; if (q1 > 15) q1 = 15;
+            qb[j] = (uint8_t)((q1 << 4) | q0);
+        }
+    }
+    /* Handle remainder (if n is not multiple of 32) */
+    int remainder = n - n_blocks * 32;
+    if (remainder > 0) {
+        const float* block = src + n_blocks * 32;
+        float amax = 0.0f;
+        for (int j = 0; j < remainder; j++) {
+            float a = fabsf(block[j]);
+            if (a > amax) amax = a;
+        }
+        float d = amax / 7.0f;
+        dst_scales[n_blocks] = d;
+        float id = (d > 1e-10f) ? 1.0f / d : 0.0f;
+        uint8_t* qb = dst_qs + n_blocks * 16;
+        int n_pairs = remainder / 2;
+        for (int j = 0; j < n_pairs; j++) {
+            int q0 = (int)roundf(block[2 * j] * id) + 8;
+            int q1 = (int)roundf(block[2 * j + 1] * id) + 8;
+            if (q0 < 0) q0 = 0; if (q0 > 15) q0 = 15;
+            if (q1 < 0) q1 = 0; if (q1 > 15) q1 = 15;
+            qb[j] = (uint8_t)((q1 << 4) | q0);
+        }
+        if (remainder & 1) {
+            int q0 = (int)roundf(block[remainder - 1] * id) + 8;
+            if (q0 < 0) q0 = 0; if (q0 > 15) q0 = 15;
+            qb[n_pairs] = (uint8_t)(q0);
+        }
+    }
+}
+
+/* ============================================================
+ * Q4 matmul: w is Q4_0 [n, d], x is FP32 [d], out is FP32 [n]
+ *
+ * Strategy: quantize activation x to Q8 once, then compute
+ * Q4 x Q8 integer dot product per block for maximum throughput.
+ * ============================================================ */
+
+typedef struct {
+    float* out;
+    const float* x;
+    const uint8_t* w_qs;
+    const float* w_scales;
+    const int8_t* x_q8;
+    const float* x_scales;
+    int start_row;
+    int end_row;
+    int d;
+} matmul_q4_task_t;
+
+static void matmul_q4_rows(float* out, const float* x,
+                            const uint8_t* w_qs, const float* w_scales,
+                            const int8_t* x_q8, const float* x_scales,
+                            int start_row, int end_row, int d) {
+    int n_blocks = d / 32;
+    for (int i = start_row; i < end_row; i++) {
+        const uint8_t* wi = w_qs + (size_t)i * n_blocks * 16;
+        const float* si = w_scales + (size_t)i * n_blocks;
+        float sum = 0.0f;
+#ifdef __ARM_NEON
+        for (int b = 0; b < n_blocks; b++) {
+            const uint8_t* qb = wi + b * 16;
+            const int8_t* xb = x_q8 + b * 32;
+
+            /* Load 16 packed bytes = 32 Q4 values */
+            uint8x16_t packed = vld1q_u8(qb);
+            /* Unpack low nibbles: values 0..15 */
+            uint8x16_t lo_u = vandq_u8(packed, vdupq_n_u8(0x0F));
+            /* Unpack high nibbles: values 0..15 */
+            uint8x16_t hi_u = vshrq_n_u8(packed, 4);
+            /* Subtract 8 to center: [0,15] -> [-8,7], reinterpret as signed */
+            int8x16_t lo = vreinterpretq_s8_u8(vsubq_u8(lo_u, vdupq_n_u8(8)));
+            int8x16_t hi = vreinterpretq_s8_u8(vsubq_u8(hi_u, vdupq_n_u8(8)));
+
+            /* Load Q8 activation: 32 int8 values, split as lo[0..15] hi[16..31]
+             * But Q4 packing interleaves: lo nibble = even indices, hi nibble = odd indices
+             * So we need to deinterleave x_q8 to match */
+
+            /* x_q8[b*32+0], x_q8[b*32+2], ..., x_q8[b*32+30] -> even indices
+             * x_q8[b*32+1], x_q8[b*32+3], ..., x_q8[b*32+31] -> odd indices */
+            int8x16x2_t x_deint = vld2q_s8(xb);
+            /* x_deint.val[0] = even indices (matches lo nibble)
+             * x_deint.val[1] = odd indices (matches hi nibble) */
+
+            int32x4_t acc = vdupq_n_s32(0);
+#if defined(__ARM_FEATURE_DOTPROD)
+            acc = vdotq_s32(acc, lo, x_deint.val[0]);
+            acc = vdotq_s32(acc, hi, x_deint.val[1]);
+#else
+            /* Fallback: widen multiply and accumulate */
+            int16x8_t prod_lo_0 = vmull_s8(vget_low_s8(lo), vget_low_s8(x_deint.val[0]));
+            int16x8_t prod_lo_1 = vmull_s8(vget_high_s8(lo), vget_high_s8(x_deint.val[0]));
+            int16x8_t prod_hi_0 = vmull_s8(vget_low_s8(hi), vget_low_s8(x_deint.val[1]));
+            int16x8_t prod_hi_1 = vmull_s8(vget_high_s8(hi), vget_high_s8(x_deint.val[1]));
+            acc = vaddq_s32(acc, vpaddlq_s16(prod_lo_0));
+            acc = vaddq_s32(acc, vpaddlq_s16(prod_lo_1));
+            acc = vaddq_s32(acc, vpaddlq_s16(prod_hi_0));
+            acc = vaddq_s32(acc, vpaddlq_s16(prod_hi_1));
+#endif
+            int32_t isum = vaddvq_s32(acc);
+            sum += (float)isum * si[b] * x_scales[b];
+        }
+#else
+        for (int b = 0; b < n_blocks; b++) {
+            const uint8_t* qb = wi + b * 16;
+            const int8_t* xb = x_q8 + b * 32;
+            int32_t isum = 0;
+            for (int j = 0; j < 16; j++) {
+                int q0 = (qb[j] & 0x0F) - 8;
+                int q1 = (qb[j] >> 4) - 8;
+                isum += q0 * (int)xb[2 * j] + q1 * (int)xb[2 * j + 1];
+            }
+            sum += (float)isum * si[b] * x_scales[b];
+        }
+#endif
+        out[i] = sum;
+    }
+}
+
+static void* matmul_q4_worker(void* arg) {
+    matmul_q4_task_t* t = (matmul_q4_task_t*)arg;
+    matmul_q4_rows(t->out, t->x, t->w_qs, t->w_scales,
+                    t->x_q8, t->x_scales,
+                    t->start_row, t->end_row, t->d);
+    return NULL;
+}
+
+/* Q4 matmul with multi-threading support.
+ * Quantizes activation x to Q8 once, then does Q4xQ8 integer dot products. */
+void tq_matmul_q4(float* out, const float* x, const uint8_t* w_qs, const float* w_scales,
+                   int n, int d) {
+    /* Quantize activation x to Q8 (amortized across all rows) */
+    int n_blocks = d / 32;
+    int8_t* x_q8 = (int8_t*)malloc((size_t)d * sizeof(int8_t));
+    float* x_scales = (float*)malloc((size_t)(n_blocks + 1) * sizeof(float));
+    if (!x_q8 || !x_scales) {
+        free(x_q8);
+        free(x_scales);
+        return;
+    }
+    tq_quantize_row_q8(x, x_q8, x_scales, d);
+
+    int n_threads = g_n_threads;
+
+    if (n < 256 || n_threads <= 1) {
+        matmul_q4_rows(out, x, w_qs, w_scales, x_q8, x_scales, 0, n, d);
+        free(x_q8);
+        free(x_scales);
+        return;
+    }
+
+    if (n_threads > n) n_threads = n;
+    if (n_threads > 16) n_threads = 16;
+
+    pthread_t threads[16];
+    matmul_q4_task_t tasks[16];
+
+    int rows_per_thread = n / n_threads;
+    for (int t = 0; t < n_threads; t++) {
+        tasks[t].out = out;
+        tasks[t].x = x;
+        tasks[t].w_qs = w_qs;
+        tasks[t].w_scales = w_scales;
+        tasks[t].x_q8 = x_q8;
+        tasks[t].x_scales = x_scales;
+        tasks[t].d = d;
+        tasks[t].start_row = t * rows_per_thread;
+        tasks[t].end_row = (t == n_threads - 1) ? n : (t + 1) * rows_per_thread;
+        pthread_create(&threads[t], NULL, matmul_q4_worker, &tasks[t]);
+    }
+    for (int t = 0; t < n_threads; t++) {
+        pthread_join(threads[t], NULL);
+    }
+
+    free(x_q8);
+    free(x_scales);
 }
 
 /* ============================================================

@@ -1337,6 +1337,227 @@ void tq_quantize_weights(tq_model_t* model) {
 }
 
 /* ============================================================
+ * Q4_0 weight quantization — quantize all layer weights post-load
+ *
+ * Converts FP32 weight matrices to Q4_0 (packed 4-bit + per-block float scale,
+ * block_size=32). This reduces memory ~7x: FP32 uses 4 bytes/value,
+ * Q4_0 uses 0.5 byte + 4 bytes/32 = 0.625 bytes/value.
+ *
+ * Each weight matrix [rows, cols] gets:
+ *   - uint8_t qs[rows * (cols/32) * 16] — packed 4-bit values (2 per byte)
+ *   - float scales[rows * (cols/32)]     — per-block scales
+ *
+ * After quantization, the original FP32 pointer is set to NULL.
+ * ============================================================ */
+
+/* Helper: quantize a single weight matrix to Q4 and store into pre-allocated buffer */
+static void quantize_matrix_q4(const float* src, int rows, int cols,
+                                 uint8_t** out_qs, float** out_scales,
+                                 char** buf, size_t* used) {
+    if (!src || rows <= 0 || cols <= 0) {
+        *out_qs = NULL;
+        *out_scales = NULL;
+        return;
+    }
+    int n_blocks_per_row = (cols + 31) / 32;
+    size_t qs_bytes = (size_t)rows * n_blocks_per_row * 16;   /* 16 packed bytes per block */
+    size_t sc_bytes = (size_t)rows * n_blocks_per_row * sizeof(float);
+
+    uint8_t* qs = (uint8_t*)(*buf + *used);
+    *used += qs_bytes;
+    float*   sc = (float*)(*buf + *used);
+    *used += sc_bytes;
+
+    for (int r = 0; r < rows; r++) {
+        tq_quantize_row_q4(src + (size_t)r * cols,
+                            qs + (size_t)r * n_blocks_per_row * 16,
+                            sc + (size_t)r * n_blocks_per_row,
+                            cols);
+    }
+    *out_qs = qs;
+    *out_scales = sc;
+}
+
+/* Calculate total Q4 buffer size needed for all layer weights */
+static size_t calc_q4_buffer_size(const tq_model_t* model) {
+    size_t total = 0;
+    const tq_model_config_t* c = &model->config;
+    int dim = c->hidden_dim;
+    int q_dim = c->n_heads * c->head_dim;
+    int kv_dim = c->n_kv_heads * c->head_dim;
+    int inter = c->intermediate_dim;
+    int qg_dim = c->attn_output_gate ? q_dim * 2 : q_dim;
+
+    /* DeltaNet dimensions */
+    int delta_qkv_dim = 3 * c->delta_n_heads * c->delta_key_head_dim;
+    int delta_z_dim = c->delta_n_heads * c->delta_value_head_dim;
+    int delta_dn = c->delta_n_heads;
+
+    for (int l = 0; l < c->n_layers; l++) {
+        const tq_layer_weights_t* layer = &model->layers[l];
+
+        /* Self-attention weights */
+        if (layer->wq) {
+            int nb = (dim + 31) / 32;
+            total += (size_t)qg_dim * nb * 16;   /* packed Q4 data */
+            total += (size_t)qg_dim * nb * 4;     /* float scales */
+        }
+        if (layer->wk) {
+            int nb = (dim + 31) / 32;
+            total += (size_t)kv_dim * nb * 16;
+            total += (size_t)kv_dim * nb * 4;
+        }
+        if (layer->wv) {
+            int nb = (dim + 31) / 32;
+            total += (size_t)kv_dim * nb * 16;
+            total += (size_t)kv_dim * nb * 4;
+        }
+        if (layer->wo) {
+            int nb = (q_dim + 31) / 32;
+            total += (size_t)dim * nb * 16;
+            total += (size_t)dim * nb * 4;
+        }
+
+        /* FFN weights */
+        if (layer->w_gate) {
+            int nb = (dim + 31) / 32;
+            total += (size_t)inter * nb * 16;
+            total += (size_t)inter * nb * 4;
+        }
+        if (layer->w_up) {
+            int nb = (dim + 31) / 32;
+            total += (size_t)inter * nb * 16;
+            total += (size_t)inter * nb * 4;
+        }
+        if (layer->w_down) {
+            int nb = (inter + 31) / 32;
+            total += (size_t)dim * nb * 16;
+            total += (size_t)dim * nb * 4;
+        }
+
+        /* DeltaNet weights */
+        if (layer->delta_in_proj_qkv) {
+            int nb = (dim + 31) / 32;
+            total += (size_t)delta_qkv_dim * nb * 16;
+            total += (size_t)delta_qkv_dim * nb * 4;
+        }
+        if (layer->delta_in_proj_z) {
+            int nb = (dim + 31) / 32;
+            total += (size_t)delta_z_dim * nb * 16;
+            total += (size_t)delta_z_dim * nb * 4;
+        }
+        if (layer->delta_in_proj_a) {
+            int nb = (dim + 31) / 32;
+            total += (size_t)delta_dn * nb * 16;
+            total += (size_t)delta_dn * nb * 4;
+        }
+        if (layer->delta_in_proj_b) {
+            int nb = (dim + 31) / 32;
+            total += (size_t)delta_dn * nb * 16;
+            total += (size_t)delta_dn * nb * 4;
+        }
+        if (layer->delta_out_proj) {
+            int nb = (delta_z_dim + 31) / 32;
+            total += (size_t)dim * nb * 16;
+            total += (size_t)dim * nb * 4;
+        }
+    }
+    return total;
+}
+
+void tq_quantize_weights_q4(tq_model_t* model) {
+    if (!model || model->use_q4_weights) return;
+
+    const tq_model_config_t* c = &model->config;
+    int dim = c->hidden_dim;
+    int q_dim = c->n_heads * c->head_dim;
+    int kv_dim = c->n_kv_heads * c->head_dim;
+    int inter = c->intermediate_dim;
+    int qg_dim = c->attn_output_gate ? q_dim * 2 : q_dim;
+
+    /* DeltaNet dimensions */
+    int delta_qkv_dim = 3 * c->delta_n_heads * c->delta_key_head_dim;
+    int delta_z_dim = c->delta_n_heads * c->delta_value_head_dim;
+    int delta_dn = c->delta_n_heads;
+
+    size_t buf_size = calc_q4_buffer_size(model);
+    char* buf = (char*)malloc(buf_size);
+    if (!buf) {
+        fprintf(stderr, "tq_quantize_weights_q4: failed to allocate %zu MB for Q4\n",
+                buf_size / (1024 * 1024));
+        return;
+    }
+    size_t used = 0;
+
+    for (int l = 0; l < c->n_layers; l++) {
+        tq_layer_weights_t* layer = &model->layers[l];
+
+        /* Self-attention */
+        quantize_matrix_q4(layer->wq, qg_dim, dim,
+                            &layer->wq_q4, &layer->wq_q4s, &buf, &used);
+        if (layer->wq_q4) layer->wq = NULL;
+
+        quantize_matrix_q4(layer->wk, kv_dim, dim,
+                            &layer->wk_q4, &layer->wk_q4s, &buf, &used);
+        if (layer->wk_q4) layer->wk = NULL;
+
+        quantize_matrix_q4(layer->wv, kv_dim, dim,
+                            &layer->wv_q4, &layer->wv_q4s, &buf, &used);
+        if (layer->wv_q4) layer->wv = NULL;
+
+        quantize_matrix_q4(layer->wo, dim, q_dim,
+                            &layer->wo_q4, &layer->wo_q4s, &buf, &used);
+        if (layer->wo_q4) layer->wo = NULL;
+
+        /* FFN */
+        quantize_matrix_q4(layer->w_gate, inter, dim,
+                            &layer->w_gate_q4, &layer->w_gate_q4s, &buf, &used);
+        if (layer->w_gate_q4) layer->w_gate = NULL;
+
+        quantize_matrix_q4(layer->w_up, inter, dim,
+                            &layer->w_up_q4, &layer->w_up_q4s, &buf, &used);
+        if (layer->w_up_q4) layer->w_up = NULL;
+
+        quantize_matrix_q4(layer->w_down, dim, inter,
+                            &layer->w_down_q4, &layer->w_down_q4s, &buf, &used);
+        if (layer->w_down_q4) layer->w_down = NULL;
+
+        /* DeltaNet */
+        quantize_matrix_q4(layer->delta_in_proj_qkv, delta_qkv_dim, dim,
+                            &layer->delta_in_proj_qkv_q4, &layer->delta_in_proj_qkv_q4s,
+                            &buf, &used);
+        if (layer->delta_in_proj_qkv_q4) layer->delta_in_proj_qkv = NULL;
+
+        quantize_matrix_q4(layer->delta_in_proj_z, delta_z_dim, dim,
+                            &layer->delta_in_proj_z_q4, &layer->delta_in_proj_z_q4s,
+                            &buf, &used);
+        if (layer->delta_in_proj_z_q4) layer->delta_in_proj_z = NULL;
+
+        quantize_matrix_q4(layer->delta_in_proj_a, delta_dn, dim,
+                            &layer->delta_in_proj_a_q4, &layer->delta_in_proj_a_q4s,
+                            &buf, &used);
+        if (layer->delta_in_proj_a_q4) layer->delta_in_proj_a = NULL;
+
+        quantize_matrix_q4(layer->delta_in_proj_b, delta_dn, dim,
+                            &layer->delta_in_proj_b_q4, &layer->delta_in_proj_b_q4s,
+                            &buf, &used);
+        if (layer->delta_in_proj_b_q4) layer->delta_in_proj_b = NULL;
+
+        quantize_matrix_q4(layer->delta_out_proj, dim, delta_z_dim,
+                            &layer->delta_out_proj_q4, &layer->delta_out_proj_q4s,
+                            &buf, &used);
+        if (layer->delta_out_proj_q4) layer->delta_out_proj = NULL;
+    }
+
+    model->use_q4_weights = 1;
+    model->_q4_data = buf;
+    model->_q4_size = used;
+
+    fprintf(stderr, "tq_quantize_weights_q4: quantized to Q4 (%zu MB, was ~%zu MB FP32)\n",
+            used / (1024 * 1024), used * 8 / (1024 * 1024));
+}
+
+/* ============================================================
  * Free model
  * ============================================================ */
 void tq_free_model(tq_model_t* model) {
@@ -1350,6 +1571,7 @@ void tq_free_model(tq_model_t* model) {
 
     free(model->_converted_data);
     free(model->_q8_data);
+    free(model->_q4_data);
     free(model->attn_layer_indices);
     free(model->layers);
     free(model);
