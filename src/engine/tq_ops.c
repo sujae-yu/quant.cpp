@@ -901,6 +901,8 @@ tq_gen_config_t tq_default_gen_config(void) {
     config.max_tokens = 256;
     config.kv_type = TQ_TYPE_UNIFORM_4B;
     config.n_threads = 1;
+    config.rep_penalty = 1.1f;
+    config.rep_window = 32;
     config.on_token = NULL;
     config.user_data = NULL;
     return config;

@@ -206,7 +206,7 @@ int main(int argc, char** argv) {
     fprintf(stderr, "\n---\n");
     if (n_generated > 0 && elapsed > 0.0) {
         double tok_per_sec = (double)n_generated / elapsed;
-        const char* wq_name = quant_mode == 4 ? "Q4" : (quant_mode == 8 ? "Q8" : "FP32");
+        const char* wq_name = model->use_q4_weights ? "Q4" : (model->use_q8_weights ? "Q8" : "FP32");
         fprintf(stderr, "%d tokens in %.1fs (%.1f tok/s, %d threads, weights=%s, kv=%s)\n",
                 n_generated, elapsed, tok_per_sec, tq_get_threads(), wq_name,
                 kv_type < TQ_TYPE_COUNT ? tq_type_name(kv_type) : "fp32");

@@ -196,6 +196,8 @@ typedef struct {
     int max_tokens;
     tq_type kv_type;     /* KV cache quantization type */
     int n_threads;
+    float rep_penalty;    /* repetition penalty (default: 1.1, 1.0 = disabled) */
+    int rep_window;       /* how many recent tokens to penalize (default: 32) */
     /* Callback for streaming output */
     void (*on_token)(const char* text, void* user_data);
     void* user_data;

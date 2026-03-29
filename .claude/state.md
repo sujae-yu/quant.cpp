@@ -1,6 +1,6 @@
 # TurboQuant.cpp — Session State
 
-**Last updated**: 2026-03-29 (v0.9.2 TQM format for instant model loading)
+**Last updated**: 2026-03-29 (v0.9.3 bugfixes: weights label, think filter, repetition penalty)
 **Last commit**: pending
 
 ## Speed Progression
@@ -14,7 +14,7 @@ llama.cpp Q4_K_M:  ~50   tok/s  ← target
 ```
 
 ## What Works
-- All 19 tests pass, zero warnings
+- All 20 tests pass, zero warnings
 - Q4 weights: 270 MB, Q8: 533 MB (vs 2.1 GB FP32)
 - Self-contained C inference engine, 0 dependencies
 - DeltaNet + Self-Attention hybrid forward pass
@@ -114,6 +114,31 @@ This takes ~6s for an 0.8B model. Goal: <0.5s via pre-quantized mmap-ready forma
 - `tools/tq_run.c` — auto-load embedded tokenizer from TQM
 - `tests/test_tqm.cpp` — NEW test file (6 tests)
 - `CMakeLists.txt` — added tq_convert build target
+
+## v0.9.3 Changes — Inference Quality Fixes
+
+### Fix 1: TQM weights label shows "Q4" instead of "FP32"
+- `tools/tq_run.c`: Changed `wq_name` to check `model->use_q4_weights` / `model->use_q8_weights`
+  instead of the CLI `quant_mode` flag, so TQM-loaded models correctly report "Q4"
+- `tq_load_tqm()` already set `model->use_q4_weights = 1` (no change needed)
+
+### Fix 2: Filter `<think>` tags from output
+- `src/engine/tq_generate.c`: After `tq_decode()`, skip tokens containing `<think>` or `</think>`
+- Prevents Qwen3.5 thinking-mode artifacts from appearing in generated output
+
+### Fix 3: Repetition penalty to prevent degenerate loops
+- Added `rep_penalty` (float, default 1.1) and `rep_window` (int, default 32) to `tq_gen_config_t`
+- `include/turboquant/tq_engine.h`: New fields in gen config struct
+- `src/engine/tq_ops.c`: Default values in `tq_default_gen_config()`
+- `src/engine/tq_generate.c`: Circular buffer tracks recent tokens (up to 64);
+  before each `tq_sample_topp()` call, penalizes logits of recently generated tokens
+  (positive logits divided by penalty, negative logits multiplied)
+
+### Files Modified
+- `include/turboquant/tq_engine.h` — rep_penalty, rep_window fields in tq_gen_config_t
+- `src/engine/tq_generate.c` — think filter + repetition penalty logic
+- `src/engine/tq_ops.c` — default rep_penalty=1.1, rep_window=32
+- `tools/tq_run.c` — weights label based on model flags
 
 ## What Needs Work
 1. Measure actual speed improvement (need model file for tq_run)

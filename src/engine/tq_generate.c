@@ -167,12 +167,46 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
         tq_forward(model, state, prompt_tokens[i], i);
     }
 
+    /* Repetition penalty setup */
+    int vocab_size = model->config.vocab_size;
+    float rep_penalty = config->rep_penalty;
+    int rep_window = config->rep_window;
+    if (rep_window > 64) rep_window = 64;
+    int recent_tokens[64];
+    int recent_count = 0;
+
+    /* Seed recent tokens with tail of prompt for better penalty coverage */
+    for (int i = (n_prompt > rep_window ? n_prompt - rep_window : 0); i < n_prompt; i++) {
+        recent_tokens[recent_count % 64] = prompt_tokens[i];
+        recent_count++;
+    }
+
+    /* Apply repetition penalty to logits before first sample */
+    if (rep_penalty > 1.0f) {
+        int window = recent_count < rep_window ? recent_count : rep_window;
+        for (int r = 0; r < window; r++) {
+            int idx = (recent_count - 1 - r) % 64;
+            if (idx < 0) idx += 64;
+            int tok = recent_tokens[idx];
+            if (tok >= 0 && tok < vocab_size) {
+                if (state->logits[tok] > 0)
+                    state->logits[tok] /= rep_penalty;
+                else
+                    state->logits[tok] *= rep_penalty;
+            }
+        }
+    }
+
     /* Sample first generated token */
     int pos = n_prompt;
     unsigned long long rng_state = 42;
-    int next_token = tq_sample_topp(state->logits, model->config.vocab_size,
+    int next_token = tq_sample_topp(state->logits, vocab_size,
                                      config->temperature, config->top_p,
                                      &rng_state);
+
+    /* Record first sampled token */
+    recent_tokens[recent_count % 64] = next_token;
+    recent_count++;
 
     int generated = 0;
     int output_pos = 0;
@@ -194,6 +228,12 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
         /* Decode token to text */
         if (tokenizer) {
             const char* piece = tq_decode(tokenizer, prev_token, next_token);
+
+            /* Skip thinking tokens (e.g. Qwen3.5 <think>...</think>) */
+            if (piece && (strstr(piece, "<think>") || strstr(piece, "</think>"))) {
+                piece = "";
+            }
+
             int piece_len = (int)strlen(piece);
 
             /* Stream callback */
@@ -214,10 +254,30 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
         pos++;
         generated++;
 
+        /* Apply repetition penalty before sampling */
+        if (rep_penalty > 1.0f) {
+            int window = recent_count < rep_window ? recent_count : rep_window;
+            for (int r = 0; r < window; r++) {
+                int idx = (recent_count - 1 - r) % 64;
+                if (idx < 0) idx += 64;
+                int tok = recent_tokens[idx];
+                if (tok >= 0 && tok < vocab_size) {
+                    if (state->logits[tok] > 0)
+                        state->logits[tok] /= rep_penalty;
+                    else
+                        state->logits[tok] *= rep_penalty;
+                }
+            }
+        }
+
         /* Sample next token */
-        next_token = tq_sample_topp(state->logits, model->config.vocab_size,
+        next_token = tq_sample_topp(state->logits, vocab_size,
                                      config->temperature, config->top_p,
                                      &rng_state);
+
+        /* Record sampled token for repetition penalty */
+        recent_tokens[recent_count % 64] = next_token;
+        recent_count++;
     }
 
     /* Null-terminate output */
