@@ -616,6 +616,254 @@ TEST(TqOps, DefaultGenConfig) {
 }
 
 /* ============================================================
+ * Q8 quantization + matmul tests
+ * ============================================================ */
+
+TEST(TqOps, QuantizeRowQ8Basic) {
+    /* Quantize a simple row and verify round-trip */
+    const int n = 64;
+    std::vector<float> src(n);
+    std::vector<int8_t> qs(n);
+    std::vector<float> scales(n / 32);
+
+    fill_random(src.data(), n, 42);
+
+    tq_quantize_row_q8(src.data(), qs.data(), scales.data(), n);
+
+    /* Dequantize and check MSE */
+    double mse = 0.0;
+    for (int b = 0; b < n / 32; b++) {
+        for (int j = 0; j < 32; j++) {
+            float deq = (float)qs[b * 32 + j] * scales[b];
+            double err = (double)(src[b * 32 + j] - deq);
+            mse += err * err;
+        }
+    }
+    mse /= n;
+    /* Q8 should have very low error (< 0.001 for values in [-1, 1]) */
+    EXPECT_LT(mse, 0.001);
+}
+
+TEST(TqOps, QuantizeRowQ8Zero) {
+    /* All zeros */
+    const int n = 32;
+    std::vector<float> src(n, 0.0f);
+    std::vector<int8_t> qs(n);
+    std::vector<float> scales(1);
+
+    tq_quantize_row_q8(src.data(), qs.data(), scales.data(), n);
+
+    EXPECT_NEAR(scales[0], 0.0f, 1e-10f);
+    for (int i = 0; i < n; i++) {
+        EXPECT_EQ(qs[i], 0);
+    }
+}
+
+TEST(TqOps, MatMulQ8Small) {
+    /* Test Q8 matmul against reference FP32 matmul */
+    const int n = 4, d = 64;  /* d must be multiple of 32 */
+    std::vector<float> w(n * d), x(d), out_fp32(n), out_q8(n);
+    std::vector<int8_t> w_qs(n * d);
+    std::vector<float> w_scales(n * (d / 32));
+
+    fill_random(w.data(), n * d, 100);
+    fill_random(x.data(), d, 200);
+
+    /* Reference FP32 */
+    tq_matmul(out_fp32.data(), x.data(), w.data(), n, d);
+
+    /* Quantize weights */
+    for (int i = 0; i < n; i++) {
+        tq_quantize_row_q8(w.data() + i * d,
+                            w_qs.data() + i * d,
+                            w_scales.data() + i * (d / 32),
+                            d);
+    }
+
+    /* Q8 matmul */
+    tq_matmul_q8(out_q8.data(), x.data(), w_qs.data(), w_scales.data(), n, d);
+
+    /* Q8 should be close to FP32 */
+    for (int i = 0; i < n; i++) {
+        EXPECT_NEAR(out_q8[i], out_fp32[i],
+                    std::abs(out_fp32[i]) * 0.02f + 0.1f)
+            << "Mismatch at index " << i;
+    }
+}
+
+TEST(TqOps, MatMulQ8Large) {
+    /* Realistic size: 128 x 256 */
+    const int n = 128, d = 256;
+    std::vector<float> w(n * d), x(d), out_fp32(n), out_q8(n);
+    std::vector<int8_t> w_qs(n * d);
+    std::vector<float> w_scales(n * (d / 32));
+
+    fill_random(w.data(), n * d, 300);
+    fill_random(x.data(), d, 400);
+
+    tq_matmul(out_fp32.data(), x.data(), w.data(), n, d);
+
+    for (int i = 0; i < n; i++) {
+        tq_quantize_row_q8(w.data() + i * d,
+                            w_qs.data() + i * d,
+                            w_scales.data() + i * (d / 32),
+                            d);
+    }
+
+    tq_matmul_q8(out_q8.data(), x.data(), w_qs.data(), w_scales.data(), n, d);
+
+    /* Compute cosine similarity between Q8 and FP32 outputs */
+    double dot = 0, norm_a = 0, norm_b = 0;
+    for (int i = 0; i < n; i++) {
+        dot += (double)out_q8[i] * out_fp32[i];
+        norm_a += (double)out_q8[i] * out_q8[i];
+        norm_b += (double)out_fp32[i] * out_fp32[i];
+    }
+    double cosine = dot / (std::sqrt(norm_a) * std::sqrt(norm_b) + 1e-12);
+    EXPECT_GT(cosine, 0.999) << "Q8 vs FP32 cosine similarity too low";
+
+    /* Also check that absolute errors are bounded */
+    for (int i = 0; i < n; i++) {
+        EXPECT_NEAR(out_q8[i], out_fp32[i],
+                    std::abs(out_fp32[i]) * 0.02f + 0.5f)
+            << "Mismatch at row " << i;
+    }
+}
+
+TEST(TqOps, MatMulQ8MultiThreaded) {
+    /* Large enough to trigger multi-threading (n >= 256) */
+    const int n = 512, d = 256;
+    std::vector<float> w(n * d), x(d), out_fp32(n), out_q8(n);
+    std::vector<int8_t> w_qs(n * d);
+    std::vector<float> w_scales(n * (d / 32));
+
+    fill_random(w.data(), n * d, 500);
+    fill_random(x.data(), d, 600);
+
+    tq_matmul(out_fp32.data(), x.data(), w.data(), n, d);
+
+    for (int i = 0; i < n; i++) {
+        tq_quantize_row_q8(w.data() + i * d,
+                            w_qs.data() + i * d,
+                            w_scales.data() + i * (d / 32),
+                            d);
+    }
+
+    tq_set_threads(4);
+    tq_matmul_q8(out_q8.data(), x.data(), w_qs.data(), w_scales.data(), n, d);
+    tq_set_threads(1);
+
+    for (int i = 0; i < n; i++) {
+        EXPECT_NEAR(out_q8[i], out_fp32[i],
+                    std::abs(out_fp32[i]) * 0.02f + 0.5f)
+            << "Mismatch at row " << i;
+    }
+}
+
+TEST(TqOps, QuantizeWeightsMiniModel) {
+    /* Build a tiny model and run tq_quantize_weights, then forward */
+    tq_model_t model;
+    memset(&model, 0, sizeof(model));
+
+    model.config.n_layers = 1;
+    model.config.hidden_dim = 64;  /* must be multiple of 32 for Q8 */
+    model.config.intermediate_dim = 128;
+    model.config.n_heads = 2;
+    model.config.n_kv_heads = 2;
+    model.config.head_dim = 32;
+    model.config.vocab_size = 10;
+    model.config.max_seq_len = 16;
+    model.config.rope_freq_base = 10000.0f;
+    model.config.rms_norm_eps = 1e-5f;
+
+    int dim = model.config.hidden_dim;
+    int kv_dim = model.config.n_kv_heads * model.config.head_dim;
+    int q_dim = model.config.n_heads * model.config.head_dim;
+    int inter = model.config.intermediate_dim;
+    int vocab = model.config.vocab_size;
+
+    std::mt19937 rng(42);
+    std::normal_distribution<float> dist(0.0f, 0.1f);
+    auto fill_alloc = [&](int size) -> float* {
+        float* p = new float[size];
+        for (int i = 0; i < size; i++) p[i] = dist(rng);
+        return p;
+    };
+
+    model.token_embedding = fill_alloc(vocab * dim);
+    model.layers = new tq_layer_weights_t[1];
+    memset(model.layers, 0, sizeof(tq_layer_weights_t));
+
+    tq_layer_weights_t* layer = &model.layers[0];
+    layer->attn_norm = new float[dim];
+    layer->ffn_norm  = new float[dim];
+    for (int i = 0; i < dim; i++) {
+        layer->attn_norm[i] = 1.0f;
+        layer->ffn_norm[i]  = 1.0f;
+    }
+    layer->wq     = fill_alloc(q_dim * dim);
+    layer->wk     = fill_alloc(kv_dim * dim);
+    layer->wv     = fill_alloc(kv_dim * dim);
+    layer->wo     = fill_alloc(dim * q_dim);
+    layer->w_gate = fill_alloc(inter * dim);
+    layer->w_up   = fill_alloc(inter * dim);
+    layer->w_down = fill_alloc(dim * inter);
+
+    model.output_norm = new float[dim];
+    for (int i = 0; i < dim; i++) model.output_norm[i] = 1.0f;
+    model.output_weight = fill_alloc(vocab * dim);
+
+    /* Run FP32 forward first */
+    tq_state_t* state_fp32 = tq_create_state(&model.config, TQ_TYPE_UNIFORM_4B);
+    ASSERT_NE(state_fp32, nullptr);
+    float* logits_fp32 = tq_forward(&model, state_fp32, 3, 0);
+    std::vector<float> logits_fp32_copy(logits_fp32, logits_fp32 + vocab);
+
+    /* Now quantize and run Q8 forward */
+    tq_quantize_weights(&model);
+    EXPECT_EQ(model.use_q8_weights, 1);
+
+    /* FP32 weight pointers should be NULL */
+    EXPECT_EQ(model.layers[0].wq, nullptr);
+    EXPECT_EQ(model.layers[0].w_gate, nullptr);
+
+    /* Q8 pointers should be set */
+    EXPECT_NE(model.layers[0].wq_q8, nullptr);
+    EXPECT_NE(model.layers[0].w_gate_q8, nullptr);
+
+    tq_state_t* state_q8 = tq_create_state(&model.config, TQ_TYPE_UNIFORM_4B);
+    ASSERT_NE(state_q8, nullptr);
+    float* logits_q8 = tq_forward(&model, state_q8, 3, 0);
+
+    /* Logits should be finite and close to FP32 */
+    for (int i = 0; i < vocab; i++) {
+        EXPECT_TRUE(std::isfinite(logits_q8[i]))
+            << "logit_q8[" << i << "] = " << logits_q8[i];
+    }
+
+    /* Argmax should agree (Q8 is very close to FP32) */
+    int argmax_fp32 = tq_sample_argmax(logits_fp32_copy.data(), vocab);
+    int argmax_q8 = tq_sample_argmax(logits_q8, vocab);
+    EXPECT_EQ(argmax_fp32, argmax_q8)
+        << "FP32 argmax=" << argmax_fp32 << " Q8 argmax=" << argmax_q8;
+
+    /* Cleanup */
+    tq_free_state(state_fp32);
+    tq_free_state(state_q8);
+    free(model._q8_data);
+    delete[] model.token_embedding;
+    delete[] layer->attn_norm;
+    delete[] layer->ffn_norm;
+    /* Note: FP32 weight pointers were allocated with new[] but are now NULL.
+     * The original allocations leak here since quantize_weights set them to NULL.
+     * In production, the model loader uses mmap/conversion buffers which are
+     * freed by tq_free_model. For this test, we accept the leak. */
+    delete[] model.output_norm;
+    delete[] model.output_weight;
+    delete[] model.layers;
+}
+
+/* ============================================================
  * Integration: mini forward pass test
  *
  * Creates a tiny model (1 layer, dim=8) and runs a forward pass.

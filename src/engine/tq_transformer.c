@@ -246,14 +246,28 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
     float* conv_st = s->conv_state + (size_t)l * qkv_dim * conv_buf_len;
 
     /* Step 1: Project input through QKV and Z */
-    tq_matmul(s->delta_qkv, s->xb, layer->delta_in_proj_qkv, qkv_dim, dim);
-    tq_matmul(s->delta_z, s->xb, layer->delta_in_proj_z, z_dim, dim);
+    if (layer->delta_in_proj_qkv_q8)
+        tq_matmul_q8(s->delta_qkv, s->xb, layer->delta_in_proj_qkv_q8, layer->delta_in_proj_qkv_q8s, qkv_dim, dim);
+    else
+        tq_matmul(s->delta_qkv, s->xb, layer->delta_in_proj_qkv, qkv_dim, dim);
+
+    if (layer->delta_in_proj_z_q8)
+        tq_matmul_q8(s->delta_z, s->xb, layer->delta_in_proj_z_q8, layer->delta_in_proj_z_q8s, z_dim, dim);
+    else
+        tq_matmul(s->delta_z, s->xb, layer->delta_in_proj_z, z_dim, dim);
 
     /* Step 2: Project alpha and beta */
     /* alpha = in_proj_a @ x  -> [dn] */
-    tq_matmul(s->delta_ab, s->xb, layer->delta_in_proj_a, dn, dim);
+    if (layer->delta_in_proj_a_q8)
+        tq_matmul_q8(s->delta_ab, s->xb, layer->delta_in_proj_a_q8, layer->delta_in_proj_a_q8s, dn, dim);
+    else
+        tq_matmul(s->delta_ab, s->xb, layer->delta_in_proj_a, dn, dim);
+
     /* beta = sigmoid(in_proj_b @ x) -> [dn] */
-    tq_matmul(s->delta_ab + dn, s->xb, layer->delta_in_proj_b, dn, dim);
+    if (layer->delta_in_proj_b_q8)
+        tq_matmul_q8(s->delta_ab + dn, s->xb, layer->delta_in_proj_b_q8, layer->delta_in_proj_b_q8s, dn, dim);
+    else
+        tq_matmul(s->delta_ab + dn, s->xb, layer->delta_in_proj_b, dn, dim);
     for (int h = 0; h < dn; h++) {
         s->delta_ab[dn + h] = 1.0f / (1.0f + expf(-s->delta_ab[dn + h]));
     }
@@ -391,7 +405,10 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
     }
 
     /* Output projection: [dim, z_dim] @ delta_out[z_dim] -> xb2[dim] */
-    tq_matmul(s->xb2, s->delta_out, layer->delta_out_proj, dim, z_dim);
+    if (layer->delta_out_proj_q8)
+        tq_matmul_q8(s->xb2, s->delta_out, layer->delta_out_proj_q8, layer->delta_out_proj_q8s, dim, z_dim);
+    else
+        tq_matmul(s->xb2, s->delta_out, layer->delta_out_proj, dim, z_dim);
 
     /* Residual connection */
     tq_add(s->x, s->x, s->xb2, dim);
@@ -421,7 +438,10 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
          *   [Q_head0(head_dim), Gate_head0(head_dim), Q_head1, Gate_head1, ...]
          * We need to deinterleave into Q and gate. */
         int qg_dim = n_heads * head_dim * 2;
-        tq_matmul(s->xb2, s->xb, layer->wq, qg_dim, dim);
+        if (layer->wq_q8)
+            tq_matmul_q8(s->xb2, s->xb, layer->wq_q8, layer->wq_q8s, qg_dim, dim);
+        else
+            tq_matmul(s->xb2, s->xb, layer->wq, qg_dim, dim);
         /* Deinterleave: extract Q and gate from interleaved layout */
         gate_q = s->xb2; /* reuse xb2 for gate after we extract Q */
         /* We need a temp buffer. Use att buffer as it's large enough. */
@@ -436,10 +456,19 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
         }
         gate_q = gate_tmp;
     } else {
-        tq_matmul(s->q, s->xb, layer->wq, n_heads * head_dim, dim);
+        if (layer->wq_q8)
+            tq_matmul_q8(s->q, s->xb, layer->wq_q8, layer->wq_q8s, n_heads * head_dim, dim);
+        else
+            tq_matmul(s->q, s->xb, layer->wq, n_heads * head_dim, dim);
     }
-    tq_matmul(s->k, s->xb, layer->wk, kv_dim, dim);
-    tq_matmul(s->v, s->xb, layer->wv, kv_dim, dim);
+    if (layer->wk_q8)
+        tq_matmul_q8(s->k, s->xb, layer->wk_q8, layer->wk_q8s, kv_dim, dim);
+    else
+        tq_matmul(s->k, s->xb, layer->wk, kv_dim, dim);
+    if (layer->wv_q8)
+        tq_matmul_q8(s->v, s->xb, layer->wv_q8, layer->wv_q8s, kv_dim, dim);
+    else
+        tq_matmul(s->v, s->xb, layer->wv, kv_dim, dim);
 
     /* Apply QK-norm if present (per-head RMSNorm) */
     if (layer->q_norm) {
@@ -595,7 +624,10 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
     }
 
     /* Output projection */
-    tq_matmul(s->xb2, s->xb, layer->wo, dim, n_heads * head_dim);
+    if (layer->wo_q8)
+        tq_matmul_q8(s->xb2, s->xb, layer->wo_q8, layer->wo_q8s, dim, n_heads * head_dim);
+    else
+        tq_matmul(s->xb2, s->xb, layer->wo, dim, n_heads * head_dim);
 
     /* Residual */
     tq_add(s->x, s->x, s->xb2, dim);
@@ -651,20 +683,33 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
         if (layer->delta_a_log) {
             /* DeltaNet layer */
             deltanet_forward(model, s, l);
-        } else if (layer->wq && layer->wk && layer->wv) {
+        } else if ((layer->wq || layer->wq_q8) &&
+                   (layer->wk || layer->wk_q8) &&
+                   (layer->wv || layer->wv_q8)) {
             /* Standard self-attention layer */
             self_attn_forward(model, s, l, pos);
         }
         /* else: skip (should not happen for valid models) */
 
         /* FFN Block (SwiGLU) — present on ALL layers */
-        if (layer->w_gate && layer->w_up && layer->w_down) {
+        if ((layer->w_gate || layer->w_gate_q8) &&
+            (layer->w_up || layer->w_up_q8) &&
+            (layer->w_down || layer->w_down_q8)) {
             tq_rmsnorm(s->xb, s->x, layer->ffn_norm, dim, c->rms_norm_eps);
-            tq_matmul(s->hb,  s->xb, layer->w_gate, c->intermediate_dim, dim);
-            tq_matmul(s->hb2, s->xb, layer->w_up,   c->intermediate_dim, dim);
+            if (layer->w_gate_q8)
+                tq_matmul_q8(s->hb,  s->xb, layer->w_gate_q8, layer->w_gate_q8s, c->intermediate_dim, dim);
+            else
+                tq_matmul(s->hb,  s->xb, layer->w_gate, c->intermediate_dim, dim);
+            if (layer->w_up_q8)
+                tq_matmul_q8(s->hb2, s->xb, layer->w_up_q8, layer->w_up_q8s, c->intermediate_dim, dim);
+            else
+                tq_matmul(s->hb2, s->xb, layer->w_up,   c->intermediate_dim, dim);
             tq_silu(s->hb, c->intermediate_dim);
             tq_mul(s->hb, s->hb, s->hb2, c->intermediate_dim);
-            tq_matmul(s->xb2, s->hb, layer->w_down, dim, c->intermediate_dim);
+            if (layer->w_down_q8)
+                tq_matmul_q8(s->xb2, s->hb, layer->w_down_q8, layer->w_down_q8s, dim, c->intermediate_dim);
+            else
+                tq_matmul(s->xb2, s->hb, layer->w_down, dim, c->intermediate_dim);
             tq_add(s->x, s->x, s->xb2, dim);
         }
     }

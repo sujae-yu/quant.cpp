@@ -57,6 +57,24 @@ typedef struct {
     float* w_up;          /* [intermediate_dim, hidden_dim] */
     float* w_down;        /* [hidden_dim, intermediate_dim] */
 
+    /* Q8 quantized weights: int8 data + per-block scales (block_size=32)
+     * When use_q8 is set, these replace the FP32 weight pointers above.
+     * The FP32 pointers (wq, wk, etc.) are set to NULL after Q8 conversion. */
+    int8_t*  wq_q8;     float* wq_q8s;    /* Q8 q_proj: [n_heads*head_dim, hidden_dim] */
+    int8_t*  wk_q8;     float* wk_q8s;    /* Q8 k_proj: [n_kv_heads*head_dim, hidden_dim] */
+    int8_t*  wv_q8;     float* wv_q8s;    /* Q8 v_proj: [n_kv_heads*head_dim, hidden_dim] */
+    int8_t*  wo_q8;     float* wo_q8s;    /* Q8 o_proj: [hidden_dim, n_heads*head_dim] */
+    int8_t*  w_gate_q8; float* w_gate_q8s;/* Q8 gate_proj */
+    int8_t*  w_up_q8;   float* w_up_q8s;  /* Q8 up_proj */
+    int8_t*  w_down_q8; float* w_down_q8s;/* Q8 down_proj */
+
+    /* DeltaNet Q8 weights */
+    int8_t*  delta_in_proj_qkv_q8; float* delta_in_proj_qkv_q8s;
+    int8_t*  delta_in_proj_z_q8;   float* delta_in_proj_z_q8s;
+    int8_t*  delta_in_proj_a_q8;   float* delta_in_proj_a_q8s;
+    int8_t*  delta_in_proj_b_q8;   float* delta_in_proj_b_q8s;
+    int8_t*  delta_out_proj_q8;    float* delta_out_proj_q8s;
+
     /* DeltaNet (linear_attention) weights (NULL for self_attn layers) */
     float* delta_a_log;       /* [delta_n_heads] decay parameter (log scale) */
     float* delta_conv1d;      /* [qkv_dim, 1, conv_width] */
@@ -90,6 +108,11 @@ typedef struct {
     /* Hybrid architecture support (e.g., Qwen3.5 with DeltaNet layers) */
     int n_attn_layers;        /* number of layers with standard self_attn */
     int* attn_layer_indices;  /* which layer indices have self_attn [n_attn_layers] */
+
+    /* Q8 weight quantization */
+    int use_q8_weights;       /* 1 if layer weights are Q8-quantized */
+    void* _q8_data;           /* heap buffer for all Q8 quantized weights */
+    size_t _q8_size;
 
     /* Memory management */
     void* _mmap_data;
@@ -204,6 +227,10 @@ const char* tq_decode(const tq_tokenizer_t* tok, int prev_token, int token);
 /* Tensor operations (exported for testing/reuse) */
 void tq_matmul(float* out, const float* x, const float* w, int n, int d);
 void tq_matmul_bf16(float* out, const float* x, const uint16_t* w_bf16, int n, int d);
+void tq_matmul_q8(float* out, const float* x, const int8_t* w_qs, const float* w_scales,
+                   int n, int d);
+void tq_quantize_row_q8(const float* src, int8_t* dst_qs, float* dst_scales, int n);
+void tq_quantize_weights(tq_model_t* model);
 void tq_rmsnorm(float* out, const float* x, const float* weight, int n, float eps);
 void tq_rope(float* q, float* k, int pos, int head_dim,
              int n_heads, int n_kv_heads, float freq_base);

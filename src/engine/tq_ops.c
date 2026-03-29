@@ -137,6 +137,203 @@ void tq_matmul(float* out, const float* x, const float* w, int n, int d) {
 }
 
 /* ============================================================
+ * Q8 quantization: float -> int8 + per-block scale (block_size=32)
+ *
+ * For each block of 32 values:
+ *   scale = max(|x_i|) / 127
+ *   q_i = round(x_i / scale)
+ * ============================================================ */
+void tq_quantize_row_q8(const float* src, int8_t* dst_qs, float* dst_scales, int n) {
+    int n_blocks = n / 32;
+    for (int b = 0; b < n_blocks; b++) {
+        const float* block = src + b * 32;
+        float amax = 0.0f;
+#ifdef __ARM_NEON
+        float32x4_t vmax = vdupq_n_f32(0.0f);
+        for (int j = 0; j < 32; j += 4) {
+            float32x4_t v = vld1q_f32(block + j);
+            vmax = vmaxq_f32(vmax, vabsq_f32(v));
+        }
+        amax = vmaxvq_f32(vmax);
+#else
+        for (int j = 0; j < 32; j++) {
+            float a = fabsf(block[j]);
+            if (a > amax) amax = a;
+        }
+#endif
+        float scale = amax / 127.0f;
+        dst_scales[b] = scale;
+        float inv = (scale > 1e-10f) ? 1.0f / scale : 0.0f;
+        int8_t* qb = dst_qs + b * 32;
+#ifdef __ARM_NEON
+        float32x4_t vinv = vdupq_n_f32(inv);
+        for (int j = 0; j < 32; j += 4) {
+            float32x4_t v = vld1q_f32(block + j);
+            float32x4_t scaled = vmulq_f32(v, vinv);
+            /* Round to nearest and convert to int32 */
+            int32x4_t vi = vcvtnq_s32_f32(scaled);
+            /* Narrow to int16 then int8 */
+            int16x4_t v16 = vmovn_s32(vi);
+            int16x8_t v16_wide = vcombine_s16(v16, v16);
+            int8x8_t v8 = vmovn_s16(v16_wide);
+            /* Store only 4 bytes */
+            qb[j]   = vget_lane_s8(v8, 0);
+            qb[j+1] = vget_lane_s8(v8, 1);
+            qb[j+2] = vget_lane_s8(v8, 2);
+            qb[j+3] = vget_lane_s8(v8, 3);
+        }
+#else
+        for (int j = 0; j < 32; j++) {
+            qb[j] = (int8_t)roundf(block[j] * inv);
+        }
+#endif
+    }
+    /* Handle remainder (if n is not multiple of 32) */
+    int remainder = n - n_blocks * 32;
+    if (remainder > 0) {
+        const float* block = src + n_blocks * 32;
+        float amax = 0.0f;
+        for (int j = 0; j < remainder; j++) {
+            float a = fabsf(block[j]);
+            if (a > amax) amax = a;
+        }
+        float scale = amax / 127.0f;
+        dst_scales[n_blocks] = scale;
+        float inv = (scale > 1e-10f) ? 1.0f / scale : 0.0f;
+        int8_t* qb = dst_qs + n_blocks * 32;
+        for (int j = 0; j < remainder; j++) {
+            qb[j] = (int8_t)roundf(block[j] * inv);
+        }
+    }
+}
+
+/* ============================================================
+ * Q8 matmul: w is Q8 [n, d], x is FP32 [d], out is FP32 [n]
+ *
+ * For each output row i:
+ *   out[i] = sum over blocks { scale[b] * sum_j(w_q8[j] * x[j]) }
+ *
+ * Block size = 32, so n_blocks = d / 32.
+ * ============================================================ */
+
+typedef struct {
+    float* out;
+    const float* x;
+    const int8_t* w_qs;
+    const float* w_scales;
+    int start_row;
+    int end_row;
+    int d;
+} matmul_q8_task_t;
+
+static void matmul_q8_rows(float* out, const float* x,
+                            const int8_t* w_qs, const float* w_scales,
+                            int start_row, int end_row, int d) {
+    int n_blocks = d / 32;
+    for (int i = start_row; i < end_row; i++) {
+        const int8_t* wi = w_qs + (size_t)i * d;
+        const float* si = w_scales + (size_t)i * n_blocks;
+        float sum = 0.0f;
+#ifdef __ARM_NEON
+        for (int b = 0; b < n_blocks; b++) {
+            const int8_t* qb = wi + b * 32;
+            const float* xb = x + b * 32;
+            float block_sum = 0.0f;
+            /* Process 16 elements at a time using NEON int8 dot product:
+             * Load 16 int8 weights, convert to float, multiply with x, accumulate */
+            float32x4_t acc0 = vdupq_n_f32(0.0f);
+            float32x4_t acc1 = vdupq_n_f32(0.0f);
+            float32x4_t acc2 = vdupq_n_f32(0.0f);
+            float32x4_t acc3 = vdupq_n_f32(0.0f);
+            /* First 16: convert int8 -> int16 -> int32 -> float, then fma */
+            int8x16_t vq0 = vld1q_s8(qb);
+            int8x16_t vq1 = vld1q_s8(qb + 16);
+
+            /* Expand first 16 int8 to 4x float32x4 */
+            int16x8_t v16_lo = vmovl_s8(vget_low_s8(vq0));
+            int16x8_t v16_hi = vmovl_s8(vget_high_s8(vq0));
+            float32x4_t fq0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_lo)));
+            float32x4_t fq1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v16_lo)));
+            float32x4_t fq2 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_hi)));
+            float32x4_t fq3 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v16_hi)));
+            acc0 = vfmaq_f32(acc0, fq0, vld1q_f32(xb));
+            acc1 = vfmaq_f32(acc1, fq1, vld1q_f32(xb + 4));
+            acc2 = vfmaq_f32(acc2, fq2, vld1q_f32(xb + 8));
+            acc3 = vfmaq_f32(acc3, fq3, vld1q_f32(xb + 12));
+
+            /* Expand next 16 int8 to 4x float32x4 */
+            v16_lo = vmovl_s8(vget_low_s8(vq1));
+            v16_hi = vmovl_s8(vget_high_s8(vq1));
+            fq0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_lo)));
+            fq1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v16_lo)));
+            fq2 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_hi)));
+            fq3 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v16_hi)));
+            acc0 = vfmaq_f32(acc0, fq0, vld1q_f32(xb + 16));
+            acc1 = vfmaq_f32(acc1, fq1, vld1q_f32(xb + 20));
+            acc2 = vfmaq_f32(acc2, fq2, vld1q_f32(xb + 24));
+            acc3 = vfmaq_f32(acc3, fq3, vld1q_f32(xb + 28));
+
+            acc0 = vaddq_f32(acc0, acc1);
+            acc2 = vaddq_f32(acc2, acc3);
+            acc0 = vaddq_f32(acc0, acc2);
+            block_sum = vaddvq_f32(acc0);
+            sum += block_sum * si[b];
+        }
+#else
+        for (int b = 0; b < n_blocks; b++) {
+            const int8_t* qb = wi + b * 32;
+            const float* xb = x + b * 32;
+            float block_sum = 0.0f;
+            for (int j = 0; j < 32; j++) {
+                block_sum += (float)qb[j] * xb[j];
+            }
+            sum += block_sum * si[b];
+        }
+#endif
+        out[i] = sum;
+    }
+}
+
+static void* matmul_q8_worker(void* arg) {
+    matmul_q8_task_t* t = (matmul_q8_task_t*)arg;
+    matmul_q8_rows(t->out, t->x, t->w_qs, t->w_scales,
+                    t->start_row, t->end_row, t->d);
+    return NULL;
+}
+
+/* Q8 matmul with multi-threading support */
+void tq_matmul_q8(float* out, const float* x, const int8_t* w_qs, const float* w_scales,
+                   int n, int d) {
+    int n_threads = g_n_threads;
+
+    if (n < 256 || n_threads <= 1) {
+        matmul_q8_rows(out, x, w_qs, w_scales, 0, n, d);
+        return;
+    }
+
+    if (n_threads > n) n_threads = n;
+    if (n_threads > 16) n_threads = 16;
+
+    pthread_t threads[16];
+    matmul_q8_task_t tasks[16];
+
+    int rows_per_thread = n / n_threads;
+    for (int t = 0; t < n_threads; t++) {
+        tasks[t].out = out;
+        tasks[t].x = x;
+        tasks[t].w_qs = w_qs;
+        tasks[t].w_scales = w_scales;
+        tasks[t].d = d;
+        tasks[t].start_row = t * rows_per_thread;
+        tasks[t].end_row = (t == n_threads - 1) ? n : (t + 1) * rows_per_thread;
+        pthread_create(&threads[t], NULL, matmul_q8_worker, &tasks[t]);
+    }
+    for (int t = 0; t < n_threads; t++) {
+        pthread_join(threads[t], NULL);
+    }
+}
+
+/* ============================================================
  * BF16 matmul worker helpers
  * ============================================================ */
 typedef struct {

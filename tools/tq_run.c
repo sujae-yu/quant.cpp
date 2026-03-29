@@ -59,6 +59,7 @@ static void print_usage(const char* prog) {
     fprintf(stderr, "  -k <kv_type>     KV cache quantization type\n");
     fprintf(stderr, "  -j <threads>     Number of threads for matmul (default: 4)\n");
     fprintf(stderr, "  -s <seed>        Random seed (default: 42)\n");
+    fprintf(stderr, "  -q               Quantize weights to Q8 (int8, ~2x memory reduction)\n");
     fprintf(stderr, "  --info           Print model info and exit\n");
 }
 
@@ -77,6 +78,7 @@ int main(int argc, char** argv) {
     float top_p = 0.9f;
     tq_type kv_type = TQ_TYPE_UNIFORM_4B;
     int n_threads = 4;
+    int use_q8 = 0;
     int info_only = 0;
 
     for (int i = 1; i < argc; i++) {
@@ -96,6 +98,8 @@ int main(int argc, char** argv) {
             kv_type = parse_kv_type(argv[++i]);
         } else if (strcmp(argv[i], "-j") == 0 && i + 1 < argc) {
             n_threads = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "-q") == 0) {
+            use_q8 = 1;
         } else if (strcmp(argv[i], "--info") == 0) {
             info_only = 1;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -125,6 +129,11 @@ int main(int argc, char** argv) {
             c->vocab_size, c->intermediate_dim);
     fprintf(stderr, "KV cache type: %s\n",
             kv_type < TQ_TYPE_COUNT ? tq_type_name(kv_type) : "fp32");
+
+    if (use_q8) {
+        fprintf(stderr, "Quantizing weights to Q8 (int8)...\n");
+        tq_quantize_weights(model);
+    }
 
     if (info_only) {
         tq_free_model(model);

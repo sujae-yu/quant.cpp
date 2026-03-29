@@ -1108,6 +1108,235 @@ fail:
 }
 
 /* ============================================================
+ * Q8 weight quantization — quantize all layer weights post-load
+ *
+ * Converts FP32 weight matrices to Q8 (int8 + per-block float scale,
+ * block_size=32).  This halves memory: FP32 uses 4 bytes/value,
+ * Q8 uses 1 byte + 4 bytes/32 = 1.125 bytes/value.
+ *
+ * Each weight matrix [rows, cols] gets:
+ *   - int8_t q8[rows * cols]           — quantized values
+ *   - float  scales[rows * (cols/32)]  — per-block scales
+ *
+ * After quantization, the original FP32 pointer is set to NULL
+ * (it either pointed into mmap or conversion buffer, both still alive).
+ * ============================================================ */
+
+/* Helper: quantize a single weight matrix and store into pre-allocated buffer */
+static void quantize_matrix_q8(const float* src, int rows, int cols,
+                                 int8_t** out_qs, float** out_scales,
+                                 char** buf, size_t* used) {
+    if (!src || rows <= 0 || cols <= 0) {
+        *out_qs = NULL;
+        *out_scales = NULL;
+        return;
+    }
+    int n_blocks_per_row = (cols + 31) / 32;
+    size_t qs_bytes = (size_t)rows * cols * sizeof(int8_t);
+    size_t sc_bytes = (size_t)rows * n_blocks_per_row * sizeof(float);
+
+    int8_t*  qs = (int8_t*)(*buf + *used);
+    *used += qs_bytes;
+    float*   sc = (float*)(*buf + *used);
+    *used += sc_bytes;
+
+    for (int r = 0; r < rows; r++) {
+        tq_quantize_row_q8(src + (size_t)r * cols,
+                            qs + (size_t)r * cols,
+                            sc + (size_t)r * n_blocks_per_row,
+                            cols);
+    }
+    *out_qs = qs;
+    *out_scales = sc;
+}
+
+/* Calculate total Q8 buffer size needed for all layer weights */
+static size_t calc_q8_buffer_size(const tq_model_t* model) {
+    size_t total = 0;
+    const tq_model_config_t* c = &model->config;
+    int dim = c->hidden_dim;
+    int q_dim = c->n_heads * c->head_dim;
+    int kv_dim = c->n_kv_heads * c->head_dim;
+    int inter = c->intermediate_dim;
+    int qg_dim = c->attn_output_gate ? q_dim * 2 : q_dim;
+
+    /* DeltaNet dimensions */
+    int delta_qkv_dim = 3 * c->delta_n_heads * c->delta_key_head_dim;
+    int delta_z_dim = c->delta_n_heads * c->delta_value_head_dim;
+    int delta_dn = c->delta_n_heads;
+
+    for (int l = 0; l < c->n_layers; l++) {
+        const tq_layer_weights_t* layer = &model->layers[l];
+
+        /* Self-attention weights */
+        if (layer->wq) {
+            int rows = qg_dim;
+            int cols = dim;
+            int nb = (cols + 31) / 32;
+            total += (size_t)rows * cols;        /* int8 data */
+            total += (size_t)rows * nb * 4;      /* float scales */
+        }
+        if (layer->wk) {
+            int nb = (dim + 31) / 32;
+            total += (size_t)kv_dim * dim;
+            total += (size_t)kv_dim * nb * 4;
+        }
+        if (layer->wv) {
+            int nb = (dim + 31) / 32;
+            total += (size_t)kv_dim * dim;
+            total += (size_t)kv_dim * nb * 4;
+        }
+        if (layer->wo) {
+            int nb = (q_dim + 31) / 32;
+            total += (size_t)dim * q_dim;
+            total += (size_t)dim * nb * 4;
+        }
+
+        /* FFN weights */
+        if (layer->w_gate) {
+            int nb = (dim + 31) / 32;
+            total += (size_t)inter * dim;
+            total += (size_t)inter * nb * 4;
+        }
+        if (layer->w_up) {
+            int nb = (dim + 31) / 32;
+            total += (size_t)inter * dim;
+            total += (size_t)inter * nb * 4;
+        }
+        if (layer->w_down) {
+            int nb = (inter + 31) / 32;
+            total += (size_t)dim * inter;
+            total += (size_t)dim * nb * 4;
+        }
+
+        /* DeltaNet weights */
+        if (layer->delta_in_proj_qkv) {
+            int nb = (dim + 31) / 32;
+            total += (size_t)delta_qkv_dim * dim;
+            total += (size_t)delta_qkv_dim * nb * 4;
+        }
+        if (layer->delta_in_proj_z) {
+            int nb = (dim + 31) / 32;
+            total += (size_t)delta_z_dim * dim;
+            total += (size_t)delta_z_dim * nb * 4;
+        }
+        if (layer->delta_in_proj_a) {
+            int nb = (dim + 31) / 32;
+            total += (size_t)delta_dn * dim;
+            total += (size_t)delta_dn * nb * 4;
+        }
+        if (layer->delta_in_proj_b) {
+            int nb = (dim + 31) / 32;
+            total += (size_t)delta_dn * dim;
+            total += (size_t)delta_dn * nb * 4;
+        }
+        if (layer->delta_out_proj) {
+            int nb = (delta_z_dim + 31) / 32;
+            total += (size_t)dim * delta_z_dim;
+            total += (size_t)dim * nb * 4;
+        }
+    }
+    return total;
+}
+
+void tq_quantize_weights(tq_model_t* model) {
+    if (!model || model->use_q8_weights) return;
+
+    const tq_model_config_t* c = &model->config;
+    int dim = c->hidden_dim;
+    int q_dim = c->n_heads * c->head_dim;
+    int kv_dim = c->n_kv_heads * c->head_dim;
+    int inter = c->intermediate_dim;
+    int qg_dim = c->attn_output_gate ? q_dim * 2 : q_dim;
+
+    /* DeltaNet dimensions */
+    int delta_qkv_dim = 3 * c->delta_n_heads * c->delta_key_head_dim;
+    int delta_z_dim = c->delta_n_heads * c->delta_value_head_dim;
+    int delta_dn = c->delta_n_heads;
+
+    size_t buf_size = calc_q8_buffer_size(model);
+    char* buf = (char*)malloc(buf_size);
+    if (!buf) {
+        fprintf(stderr, "tq_quantize_weights: failed to allocate %zu MB for Q8\n",
+                buf_size / (1024 * 1024));
+        return;
+    }
+    size_t used = 0;
+
+    for (int l = 0; l < c->n_layers; l++) {
+        tq_layer_weights_t* layer = &model->layers[l];
+
+        /* Self-attention */
+        quantize_matrix_q8(layer->wq, qg_dim, dim,
+                            &layer->wq_q8, &layer->wq_q8s, &buf, &used);
+        if (layer->wq_q8) layer->wq = NULL;
+
+        quantize_matrix_q8(layer->wk, kv_dim, dim,
+                            &layer->wk_q8, &layer->wk_q8s, &buf, &used);
+        if (layer->wk_q8) layer->wk = NULL;
+
+        quantize_matrix_q8(layer->wv, kv_dim, dim,
+                            &layer->wv_q8, &layer->wv_q8s, &buf, &used);
+        if (layer->wv_q8) layer->wv = NULL;
+
+        quantize_matrix_q8(layer->wo, dim, q_dim,
+                            &layer->wo_q8, &layer->wo_q8s, &buf, &used);
+        if (layer->wo_q8) layer->wo = NULL;
+
+        /* FFN */
+        quantize_matrix_q8(layer->w_gate, inter, dim,
+                            &layer->w_gate_q8, &layer->w_gate_q8s, &buf, &used);
+        if (layer->w_gate_q8) layer->w_gate = NULL;
+
+        quantize_matrix_q8(layer->w_up, inter, dim,
+                            &layer->w_up_q8, &layer->w_up_q8s, &buf, &used);
+        if (layer->w_up_q8) layer->w_up = NULL;
+
+        quantize_matrix_q8(layer->w_down, dim, inter,
+                            &layer->w_down_q8, &layer->w_down_q8s, &buf, &used);
+        if (layer->w_down_q8) layer->w_down = NULL;
+
+        /* DeltaNet */
+        quantize_matrix_q8(layer->delta_in_proj_qkv, delta_qkv_dim, dim,
+                            &layer->delta_in_proj_qkv_q8, &layer->delta_in_proj_qkv_q8s,
+                            &buf, &used);
+        if (layer->delta_in_proj_qkv_q8) layer->delta_in_proj_qkv = NULL;
+
+        quantize_matrix_q8(layer->delta_in_proj_z, delta_z_dim, dim,
+                            &layer->delta_in_proj_z_q8, &layer->delta_in_proj_z_q8s,
+                            &buf, &used);
+        if (layer->delta_in_proj_z_q8) layer->delta_in_proj_z = NULL;
+
+        quantize_matrix_q8(layer->delta_in_proj_a, delta_dn, dim,
+                            &layer->delta_in_proj_a_q8, &layer->delta_in_proj_a_q8s,
+                            &buf, &used);
+        if (layer->delta_in_proj_a_q8) layer->delta_in_proj_a = NULL;
+
+        quantize_matrix_q8(layer->delta_in_proj_b, delta_dn, dim,
+                            &layer->delta_in_proj_b_q8, &layer->delta_in_proj_b_q8s,
+                            &buf, &used);
+        if (layer->delta_in_proj_b_q8) layer->delta_in_proj_b = NULL;
+
+        quantize_matrix_q8(layer->delta_out_proj, dim, delta_z_dim,
+                            &layer->delta_out_proj_q8, &layer->delta_out_proj_q8s,
+                            &buf, &used);
+        if (layer->delta_out_proj_q8) layer->delta_out_proj = NULL;
+    }
+
+    model->use_q8_weights = 1;
+    model->_q8_data = buf;
+    model->_q8_size = used;
+
+    /* If original weights were in conversion buffer (BF16->FP32), free it.
+     * The converted_data is no longer needed since all layer weights are now Q8.
+     * Note: norm weights, conv1d, bias, etc. still point into converted_data or mmap,
+     * so we CANNOT free it. Keep it alive. */
+
+    fprintf(stderr, "tq_quantize_weights: quantized to Q8 (%zu MB, was ~%zu MB FP32)\n",
+            used / (1024 * 1024), used * 4 / (1024 * 1024));
+}
+
+/* ============================================================
  * Free model
  * ============================================================ */
 void tq_free_model(tq_model_t* model) {
@@ -1120,6 +1349,7 @@ void tq_free_model(tq_model_t* model) {
 #endif
 
     free(model->_converted_data);
+    free(model->_q8_data);
     free(model->attn_layer_indices);
     free(model->layers);
     free(model);

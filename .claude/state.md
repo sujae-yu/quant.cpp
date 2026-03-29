@@ -1,6 +1,6 @@
 # TurboQuant.cpp — Session State
 
-**Last updated**: 2026-03-29 (streaming BF16 memory optimization)
+**Last updated**: 2026-03-29 (Q8 weight quantization implemented)
 **Last commit**: pending
 **Score**: 99.7%
 
@@ -15,12 +15,13 @@
 - ✅ **KV cache quantization integrated into inference forward pass** (quantize-on-store, Q4xQ8 integer attention for seq_len > 32)
 - ✅ **tok/s display** in tq_run output (timing via clock_gettime)
 - ✅ **Streaming BF16**: embed_tokens + lm_head kept as mmap'd BF16, converted on demand (saves ~2GB for Qwen3.5-0.8B)
-- ✅ 19 C++ test suites, 22 Python tests
+- ✅ **Q8 weight quantization**: `-q` flag converts layer weights to int8 + per-block scale (block_size=32), ~2x memory reduction with NEON-optimized Q8 matmul
+- ✅ 19 C++ test suites (42 test cases in test_ops), 22 Python tests
 - ✅ CLI tools: tq_run (-j threads), tq, tq_chat, tq_realtime_demo
 
 ### What Needs Work (Priority Order)
-1. **Memory**: ~~3.3GB~~ ~1.3GB for BF16->FP32 conversion (embed_tokens + lm_head kept as BF16, saving ~2GB). Further reduction possible with streaming BF16 matmul for layer weights.
-2. **Weight quantization**: Q8/Q4 weights for 2x memory reduction
+1. **Memory**: ~~3.3GB~~ ~1.3GB for BF16->FP32 conversion (embed_tokens + lm_head kept as BF16, saving ~2GB). With `-q` flag, layer weights quantized to Q8 (~0.65GB for weights, total ~0.8GB).
+2. **Weight quantization**: ~~Q8/Q4 weights for 2x memory reduction~~ Q8 implemented. Q4 weights for further 2x reduction.
 3. **Metal GPU inference**: Apple GPU for matmul
 4. **Value cache quantization**: currently only keys are quantized in the cache
 
@@ -34,7 +35,8 @@
 | KV compression | 7.5x (uniform_4b) |
 | Integer attention | 2.9-4.8x faster than FP32 |
 | Real model cosine | 0.994 (A+) |
-| Tests | 19 C++ + 22 Python |
+| Q8 weight mem | ~1.125 bytes/value (vs 4 FP32) |
+| Tests | 19 C++ (42 in test_ops) + 22 Python |
 
 ### Files to Read First
 - `.claude/state.md` — THIS FILE (session state)
