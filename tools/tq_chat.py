@@ -113,18 +113,39 @@ def run_chat(question, model, tokenizer):
     inputs = tokenizer(text, return_tensors="pt")
     prompt_len = inputs["input_ids"].shape[1]
 
-    print(f"  {C.BOLD}{C.GREEN}A:{C.NC} ", end="", flush=True)
+    max_tokens = 80  # ~80 tokens ≈ 2 paragraphs, ~100s on CPU
 
-    import contextlib, io
+    print(f"  {C.BOLD}{C.GREEN}A:{C.NC} {C.DIM}(generating ~{max_tokens} tokens, ~{max_tokens*1.3:.0f}s on CPU){C.NC}")
+    print(f"     ", end="", flush=True)
+
+    import contextlib, io, threading
+
+    # Spinner while generating
+    stop_spinner = threading.Event()
+    def spinner():
+        chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        i = 0
+        while not stop_spinner.is_set():
+            print(f"\r  {C.CYAN}{chars[i % len(chars)]}{C.NC} generating...", end="", flush=True)
+            stop_spinner.wait(0.1)
+            i += 1
+        print(f"\r  {C.GREEN}✓{C.NC} done          ")
+
+    t = threading.Thread(target=spinner, daemon=True)
+    t.start()
+
     t0 = time.time()
     with torch.no_grad(), contextlib.redirect_stderr(io.StringIO()):
         out = model.generate(
             **inputs,
-            max_new_tokens=300,
+            max_new_tokens=max_tokens,
             do_sample=True,
             temperature=0.7,
             top_p=0.9,
         )
+
+    stop_spinner.set()
+    t.join()
     elapsed = time.time() - t0
 
     answer = tokenizer.decode(out[0][prompt_len:], skip_special_tokens=True)
