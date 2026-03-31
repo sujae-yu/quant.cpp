@@ -1,0 +1,66 @@
+
+def fibonacci sequence, given an integer n, return the nth term of the Fibonacci sequence.
+#
+#
+
+def fibonacci(n:
+
+    sequence is a list of  a given an integer, return the nth term in the first, if n.
+# sequence
+    of  in which is
+
+def:
+
+if
+    sequence:  n,   is of  list   # list, 
+
+        return.
+    of  of   and  a list
+
+def
+    sequence.
+ifn:   of  list of   is, is
+
+#defint.
+
+# if, list:  a  if
+    and
+    .
+
+The end.
+*n:   list, then return 10fist
+
+#
+
+defint list:  if  # if
+    a.
+
+def.
+    return.
+   list,list ofn* listof  is
+
+defint list:listtstisthe is  #if
+if
+
+def.
+
+def
+    #   list.
+*   of  is, then, list:  listtstare.
+
+```:
+if is 10
+
+defint
+    #list.
+#   of  is.
+
+defist, list  listtstarefisthe
+:n* #if
+
+defint
+    #list.
+
+#   of  #10.
+
+def

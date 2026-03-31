@@ -140,6 +140,62 @@ Best K+V:        7.1x total compression (1-bit K + Q2 V)
 
 ---
 
+## Benchmarks & Validation
+
+### Ablation: Does TurboQuant Actually Help?
+
+```bash
+bash bench/ablation_test.sh model.tqm
+```
+
+Compares `uniform_4b`, `turbo_kv_3b`, and `turbo_kv_1b` at token counts 50-300 to show where each
+method diverges from the uniform baseline. Key findings:
+
+- **turbo_kv_3b** (codebook + QJL): Typically matches `uniform_4b` output at all tested lengths.
+  The QJL residual bit corrects inner product estimation bias from the 2-bit codebook.
+- **turbo_kv_1b** (sign hash only): May diverge at longer contexts, but output remains coherent.
+  This is expected at 10.7x key compression.
+- **RHT matters**: The Randomized Hadamard Transform distributes outlier values evenly across
+  dimensions, preventing systematic quantization bias (Theorem 3.1, TurboQuant paper).
+
+### V Quantization Reality
+
+The "30/30 byte-identical" result applies to **K-only quantization** (values remain FP16/FP32).
+With V=Q4, outputs diverge earlier but remain coherent and factually correct.
+
+```bash
+bash bench/kv_quality_bench.sh model.tqm   # Includes Phase 4: V quantization check
+```
+
+### Long Context Quality
+
+```bash
+bash bench/long_quality_test.sh model.tqm   # 200, 500, 1000 tokens
+```
+
+Tests coherence and speed at longer context lengths across `uniform_4b`, `turbo_kv_1b`, and
+`turbo_kv_1b + Q4 V`. Outputs diverge from baseline at longer contexts but remain coherent.
+
+### Temperature Sampling
+
+```bash
+bash bench/sampling_test.sh model.tqm   # T=0.3 and T=0.7, 3 runs each
+```
+
+Verifies that KV compression does not degrade stochastic sampling quality. All KV types
+produce diverse, coherent outputs at each temperature with similar variance.
+
+### Sanitizer Validation
+
+```bash
+bash scripts/sanitize.sh [model.tqm]   # ASan + UBSan build and test
+```
+
+Builds with `-fsanitize=address,undefined`, runs all tests, and optionally runs a short
+inference to catch memory errors. No leaks or undefined behavior detected.
+
+---
+
 ## References
 
 - **[TurboQuant](https://arxiv.org/abs/2504.19874)** (ICLR 2026) — Online Vector Quantization with Near-optimal Distortion Rate

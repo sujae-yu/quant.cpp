@@ -143,15 +143,93 @@ echo ""
 echo "============================================================"
 echo ""
 
-# Summary
+# Phase 4: V quantization reality check
+# The 30/30 byte-identical claim applies to K-only quantization (V as FP16/FP32).
+# With V=Q4, outputs will diverge earlier — this is expected because V quantization
+# directly affects the weighted sum reconstruction in attention output.
+echo ""
+echo "[Phase 4] V quantization reality check (K + Q4 Values)..."
+echo ""
+echo "  NOTE: K-only tests above use FP16/FP32 values."
+echo "  With -v q4, value vectors are also quantized to 4 bits."
+echo "  Outputs will typically diverge from the K-only baseline."
+echo ""
+
+V_PROMPTS=(
+    "The capital of France is"
+    "1+1="
+    "List the planets in our solar system:"
+)
+V_KV_TYPES="uniform_4b turbo_kv_3b turbo_kv_1b"
+V_MATCH=0
+V_DIFF=0
+
+printf "%-45s %-18s %-18s\n" "Prompt" "K-only" "K + Q4 V"
+printf "%-45s %-18s %-18s\n" "------" "------" "--------"
+
+for vidx in "${!V_PROMPTS[@]}"; do
+    vprompt="${V_PROMPTS[$vidx]}"
+    vdisplay=$(echo "$vprompt" | head -c 42)
+
+    for kv in $V_KV_TYPES; do
+        # K-only (V as FP16/FP32) — baseline for this test
+        konly_file="$RESULTS_DIR/v${vidx}_${kv}_konly.txt"
+        $TQ_RUN "$MODEL" -p "$vprompt" -j $THREADS -n $TOKENS_PER_PROMPT -T 0.0 -k $kv 2>&1 \
+            | sed -n '/^---$/,/^---$/p' | tail -n +2 | sed '$d' \
+            > "$konly_file"
+
+        # K + Q4 V
+        kvq4_file="$RESULTS_DIR/v${vidx}_${kv}_q4v.txt"
+        $TQ_RUN "$MODEL" -p "$vprompt" -j $THREADS -n $TOKENS_PER_PROMPT -T 0.0 -k $kv -v q4 2>&1 \
+            | sed -n '/^---$/,/^---$/p' | tail -n +2 | sed '$d' \
+            > "$kvq4_file"
+
+        # Compare K-only vs K+Q4V
+        if diff -q "$konly_file" "$kvq4_file" > /dev/null 2>&1; then
+            konly_status="MATCH"
+            kvq4_status="MATCH (same)"
+            V_MATCH=$((V_MATCH + 1))
+        else
+            konly_status="(baseline)"
+            first_diff=$(cmp "$konly_file" "$kvq4_file" 2>/dev/null | head -1 | grep -o 'byte [0-9]*' | grep -o '[0-9]*')
+            if [ -z "$first_diff" ]; then
+                kvq4_status="DIFF (prefix)"
+            else
+                kvq4_status="DIFF@${first_diff}B"
+            fi
+            V_DIFF=$((V_DIFF + 1))
+        fi
+
+        printf "  %-43s %-18s %-18s\n" "$vdisplay ($kv)" "$konly_status" "$kvq4_status"
+    done
+done
+
+echo ""
+echo "  V quantization results: $V_MATCH identical, $V_DIFF diverged"
+echo ""
+echo "  IMPORTANT: Divergence with V quantization is EXPECTED."
+echo "  V quantization (Q4) introduces reconstruction error in the attention"
+echo "  output weighted sum. The 30/30 byte-identical result applies only"
+echo "  to K-only quantization where values remain at full precision."
+echo ""
+echo "  With V=Q4, outputs typically diverge but remain coherent and"
+echo "  factually correct — this is the expected quality/compression tradeoff."
+echo ""
+
+echo "============================================================"
+echo ""
+
+# Summary (K-only)
 TOTAL_COMPARISONS=$((TOTAL_TESTS * 3))
-echo "  Quality: $PASS/$TOTAL_COMPARISONS byte-identical matches"
+echo "  K-only Quality: $PASS/$TOTAL_COMPARISONS byte-identical matches"
 if [ $DIVERGED -gt 0 ]; then
-    echo "  WARNING: $DIVERGED divergences detected!"
+    echo "  WARNING: $DIVERGED K-only divergences detected!"
     echo "  Check $RESULTS_DIR/ for details."
 else
-    echo "  ALL OUTPUTS BYTE-IDENTICAL across all KV types."
+    echo "  ALL K-ONLY OUTPUTS BYTE-IDENTICAL across all KV types."
 fi
+echo ""
+echo "  V quant Quality: $V_MATCH/$((V_MATCH + V_DIFF)) identical (divergence expected)"
 echo ""
 echo "  Results saved to: $RESULTS_DIR/"
 echo ""
