@@ -60,6 +60,10 @@ static int compare_prob_desc(const void* a, const void* b) {
     return 0;
 }
 
+/* Persistent workspace to avoid per-token malloc */
+static prob_index_t* g_probindex = NULL;
+static int g_probindex_size = 0;
+
 int tq_sample_topp(const float* logits, int vocab_size,
                    float temperature, float top_p,
                    unsigned long long* rng) {
@@ -67,61 +71,68 @@ int tq_sample_topp(const float* logits, int vocab_size,
         return tq_sample_argmax(logits, vocab_size);
     }
 
-    /* Allocate workspace for probabilities */
-    prob_index_t* probindex = (prob_index_t*)malloc(vocab_size * sizeof(prob_index_t));
-    if (!probindex) return tq_sample_argmax(logits, vocab_size);
-
-    /* Apply temperature and compute softmax */
+    /* Pre-filter: only keep logits within reasonable range of max.
+     * For top-p=0.9 with temperature=0.7, logits more than ~20 below max
+     * contribute negligibly. This avoids sorting 248K entries. */
     float max_val = logits[0];
     for (int i = 1; i < vocab_size; i++) {
         if (logits[i] > max_val) max_val = logits[i];
     }
 
+    float threshold = max_val - 16.0f * temperature; /* exp(-16) ≈ 1e-7 */
+
+    /* Allocate/reuse workspace */
+    if (g_probindex_size < vocab_size) {
+        free(g_probindex);
+        g_probindex = (prob_index_t*)malloc(vocab_size * sizeof(prob_index_t));
+        g_probindex_size = vocab_size;
+    }
+    if (!g_probindex) return tq_sample_argmax(logits, vocab_size);
+
+    /* Collect only candidates above threshold */
+    int n_candidates = 0;
     float sum = 0.0f;
+    float inv_temp = 1.0f / temperature;
     for (int i = 0; i < vocab_size; i++) {
-        float p = expf((logits[i] - max_val) / temperature);
-        probindex[i].prob = p;
-        probindex[i].index = i;
-        sum += p;
+        if (logits[i] >= threshold) {
+            float p = expf((logits[i] - max_val) * inv_temp);
+            g_probindex[n_candidates].prob = p;
+            g_probindex[n_candidates].index = i;
+            sum += p;
+            n_candidates++;
+        }
     }
 
     /* Normalize */
     float inv_sum = 1.0f / sum;
-    for (int i = 0; i < vocab_size; i++) {
-        probindex[i].prob *= inv_sum;
+    for (int i = 0; i < n_candidates; i++) {
+        g_probindex[i].prob *= inv_sum;
     }
 
-    /* Sort by probability descending */
-    qsort(probindex, vocab_size, sizeof(prob_index_t), compare_prob_desc);
+    /* Sort only candidates (typically < 1000 vs 248K) */
+    qsort(g_probindex, n_candidates, sizeof(prob_index_t), compare_prob_desc);
 
     /* Find top-p cutoff */
     float cumulative = 0.0f;
     int n_top = 0;
-    for (int i = 0; i < vocab_size; i++) {
-        cumulative += probindex[i].prob;
+    for (int i = 0; i < n_candidates; i++) {
+        cumulative += g_probindex[i].prob;
         n_top = i + 1;
         if (cumulative >= top_p) break;
     }
 
-    /* Re-normalize the nucleus */
-    float nucleus_sum = 0.0f;
-    for (int i = 0; i < n_top; i++) {
-        nucleus_sum += probindex[i].prob;
-    }
-
     /* Sample from the nucleus */
-    float r = random_f32(rng) * nucleus_sum;
+    float r = random_f32(rng) * cumulative;
     float cdf = 0.0f;
-    int sampled = probindex[0].index;
+    int sampled = g_probindex[0].index;
     for (int i = 0; i < n_top; i++) {
-        cdf += probindex[i].prob;
+        cdf += g_probindex[i].prob;
         if (cdf >= r) {
-            sampled = probindex[i].index;
+            sampled = g_probindex[i].index;
             break;
         }
     }
 
-    free(probindex);
     return sampled;
 }
 

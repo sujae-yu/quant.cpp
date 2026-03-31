@@ -988,7 +988,10 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
     tq_rmsnorm(s->x, s->x, model->output_norm, dim, c->rms_norm_eps);
 
     /* Step 4: Output projection to vocab logits */
-    if (model->output_weight_bf16) {
+    if (model->output_qs) {
+        tq_matmul_q4(s->logits, s->x, model->output_qs, model->output_scales,
+                      c->vocab_size, dim);
+    } else if (model->output_weight_bf16) {
         tq_matmul_bf16(s->logits, s->x, model->output_weight_bf16, c->vocab_size, dim);
     } else {
         tq_matmul(s->logits, s->x, model->output_weight, c->vocab_size, dim);

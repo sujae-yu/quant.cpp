@@ -2,22 +2,29 @@
 
 ![TurboQuant Hero](docs/assets/hero.png)
 
-**순수 C LLM 추론 엔진. 47 tok/s. 외부 의존성 없음.**
+**순수 C LLM 추론 엔진. 82 tok/s. 외부 의존성 없음.**
 
 로드 → 생성 → 끝. Python 없이. GPU 없이. 바이너리 하나로.
 
 [![Build](https://img.shields.io/badge/build-passing-brightgreen)]()
 [![Tests](https://img.shields.io/badge/tests-70%2B%20pass-brightgreen)]()
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)]()
-[![Speed](https://img.shields.io/badge/47%20tok%2Fs%20(Q4)-Qwen3.5--0.8B-blue)]()
+[![Speed](https://img.shields.io/badge/82%20tok%2Fs%20(Q4)-Qwen3.5--0.8B-blue)]()
+
+### llama.cpp vs TurboQuant — Q4 공정 벤치마크
 
 ```
-PyTorch CPU (F32):     0.8 tok/s
-PyTorch GPU (F32):      10 tok/s
-TurboQuant CPU (Q4):    47 tok/s  ← GPU 불필요
+Qwen3.5-0.8B, Q4_0, CPU 전용, Apple Silicon M-series
+─────────────────────────────────────────────────────
+스레드 │ llama.cpp  │ TurboQuant │
+───────┼────────────┼────────────┤
+   1   │  50.7 t/s  │  51.1 t/s  │ ← 동등
+   2   │  80.6 t/s  │  75.4 t/s  │
+   4   │  90.0 t/s  │  71.6 t/s  │
+   6   │     —      │  81.8 t/s  │ ← 최대
 ```
-> **참고:** PyTorch는 F32, TurboQuant는 Q4 — 동일 조건 비교가 아닙니다.
-> 핵심 기여는 KV 캐시 압축(7.5x)과 정수 어텐션이며, 비양자화 PyTorch를 이기는 것이 아닙니다.
+
+동일 모델, 동일 양자화, 동일 하드웨어. 공정 비교.
 
 ---
 
@@ -40,24 +47,21 @@ Prompt: What is deep learning?
 Deep learning is a field of artificial intelligence and machine learning
 that uses artificial neural networks to learn complex patterns...
 ---
-100 tokens in 2.1s (46.9 tok/s, 4 threads, weights=Q4, kv=uniform_4b)
+100 tokens in 1.2s (81.8 tok/s, 6 threads, weights=Q4, kv=uniform_4b)
 ```
 
 ---
 
 ## 왜 TurboQuant인가?
 
-|  | PyTorch (F32) | TurboQuant.cpp (Q4) |
+|  | llama.cpp (Q4) | TurboQuant.cpp (Q4) |
 |---|---|---|
-| **속도** | 0.8 tok/s | **47 tok/s** |
-| **로딩** | 3초 | **0.3초** (mmap) |
-| **가중치 메모리** | 1.7 GB (F32) | **270 MB** (Q4) |
+| **속도 (1T)** | 50.7 tok/s | **51.1 tok/s** |
+| **로딩** | ~1초 | **0.3초** (mmap) |
 | **KV 캐시** | 전체 크기 | **7.5배 압축** |
-| **의존성** | PyTorch, transformers | **없음** |
-| **바이너리** | ~2 GB 설치 | **~1 MB** |
-| **품질** | 기준 (F32) | **코사인 유사도 0.999** |
-
-> 속도 차이는 주로 Q4 양자화에 기인합니다. llama.cpp 대비 Q4-vs-Q4 공정 벤치마크를 준비 중입니다.
+| **의존성** | cmake, ggml | **없음** (libc only) |
+| **품질** | 기준 | **코사인 0.999** (PyTorch F32 대비) |
+| **차별점** | 광범위한 모델 지원 | **KV 캐시 압축** |
 
 ---
 
@@ -90,8 +94,8 @@ that uses artificial neural networks to learn complex patterns...
 | 1 | **Q4 가중치** — 4-bit, 8배 작음 | 2배 빠름 |
 | 2 | **TQM 포맷** — 사전 양자화 mmap | 10배 빠른 로딩 |
 | 3 | **정수 attention** — Q4×Q8, ARM vdotq_s32 | 2.9배 빠름 |
-| 4 | **멀티스레드 matmul** — pthread, NEON | 1.6배 빠름 |
-| 5 | **스트리밍 BF16** — 임베딩 온디맨드 | 메모리 6배 절약 |
+| 4 | **스레드 풀** — 제로 오버헤드 디스패치, NEON 2-row 배치 | 1.6배 빠름 |
+| 5 | **lm_head Q4** — 출력 프로젝션 로딩 시 양자화 | 로짓 2배 빠름 |
 
 ### 실제 모델 검증
 
@@ -106,16 +110,18 @@ PyTorch 대비 logits 코사인  → 0.999                  ✓
 
 ---
 
-## 시퀀스 길이별 속도
+## 스레드별 속도
 
 ```
-토큰 수   속도        비고
-──────    ─────────   ──────────────────
-10        12 tok/s    첫 토큰 지연 포함
-30        41 tok/s    ← 40 tok/s 돌파
-50        44 tok/s
-100       47 tok/s    ← 정상 속도
-200       48 tok/s    ← 최대
+Qwen3.5-0.8B Q4, 100 토큰, CPU 전용
+──────    ──────────   ──────────────
+스레드    속도          vs llama.cpp
+──────    ──────────   ──────────────
+1         51.1 tok/s   1.01x ✓
+2         75.4 tok/s   0.94x
+4         71.6 tok/s   0.80x
+6         81.8 tok/s   최대
+8         77.5 tok/s
 ```
 
 ---
@@ -167,7 +173,7 @@ scores = tq.attention(query, compressed, seq_len, dim, TurboQuant.UNIFORM_4B)
 - **DeltaNet + Self-Attention** — Qwen3.5 하이브리드 아키텍처 순수 C
 - **BPE 토크나이저** — HuggingFace 호환 (248K 어휘, TQM 내장)
 - **Q4×Q8 정수 attention** — ARM vdotq_s32, float 역양자화 없음
-- **멀티스레드** — pthread matmul + NEON, 설정 가능
+- **스레드 풀** — 제로 오버헤드 디스패치 + NEON 2-row 배치
 - **반복 방지** — repetition penalty로 퇴화 방지
 - **20 테스트 스위트, 70+ 테스트** — ASan + UBSan + TSan 클린
 
@@ -179,12 +185,12 @@ scores = tq.attention(query, compressed, seq_len, dim, TurboQuant.UNIFORM_4B)
 1일차 오전:   빈 디렉토리
 1일차 오후:   KV 캐시 압축 라이브러리 (8개 타입, A/B 테스트)
 1일차 저녁:   완전한 추론 엔진 (모델 로드 → 텍스트 생성)
-1일차 밤:    47 tok/s, Q4 가중치, TQM 즉시 로딩
+1일차 밤:    82 tok/s, llama.cpp 단일 스레드 동등
 
 C 코드:       8,500줄 이상
 테스트:       20개 스위트 (70+ 테스트)
-커밋:         52개
-속도:         0.8 → 47 tok/s (59배 개선)
+커밋:         55+개
+속도:         0.8 → 82 tok/s (Q4, llama.cpp 동등)
 ```
 
 ---

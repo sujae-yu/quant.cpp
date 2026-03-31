@@ -1816,6 +1816,37 @@ tq_model_t* tq_load_tqm(const char* path) {
     model->use_q4_weights = 1;
     free(is_attn_layer);
 
+    /* Runtime Q4 quantization of lm_head (output projection) for fast logit computation.
+     * BF16 matmul on 248K x 1024 is slow; Q4 matmul is ~4x faster. */
+    if (model->output_weight_bf16) {
+        int vocab = c->vocab_size;
+        int n_blocks = dim / 32;
+        size_t qs_size = (size_t)vocab * n_blocks * 16;
+        size_t scales_size = (size_t)vocab * n_blocks * sizeof(float);
+        model->output_qs = (uint8_t*)malloc(qs_size);
+        model->output_scales = (float*)malloc(scales_size);
+        if (model->output_qs && model->output_scales) {
+            float* row_buf = (float*)malloc(dim * sizeof(float));
+            if (row_buf) {
+                for (int i = 0; i < vocab; i++) {
+                    const uint16_t* src = model->output_weight_bf16 + (size_t)i * dim;
+                    for (int j = 0; j < dim; j++) {
+                        uint32_t bits = ((uint32_t)src[j]) << 16;
+                        memcpy(&row_buf[j], &bits, 4);
+                    }
+                    tq_quantize_row_q4(row_buf,
+                                        model->output_qs + (size_t)i * n_blocks * 16,
+                                        model->output_scales + (size_t)i * n_blocks,
+                                        dim);
+                }
+                free(row_buf);
+                fprintf(stderr, "tq_load_tqm: lm_head quantized to Q4 (%.1f MB -> %.1f MB)\n",
+                        (double)vocab * dim * 2 / (1024.0 * 1024.0),
+                        (double)(qs_size + scales_size) / (1024.0 * 1024.0));
+            }
+        }
+    }
+
     fprintf(stderr, "tq_load_tqm: loaded %d layers (%d self_attn), "
             "dim=%d, heads=%d/%d, vocab=%d [%.1f MB, mmap zero-copy]\n",
             c->n_layers, model->n_attn_layers, dim,

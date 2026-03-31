@@ -128,6 +128,10 @@ typedef struct {
     int n_attn_layers;        /* number of layers with standard self_attn */
     int* attn_layer_indices;  /* which layer indices have self_attn [n_attn_layers] */
 
+    /* Q4 output weight (lm_head) — runtime quantized for fast logit projection */
+    uint8_t* output_qs;       /* [vocab_size * n_blocks * 16] Q4 packed nibbles */
+    float* output_scales;     /* [vocab_size * n_blocks] Q4 block scales */
+
     /* Q8 weight quantization */
     int use_q8_weights;       /* 1 if layer weights are Q8-quantized */
     void* _q8_data;           /* heap buffer for all Q8 quantized weights */

@@ -18,14 +18,117 @@
 #endif
 
 /* ============================================================
- * Global thread count for matmul parallelism
+ * Thread pool — condition variable based, minimal overhead
+ * Workers sleep between dispatches, wake via cond_broadcast.
+ * Main thread does task[0], workers do task[1..n-1].
  * ============================================================ */
+#include <stdatomic.h>
+
+#define TP_MAX 16
+
+typedef void (*tp_fn)(void*);
+
+static struct {
+    pthread_t       thr[TP_MAX];
+    pthread_mutex_t mtx;
+    pthread_cond_t  wake;          /* signal workers to start */
+    pthread_cond_t  done_cv;       /* signal main when all done */
+    tp_fn           fn;
+    void*           args[TP_MAX];
+    int             n_workers;     /* total including main = n_workers+1 */
+    int             generation;    /* incremented each dispatch */
+    atomic_int      done;
+    int             active;
+} g_tp;
+
 static int g_n_threads = 1;
+
+static void* tp_worker(void* arg) {
+    int id = (int)(intptr_t)arg;
+    int my_gen = 0;
+    for (;;) {
+        pthread_mutex_lock(&g_tp.mtx);
+        while (g_tp.generation == my_gen && g_tp.active)
+            pthread_cond_wait(&g_tp.wake, &g_tp.mtx);
+        if (!g_tp.active) { pthread_mutex_unlock(&g_tp.mtx); return NULL; }
+        my_gen = g_tp.generation;
+        tp_fn fn = g_tp.fn;
+        void* a = g_tp.args[id];
+        pthread_mutex_unlock(&g_tp.mtx);
+
+        if (a) fn(a);
+        if (atomic_fetch_add(&g_tp.done, 1) + 1 >= g_tp.n_workers) {
+            pthread_mutex_lock(&g_tp.mtx);
+            pthread_cond_signal(&g_tp.done_cv);
+            pthread_mutex_unlock(&g_tp.mtx);
+        }
+    }
+    return NULL;
+}
+
+static void tp_init(int n) {
+    /* n = total threads including main. Workers = n-1 */
+    int n_workers = n - 1;
+    if (n_workers < 1) return;
+    if (g_tp.active && g_tp.n_workers == n) return;
+    if (g_tp.active) {
+        pthread_mutex_lock(&g_tp.mtx);
+        g_tp.active = 0;
+        pthread_cond_broadcast(&g_tp.wake);
+        pthread_mutex_unlock(&g_tp.mtx);
+        for (int i = 0; i < g_tp.n_workers - 1; i++)
+            pthread_join(g_tp.thr[i], NULL);
+        pthread_mutex_destroy(&g_tp.mtx);
+        pthread_cond_destroy(&g_tp.wake);
+        pthread_cond_destroy(&g_tp.done_cv);
+    }
+    memset(&g_tp, 0, sizeof(g_tp));
+    pthread_mutex_init(&g_tp.mtx, NULL);
+    pthread_cond_init(&g_tp.wake, NULL);
+    pthread_cond_init(&g_tp.done_cv, NULL);
+    g_tp.active = 1;
+    g_tp.n_workers = n;  /* total threads including main */
+    g_tp.generation = 0;
+    atomic_store(&g_tp.done, 0);
+    for (int i = 0; i < n_workers; i++)
+        pthread_create(&g_tp.thr[i], NULL, tp_worker, (void*)(intptr_t)(i + 1));
+}
+
+/* Dispatch: main does task[0], workers do task[1..n-1] */
+static void tp_run(tp_fn fn, void** args, int n_tasks) {
+    if (n_tasks <= 1 || !g_tp.active) {
+        if (n_tasks >= 1 && args[0]) fn(args[0]);
+        return;
+    }
+    /* Set up and wake workers */
+    pthread_mutex_lock(&g_tp.mtx);
+    g_tp.fn = fn;
+    for (int i = 0; i < g_tp.n_workers; i++)
+        g_tp.args[i] = (i < n_tasks) ? args[i] : NULL;
+    atomic_store(&g_tp.done, 0);
+    g_tp.generation++;
+    pthread_cond_broadcast(&g_tp.wake);
+    pthread_mutex_unlock(&g_tp.mtx);
+
+    /* Main thread does task[0] */
+    if (args[0]) fn(args[0]);
+    if (atomic_fetch_add(&g_tp.done, 1) + 1 >= g_tp.n_workers) {
+        /* All done already */
+        return;
+    }
+
+    /* Wait for stragglers */
+    pthread_mutex_lock(&g_tp.mtx);
+    while (atomic_load(&g_tp.done) < g_tp.n_workers)
+        pthread_cond_wait(&g_tp.done_cv, &g_tp.mtx);
+    pthread_mutex_unlock(&g_tp.mtx);
+}
 
 void tq_set_threads(int n_threads) {
     if (n_threads < 1) n_threads = 1;
-    if (n_threads > 16) n_threads = 16;
+    if (n_threads > TP_MAX) n_threads = TP_MAX;
     g_n_threads = n_threads;
+    if (n_threads > 1) tp_init(n_threads);
 }
 
 int tq_get_threads(void) {
@@ -117,10 +220,10 @@ void tq_matmul(float* out, const float* x, const float* w, int n, int d) {
 
     /* Cap threads to available rows */
     if (n_threads > n) n_threads = n;
-    if (n_threads > 16) n_threads = 16;
+    if (n_threads > TP_MAX) n_threads = TP_MAX;
 
-    pthread_t threads[16];
-    matmul_task_t tasks[16];
+    matmul_task_t tasks[TP_MAX];
+    void* ptrs[TP_MAX];
 
     int rows_per_thread = n / n_threads;
     for (int t = 0; t < n_threads; t++) {
@@ -130,10 +233,17 @@ void tq_matmul(float* out, const float* x, const float* w, int n, int d) {
         tasks[t].d = d;
         tasks[t].start_row = t * rows_per_thread;
         tasks[t].end_row = (t == n_threads - 1) ? n : (t + 1) * rows_per_thread;
-        pthread_create(&threads[t], NULL, matmul_worker, &tasks[t]);
+        ptrs[t] = &tasks[t];
     }
-    for (int t = 0; t < n_threads; t++) {
-        pthread_join(threads[t], NULL);
+
+    if (g_tp.active && n_threads == g_tp.n_workers) {
+        tp_run((tp_fn)matmul_worker, ptrs, n_threads);
+    } else {
+        pthread_t threads[TP_MAX];
+        for (int t = 0; t < n_threads; t++)
+            pthread_create(&threads[t], NULL, matmul_worker, &tasks[t]);
+        for (int t = 0; t < n_threads; t++)
+            pthread_join(threads[t], NULL);
     }
 }
 
@@ -426,54 +536,160 @@ static void matmul_q4_rows(float* out, const float* x,
                             const int8_t* x_q8, const float* x_scales,
                             int start_row, int end_row, int d) {
     int n_blocks = d / 32;
-    for (int i = start_row; i < end_row; i++) {
+    const uint8x16_t mask_0f = vdupq_n_u8(0x0F);
+    const uint8x16_t v8 = vdupq_n_u8(8);
+    (void)x; /* activation already in x_q8 */
+
+    for (int i = start_row; i < end_row - 1; i += 2) {
+        /* Process 2 rows simultaneously for better ILP */
+        const uint8_t* wi0 = w_qs + (size_t)i * n_blocks * 16;
+        const uint8_t* wi1 = w_qs + (size_t)(i + 1) * n_blocks * 16;
+        const float* si0 = w_scales + (size_t)i * n_blocks;
+        const float* si1 = w_scales + (size_t)(i + 1) * n_blocks;
+
+#ifdef __ARM_NEON
+        float32x4_t sumv0 = vdupq_n_f32(0.0f);
+        float32x4_t sumv1 = vdupq_n_f32(0.0f);
+
+        /* Process 2 blocks per iteration for reduced loop overhead */
+        int b = 0;
+        for (; b + 1 < n_blocks; b += 2) {
+            /* Block b */
+            uint8x16_t pk0_0 = vld1q_u8(wi0 + b * 16);
+            uint8x16_t pk1_0 = vld1q_u8(wi1 + b * 16);
+            int8x16x2_t xd0 = vld2q_s8(x_q8 + b * 32);
+
+            int8x16_t lo0_0 = vreinterpretq_s8_u8(vsubq_u8(vandq_u8(pk0_0, mask_0f), v8));
+            int8x16_t hi0_0 = vreinterpretq_s8_u8(vsubq_u8(vshrq_n_u8(pk0_0, 4), v8));
+            int8x16_t lo1_0 = vreinterpretq_s8_u8(vsubq_u8(vandq_u8(pk1_0, mask_0f), v8));
+            int8x16_t hi1_0 = vreinterpretq_s8_u8(vsubq_u8(vshrq_n_u8(pk1_0, 4), v8));
+
+            int32x4_t a0_0 = vdupq_n_s32(0);
+            int32x4_t a1_0 = vdupq_n_s32(0);
+#if defined(__ARM_FEATURE_DOTPROD)
+            a0_0 = vdotq_s32(vdotq_s32(a0_0, lo0_0, xd0.val[0]), hi0_0, xd0.val[1]);
+            a1_0 = vdotq_s32(vdotq_s32(a1_0, lo1_0, xd0.val[0]), hi1_0, xd0.val[1]);
+#else
+            a0_0 = vaddq_s32(a0_0, vpaddlq_s16(vmull_s8(vget_low_s8(lo0_0), vget_low_s8(xd0.val[0]))));
+            a0_0 = vaddq_s32(a0_0, vpaddlq_s16(vmull_s8(vget_high_s8(lo0_0), vget_high_s8(xd0.val[0]))));
+            a0_0 = vaddq_s32(a0_0, vpaddlq_s16(vmull_s8(vget_low_s8(hi0_0), vget_low_s8(xd0.val[1]))));
+            a0_0 = vaddq_s32(a0_0, vpaddlq_s16(vmull_s8(vget_high_s8(hi0_0), vget_high_s8(xd0.val[1]))));
+            a1_0 = vaddq_s32(a1_0, vpaddlq_s16(vmull_s8(vget_low_s8(lo1_0), vget_low_s8(xd0.val[0]))));
+            a1_0 = vaddq_s32(a1_0, vpaddlq_s16(vmull_s8(vget_high_s8(lo1_0), vget_high_s8(xd0.val[0]))));
+            a1_0 = vaddq_s32(a1_0, vpaddlq_s16(vmull_s8(vget_low_s8(hi1_0), vget_low_s8(xd0.val[1]))));
+            a1_0 = vaddq_s32(a1_0, vpaddlq_s16(vmull_s8(vget_high_s8(hi1_0), vget_high_s8(xd0.val[1]))));
+#endif
+            float s0 = x_scales[b];
+            sumv0 = vmlaq_n_f32(sumv0, vcvtq_f32_s32(a0_0), si0[b] * s0);
+            sumv1 = vmlaq_n_f32(sumv1, vcvtq_f32_s32(a1_0), si1[b] * s0);
+
+            /* Block b+1 */
+            uint8x16_t pk0_1 = vld1q_u8(wi0 + (b + 1) * 16);
+            uint8x16_t pk1_1 = vld1q_u8(wi1 + (b + 1) * 16);
+            int8x16x2_t xd1 = vld2q_s8(x_q8 + (b + 1) * 32);
+
+            int8x16_t lo0_1 = vreinterpretq_s8_u8(vsubq_u8(vandq_u8(pk0_1, mask_0f), v8));
+            int8x16_t hi0_1 = vreinterpretq_s8_u8(vsubq_u8(vshrq_n_u8(pk0_1, 4), v8));
+            int8x16_t lo1_1 = vreinterpretq_s8_u8(vsubq_u8(vandq_u8(pk1_1, mask_0f), v8));
+            int8x16_t hi1_1 = vreinterpretq_s8_u8(vsubq_u8(vshrq_n_u8(pk1_1, 4), v8));
+
+            int32x4_t a0_1 = vdupq_n_s32(0);
+            int32x4_t a1_1 = vdupq_n_s32(0);
+#if defined(__ARM_FEATURE_DOTPROD)
+            a0_1 = vdotq_s32(vdotq_s32(a0_1, lo0_1, xd1.val[0]), hi0_1, xd1.val[1]);
+            a1_1 = vdotq_s32(vdotq_s32(a1_1, lo1_1, xd1.val[0]), hi1_1, xd1.val[1]);
+#else
+            a0_1 = vaddq_s32(a0_1, vpaddlq_s16(vmull_s8(vget_low_s8(lo0_1), vget_low_s8(xd1.val[0]))));
+            a0_1 = vaddq_s32(a0_1, vpaddlq_s16(vmull_s8(vget_high_s8(lo0_1), vget_high_s8(xd1.val[0]))));
+            a0_1 = vaddq_s32(a0_1, vpaddlq_s16(vmull_s8(vget_low_s8(hi0_1), vget_low_s8(xd1.val[1]))));
+            a0_1 = vaddq_s32(a0_1, vpaddlq_s16(vmull_s8(vget_high_s8(hi0_1), vget_high_s8(xd1.val[1]))));
+            a1_1 = vaddq_s32(a1_1, vpaddlq_s16(vmull_s8(vget_low_s8(lo1_1), vget_low_s8(xd1.val[0]))));
+            a1_1 = vaddq_s32(a1_1, vpaddlq_s16(vmull_s8(vget_high_s8(lo1_1), vget_high_s8(xd1.val[0]))));
+            a1_1 = vaddq_s32(a1_1, vpaddlq_s16(vmull_s8(vget_low_s8(hi1_1), vget_low_s8(xd1.val[1]))));
+            a1_1 = vaddq_s32(a1_1, vpaddlq_s16(vmull_s8(vget_high_s8(hi1_1), vget_high_s8(xd1.val[1]))));
+#endif
+            float s1 = x_scales[b + 1];
+            sumv0 = vmlaq_n_f32(sumv0, vcvtq_f32_s32(a0_1), si0[b + 1] * s1);
+            sumv1 = vmlaq_n_f32(sumv1, vcvtq_f32_s32(a1_1), si1[b + 1] * s1);
+        }
+        /* Handle odd remaining block */
+        for (; b < n_blocks; b++) {
+            uint8x16_t pk0 = vld1q_u8(wi0 + b * 16);
+            uint8x16_t pk1 = vld1q_u8(wi1 + b * 16);
+            int8x16x2_t xd = vld2q_s8(x_q8 + b * 32);
+
+            int8x16_t lo0 = vreinterpretq_s8_u8(vsubq_u8(vandq_u8(pk0, mask_0f), v8));
+            int8x16_t hi0 = vreinterpretq_s8_u8(vsubq_u8(vshrq_n_u8(pk0, 4), v8));
+            int8x16_t lo1 = vreinterpretq_s8_u8(vsubq_u8(vandq_u8(pk1, mask_0f), v8));
+            int8x16_t hi1 = vreinterpretq_s8_u8(vsubq_u8(vshrq_n_u8(pk1, 4), v8));
+
+            int32x4_t a0 = vdupq_n_s32(0);
+            int32x4_t a1 = vdupq_n_s32(0);
+#if defined(__ARM_FEATURE_DOTPROD)
+            a0 = vdotq_s32(vdotq_s32(a0, lo0, xd.val[0]), hi0, xd.val[1]);
+            a1 = vdotq_s32(vdotq_s32(a1, lo1, xd.val[0]), hi1, xd.val[1]);
+#else
+            a0 = vaddq_s32(a0, vpaddlq_s16(vmull_s8(vget_low_s8(lo0), vget_low_s8(xd.val[0]))));
+            a0 = vaddq_s32(a0, vpaddlq_s16(vmull_s8(vget_high_s8(lo0), vget_high_s8(xd.val[0]))));
+            a0 = vaddq_s32(a0, vpaddlq_s16(vmull_s8(vget_low_s8(hi0), vget_low_s8(xd.val[1]))));
+            a0 = vaddq_s32(a0, vpaddlq_s16(vmull_s8(vget_high_s8(hi0), vget_high_s8(xd.val[1]))));
+            a1 = vaddq_s32(a1, vpaddlq_s16(vmull_s8(vget_low_s8(lo1), vget_low_s8(xd.val[0]))));
+            a1 = vaddq_s32(a1, vpaddlq_s16(vmull_s8(vget_high_s8(lo1), vget_high_s8(xd.val[0]))));
+            a1 = vaddq_s32(a1, vpaddlq_s16(vmull_s8(vget_low_s8(hi1), vget_low_s8(xd.val[1]))));
+            a1 = vaddq_s32(a1, vpaddlq_s16(vmull_s8(vget_high_s8(hi1), vget_high_s8(xd.val[1]))));
+#endif
+            float s = x_scales[b];
+            sumv0 = vmlaq_n_f32(sumv0, vcvtq_f32_s32(a0), si0[b] * s);
+            sumv1 = vmlaq_n_f32(sumv1, vcvtq_f32_s32(a1), si1[b] * s);
+        }
+        out[i]     = vaddvq_f32(sumv0);
+        out[i + 1] = vaddvq_f32(sumv1);
+#else
+        float sum0 = 0.0f, sum1 = 0.0f;
+        for (int b = 0; b < n_blocks; b++) {
+            const int8_t* xb = x_q8 + b * 32;
+            const uint8_t* qb0 = wi0 + b * 16;
+            const uint8_t* qb1 = wi1 + b * 16;
+            int32_t isum0 = 0, isum1 = 0;
+            for (int j = 0; j < 16; j++) {
+                int x0 = (int)xb[2 * j], x1 = (int)xb[2 * j + 1];
+                isum0 += ((qb0[j] & 0x0F) - 8) * x0 + ((qb0[j] >> 4) - 8) * x1;
+                isum1 += ((qb1[j] & 0x0F) - 8) * x0 + ((qb1[j] >> 4) - 8) * x1;
+            }
+            float s = x_scales[b];
+            sum0 += (float)isum0 * si0[b] * s;
+            sum1 += (float)isum1 * si1[b] * s;
+        }
+        out[i]     = sum0;
+        out[i + 1] = sum1;
+#endif
+    }
+    /* Handle odd remaining row */
+    if ((end_row - start_row) & 1) {
+        int i = end_row - 1;
         const uint8_t* wi = w_qs + (size_t)i * n_blocks * 16;
         const float* si = w_scales + (size_t)i * n_blocks;
-        float sum = 0.0f;
 #ifdef __ARM_NEON
+        float32x4_t sumv = vdupq_n_f32(0.0f);
         for (int b = 0; b < n_blocks; b++) {
-            const uint8_t* qb = wi + b * 16;
-            const int8_t* xb = x_q8 + b * 32;
-
-            /* Load 16 packed bytes = 32 Q4 values */
-            uint8x16_t packed = vld1q_u8(qb);
-            /* Unpack low nibbles: values 0..15 */
-            uint8x16_t lo_u = vandq_u8(packed, vdupq_n_u8(0x0F));
-            /* Unpack high nibbles: values 0..15 */
-            uint8x16_t hi_u = vshrq_n_u8(packed, 4);
-            /* Subtract 8 to center: [0,15] -> [-8,7], reinterpret as signed */
-            int8x16_t lo = vreinterpretq_s8_u8(vsubq_u8(lo_u, vdupq_n_u8(8)));
-            int8x16_t hi = vreinterpretq_s8_u8(vsubq_u8(hi_u, vdupq_n_u8(8)));
-
-            /* Load Q8 activation: 32 int8 values, split as lo[0..15] hi[16..31]
-             * But Q4 packing interleaves: lo nibble = even indices, hi nibble = odd indices
-             * So we need to deinterleave x_q8 to match */
-
-            /* x_q8[b*32+0], x_q8[b*32+2], ..., x_q8[b*32+30] -> even indices
-             * x_q8[b*32+1], x_q8[b*32+3], ..., x_q8[b*32+31] -> odd indices */
-            int8x16x2_t x_deint = vld2q_s8(xb);
-            /* x_deint.val[0] = even indices (matches lo nibble)
-             * x_deint.val[1] = odd indices (matches hi nibble) */
-
-            int32x4_t acc = vdupq_n_s32(0);
+            uint8x16_t pk = vld1q_u8(wi + b * 16);
+            int8x16x2_t xd = vld2q_s8(x_q8 + b * 32);
+            int8x16_t lo = vreinterpretq_s8_u8(vsubq_u8(vandq_u8(pk, mask_0f), v8));
+            int8x16_t hi = vreinterpretq_s8_u8(vsubq_u8(vshrq_n_u8(pk, 4), v8));
+            int32x4_t a = vdupq_n_s32(0);
 #if defined(__ARM_FEATURE_DOTPROD)
-            acc = vdotq_s32(acc, lo, x_deint.val[0]);
-            acc = vdotq_s32(acc, hi, x_deint.val[1]);
+            a = vdotq_s32(vdotq_s32(a, lo, xd.val[0]), hi, xd.val[1]);
 #else
-            /* Fallback: widen multiply and accumulate */
-            int16x8_t prod_lo_0 = vmull_s8(vget_low_s8(lo), vget_low_s8(x_deint.val[0]));
-            int16x8_t prod_lo_1 = vmull_s8(vget_high_s8(lo), vget_high_s8(x_deint.val[0]));
-            int16x8_t prod_hi_0 = vmull_s8(vget_low_s8(hi), vget_low_s8(x_deint.val[1]));
-            int16x8_t prod_hi_1 = vmull_s8(vget_high_s8(hi), vget_high_s8(x_deint.val[1]));
-            acc = vaddq_s32(acc, vpaddlq_s16(prod_lo_0));
-            acc = vaddq_s32(acc, vpaddlq_s16(prod_lo_1));
-            acc = vaddq_s32(acc, vpaddlq_s16(prod_hi_0));
-            acc = vaddq_s32(acc, vpaddlq_s16(prod_hi_1));
+            a = vaddq_s32(a, vpaddlq_s16(vmull_s8(vget_low_s8(lo), vget_low_s8(xd.val[0]))));
+            a = vaddq_s32(a, vpaddlq_s16(vmull_s8(vget_high_s8(lo), vget_high_s8(xd.val[0]))));
+            a = vaddq_s32(a, vpaddlq_s16(vmull_s8(vget_low_s8(hi), vget_low_s8(xd.val[1]))));
+            a = vaddq_s32(a, vpaddlq_s16(vmull_s8(vget_high_s8(hi), vget_high_s8(xd.val[1]))));
 #endif
-            int32_t isum = vaddvq_s32(acc);
-            sum += (float)isum * si[b] * x_scales[b];
+            sumv = vmlaq_n_f32(sumv, vcvtq_f32_s32(a), si[b] * x_scales[b]);
         }
+        out[i] = vaddvq_f32(sumv);
 #else
+        float sum = 0.0f;
         for (int b = 0; b < n_blocks; b++) {
             const uint8_t* qb = wi + b * 16;
             const int8_t* xb = x_q8 + b * 32;
@@ -485,8 +701,8 @@ static void matmul_q4_rows(float* out, const float* x,
             }
             sum += (float)isum * si[b] * x_scales[b];
         }
-#endif
         out[i] = sum;
+#endif
     }
 }
 
@@ -500,33 +716,38 @@ static void* matmul_q4_worker(void* arg) {
 
 /* Q4 matmul with multi-threading support.
  * Quantizes activation x to Q8 once, then does Q4xQ8 integer dot products. */
+/* Persistent Q8 workspace to avoid per-call malloc */
+static int8_t*  g_q8_buf = NULL;
+static float*   g_q8_scales = NULL;
+static int      g_q8_cap = 0;
+
 void tq_matmul_q4(float* out, const float* x, const uint8_t* w_qs, const float* w_scales,
                    int n, int d) {
     /* Quantize activation x to Q8 (amortized across all rows) */
     int n_blocks = d / 32;
-    int8_t* x_q8 = (int8_t*)malloc((size_t)d * sizeof(int8_t));
-    float* x_scales = (float*)malloc((size_t)(n_blocks + 1) * sizeof(float));
-    if (!x_q8 || !x_scales) {
-        free(x_q8);
-        free(x_scales);
-        return;
+    if (d > g_q8_cap) {
+        free(g_q8_buf); free(g_q8_scales);
+        g_q8_buf = (int8_t*)malloc((size_t)d * sizeof(int8_t));
+        g_q8_scales = (float*)malloc((size_t)(d / 32 + 2) * sizeof(float));
+        g_q8_cap = d;
     }
+    int8_t* x_q8 = g_q8_buf;
+    float* x_scales = g_q8_scales;
+    if (!x_q8 || !x_scales) return;
     tq_quantize_row_q8(x, x_q8, x_scales, d);
 
     int n_threads = g_n_threads;
 
     if (n < 256 || n_threads <= 1) {
         matmul_q4_rows(out, x, w_qs, w_scales, x_q8, x_scales, 0, n, d);
-        free(x_q8);
-        free(x_scales);
         return;
     }
 
     if (n_threads > n) n_threads = n;
-    if (n_threads > 16) n_threads = 16;
+    if (n_threads > TP_MAX) n_threads = TP_MAX;
 
-    pthread_t threads[16];
-    matmul_q4_task_t tasks[16];
+    matmul_q4_task_t tasks[TP_MAX];
+    void* ptrs[TP_MAX];
 
     int rows_per_thread = n / n_threads;
     for (int t = 0; t < n_threads; t++) {
@@ -539,14 +760,18 @@ void tq_matmul_q4(float* out, const float* x, const uint8_t* w_qs, const float* 
         tasks[t].d = d;
         tasks[t].start_row = t * rows_per_thread;
         tasks[t].end_row = (t == n_threads - 1) ? n : (t + 1) * rows_per_thread;
-        pthread_create(&threads[t], NULL, matmul_q4_worker, &tasks[t]);
-    }
-    for (int t = 0; t < n_threads; t++) {
-        pthread_join(threads[t], NULL);
+        ptrs[t] = &tasks[t];
     }
 
-    free(x_q8);
-    free(x_scales);
+    if (g_tp.active && n_threads == g_tp.n_workers) {
+        tp_run((tp_fn)matmul_q4_worker, ptrs, n_threads);
+    } else {
+        pthread_t threads[TP_MAX];
+        for (int t = 0; t < n_threads; t++)
+            pthread_create(&threads[t], NULL, matmul_q4_worker, &tasks[t]);
+        for (int t = 0; t < n_threads; t++)
+            pthread_join(threads[t], NULL);
+    }
 }
 
 /* ============================================================
@@ -567,10 +792,10 @@ void tq_matmul_q4_preq(float* out, const uint8_t* w_qs, const float* w_scales,
     }
 
     if (n_threads > n) n_threads = n;
-    if (n_threads > 16) n_threads = 16;
+    if (n_threads > TP_MAX) n_threads = TP_MAX;
 
-    pthread_t threads[16];
-    matmul_q4_task_t tasks[16];
+    matmul_q4_task_t tasks[TP_MAX];
+    void* ptrs[TP_MAX];
 
     int rows_per_thread = n / n_threads;
     for (int t = 0; t < n_threads; t++) {
@@ -583,10 +808,17 @@ void tq_matmul_q4_preq(float* out, const uint8_t* w_qs, const float* w_scales,
         tasks[t].d = d;
         tasks[t].start_row = t * rows_per_thread;
         tasks[t].end_row = (t == n_threads - 1) ? n : (t + 1) * rows_per_thread;
-        pthread_create(&threads[t], NULL, matmul_q4_worker, &tasks[t]);
+        ptrs[t] = &tasks[t];
     }
-    for (int t = 0; t < n_threads; t++) {
-        pthread_join(threads[t], NULL);
+
+    if (g_tp.active && n_threads == g_tp.n_workers) {
+        tp_run((tp_fn)matmul_q4_worker, ptrs, n_threads);
+    } else {
+        pthread_t threads[TP_MAX];
+        for (int t = 0; t < n_threads; t++)
+            pthread_create(&threads[t], NULL, matmul_q4_worker, &tasks[t]);
+        for (int t = 0; t < n_threads; t++)
+            pthread_join(threads[t], NULL);
     }
 }
 
@@ -689,10 +921,10 @@ void tq_matmul_bf16(float* out, const float* x, const uint16_t* w_bf16, int n, i
     }
 
     if (n_threads > n) n_threads = n;
-    if (n_threads > 16) n_threads = 16;
+    if (n_threads > TP_MAX) n_threads = TP_MAX;
 
-    pthread_t threads[16];
-    matmul_bf16_task_t tasks[16];
+    matmul_bf16_task_t tasks[TP_MAX];
+    void* ptrs[TP_MAX];
 
     int rows_per_thread = n / n_threads;
     for (int t = 0; t < n_threads; t++) {
@@ -702,10 +934,17 @@ void tq_matmul_bf16(float* out, const float* x, const uint16_t* w_bf16, int n, i
         tasks[t].d = d;
         tasks[t].start_row = t * rows_per_thread;
         tasks[t].end_row = (t == n_threads - 1) ? n : (t + 1) * rows_per_thread;
-        pthread_create(&threads[t], NULL, matmul_bf16_worker, &tasks[t]);
+        ptrs[t] = &tasks[t];
     }
-    for (int t = 0; t < n_threads; t++) {
-        pthread_join(threads[t], NULL);
+
+    if (g_tp.active && n_threads == g_tp.n_workers) {
+        tp_run((tp_fn)matmul_bf16_worker, ptrs, n_threads);
+    } else {
+        pthread_t threads[TP_MAX];
+        for (int t = 0; t < n_threads; t++)
+            pthread_create(&threads[t], NULL, matmul_bf16_worker, &tasks[t]);
+        for (int t = 0; t < n_threads; t++)
+            pthread_join(threads[t], NULL);
     }
 }
 
