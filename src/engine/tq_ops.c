@@ -724,7 +724,6 @@ static int      g_q8_cap = 0;
 void tq_matmul_q4(float* out, const float* x, const uint8_t* w_qs, const float* w_scales,
                    int n, int d) {
     /* Quantize activation x to Q8 (amortized across all rows) */
-    int n_blocks = d / 32;
     if (d > g_q8_cap) {
         free(g_q8_buf); free(g_q8_scales);
         g_q8_buf = (int8_t*)malloc((size_t)d * sizeof(int8_t));
