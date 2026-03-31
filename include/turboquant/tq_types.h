@@ -49,7 +49,9 @@ typedef enum {
     TQ_TYPE_UNIFORM_4B= 5,   /* Min-Max uniform 4-bit             */
     TQ_TYPE_UNIFORM_2B= 6,   /* Min-Max uniform 2-bit             */
     TQ_TYPE_MIXED_4B8 = 7,   /* Mixed: 4-bit base + fp16 outliers */
-    TQ_TYPE_COUNT     = 8
+    TQ_TYPE_TURBO_KV_3B = 8, /* TurboQuant KV: 2-bit codebook + 1-bit QJL residual */
+    TQ_TYPE_TURBO_KV_4B = 9, /* TurboQuant KV: 3-bit codebook + 1-bit QJL residual */
+    TQ_TYPE_COUNT     = 10
 } tq_type;
 
 /* ============================================================
@@ -175,6 +177,31 @@ typedef struct {
 }
 #endif
 
+/* TurboQuant KV cache block: RHT + Lloyd-Max codebook + QJL residual
+ * 3-bit variant: 2-bit codebook (4 levels) + 1-bit QJL sign hash
+ * Block covers TQ_BK elements (128).
+ * Layout: norm(2) + residual_norm(2) + rht_seed(4) + mse_2bit(32) + qjl_signs(16) = 56 bytes
+ */
+typedef struct {
+    uint16_t norm;                     /* L2 norm of original vector (fp16)      */
+    uint16_t residual_norm;            /* L2 norm of residual after MSE (fp16)   */
+    uint32_t rht_seed;                 /* RHT random seed for this block         */
+    uint8_t  mse_indices[TQ_BK / 4];  /* 2-bit packed codebook indices (32B)    */
+    uint8_t  qjl_signs[TQ_BK / 8];    /* 1-bit QJL sign hash on residual (16B) */
+} block_tq_turbo_kv_3b;
+
+/* TurboQuant KV cache block: 4-bit variant
+ * 3-bit codebook (8 levels) + 1-bit QJL sign hash
+ * Layout: norm(2) + residual_norm(2) + rht_seed(4) + mse_3bit(48) + qjl_signs(16) = 72 bytes
+ */
+typedef struct {
+    uint16_t norm;                         /* L2 norm of original vector (fp16)      */
+    uint16_t residual_norm;                /* L2 norm of residual after MSE (fp16)   */
+    uint32_t rht_seed;                     /* RHT random seed for this block         */
+    uint8_t  mse_indices[TQ_BK * 3 / 8];  /* 3-bit packed codebook indices (48B)    */
+    uint8_t  qjl_signs[TQ_BK / 8];        /* 1-bit QJL sign hash on residual (16B) */
+} block_tq_turbo_kv_4b;
+
 /* ============================================================
  * Block size verification (compile-time, C/C++ compatible)
  * Uses negative-size array trick for universal compatibility.
@@ -187,5 +214,7 @@ TQ_CHECK_SIZE(block_tq_qjl,        4 + TQ_SKETCH_DIM / 8 + TQ_OUTLIERS);
 TQ_CHECK_SIZE(block_tq_uniform_4b, 4 + TQ_BK / 2);
 TQ_CHECK_SIZE(block_tq_uniform_2b, 4 + TQ_BK / 4);
 TQ_CHECK_SIZE(block_tq_mixed_4b8, 4 + TQ_MIXED_OUTLIERS + TQ_MIXED_OUTLIERS * 2 + TQ_BK / 2);
+TQ_CHECK_SIZE(block_tq_turbo_kv_3b, 8 + TQ_BK / 4 + TQ_BK / 8);
+TQ_CHECK_SIZE(block_tq_turbo_kv_4b, 8 + TQ_BK * 3 / 8 + TQ_BK / 8);
 
 #endif /* TQ_TYPES_H */

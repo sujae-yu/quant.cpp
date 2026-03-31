@@ -39,8 +39,10 @@ enum {
     GGML_TYPE_TQ_TURBO_4B   = GGML_TYPE_TQ_BASE + 4,
     GGML_TYPE_TQ_UNIFORM_4B = GGML_TYPE_TQ_BASE + 5,
     GGML_TYPE_TQ_UNIFORM_2B = GGML_TYPE_TQ_BASE + 6,
-    GGML_TYPE_TQ_MIXED_4B8  = GGML_TYPE_TQ_BASE + 7,
-    GGML_TYPE_TQ_COUNT      = 8,
+    GGML_TYPE_TQ_MIXED_4B8     = GGML_TYPE_TQ_BASE + 7,
+    GGML_TYPE_TQ_TURBO_KV_3B  = GGML_TYPE_TQ_BASE + 8,
+    GGML_TYPE_TQ_TURBO_KV_4B  = GGML_TYPE_TQ_BASE + 9,
+    GGML_TYPE_TQ_COUNT         = 10,
 };
 
 /* ============================================================
@@ -56,7 +58,9 @@ static int tq_to_ggml_type(tq_type type) {
         case TQ_TYPE_TURBO_4B:   return GGML_TYPE_TQ_TURBO_4B;
         case TQ_TYPE_UNIFORM_4B: return GGML_TYPE_TQ_UNIFORM_4B;
         case TQ_TYPE_UNIFORM_2B: return GGML_TYPE_TQ_UNIFORM_2B;
-        case TQ_TYPE_MIXED_4B8:  return GGML_TYPE_TQ_MIXED_4B8;
+        case TQ_TYPE_MIXED_4B8:     return GGML_TYPE_TQ_MIXED_4B8;
+        case TQ_TYPE_TURBO_KV_3B:  return GGML_TYPE_TQ_TURBO_KV_3B;
+        case TQ_TYPE_TURBO_KV_4B:  return GGML_TYPE_TQ_TURBO_KV_4B;
         default: return -1;
     }
 }
@@ -70,7 +74,9 @@ static tq_type ggml_to_tq_type(int ggml_id) {
         case GGML_TYPE_TQ_TURBO_4B:   return TQ_TYPE_TURBO_4B;
         case GGML_TYPE_TQ_UNIFORM_4B: return TQ_TYPE_UNIFORM_4B;
         case GGML_TYPE_TQ_UNIFORM_2B: return TQ_TYPE_UNIFORM_2B;
-        case GGML_TYPE_TQ_MIXED_4B8:  return TQ_TYPE_MIXED_4B8;
+        case GGML_TYPE_TQ_MIXED_4B8:     return TQ_TYPE_MIXED_4B8;
+        case GGML_TYPE_TQ_TURBO_KV_3B:  return TQ_TYPE_TURBO_KV_3B;
+        case GGML_TYPE_TQ_TURBO_KV_4B:  return TQ_TYPE_TURBO_KV_4B;
         default: return TQ_TYPE_COUNT;
     }
 }
@@ -130,7 +136,9 @@ TQ_GGML_WRAPPERS(turbo_3b,   TQ_TYPE_TURBO_3B)
 TQ_GGML_WRAPPERS(turbo_4b,   TQ_TYPE_TURBO_4B)
 TQ_GGML_WRAPPERS(uniform_4b, TQ_TYPE_UNIFORM_4B)
 TQ_GGML_WRAPPERS(uniform_2b, TQ_TYPE_UNIFORM_2B)
-TQ_GGML_WRAPPERS(mixed_4b8,  TQ_TYPE_MIXED_4B8)
+TQ_GGML_WRAPPERS(mixed_4b8,     TQ_TYPE_MIXED_4B8)
+TQ_GGML_WRAPPERS(turbo_kv_3b,  TQ_TYPE_TURBO_KV_3B)
+TQ_GGML_WRAPPERS(turbo_kv_4b,  TQ_TYPE_TURBO_KV_4B)
 
 /* ============================================================
  * vec_dot wrappers (quantized key . FP32 query -> scalar)
@@ -178,7 +186,9 @@ TQ_GGML_VEC_DOT(turbo_3b,   TQ_TYPE_TURBO_3B)
 TQ_GGML_VEC_DOT(turbo_4b,   TQ_TYPE_TURBO_4B)
 TQ_GGML_VEC_DOT(uniform_4b, TQ_TYPE_UNIFORM_4B)
 TQ_GGML_VEC_DOT(uniform_2b, TQ_TYPE_UNIFORM_2B)
-TQ_GGML_VEC_DOT(mixed_4b8,  TQ_TYPE_MIXED_4B8)
+TQ_GGML_VEC_DOT(mixed_4b8,     TQ_TYPE_MIXED_4B8)
+TQ_GGML_VEC_DOT(turbo_kv_3b,  TQ_TYPE_TURBO_KV_3B)
+TQ_GGML_VEC_DOT(turbo_kv_4b,  TQ_TYPE_TURBO_KV_4B)
 
 /* ============================================================
  * GGML type trait table
@@ -261,6 +271,22 @@ static const tq_ggml_type_trait TQ_GGML_TRAITS[GGML_TYPE_TQ_COUNT] = {
         tq_ggml_from_float_mixed_4b8,
         tq_ggml_to_float_mixed_4b8,
         tq_ggml_vec_dot_mixed_4b8,
+    },
+    {
+        "tq_turbo_kv_3b", GGML_TYPE_TQ_TURBO_KV_3B, TQ_TYPE_TURBO_KV_3B,
+        sizeof(block_tq_turbo_kv_3b), TQ_BK,
+        (float)sizeof(block_tq_turbo_kv_3b) * 8.0f / TQ_BK,
+        tq_ggml_from_float_turbo_kv_3b,
+        tq_ggml_to_float_turbo_kv_3b,
+        tq_ggml_vec_dot_turbo_kv_3b,
+    },
+    {
+        "tq_turbo_kv_4b", GGML_TYPE_TQ_TURBO_KV_4B, TQ_TYPE_TURBO_KV_4B,
+        sizeof(block_tq_turbo_kv_4b), TQ_BK,
+        (float)sizeof(block_tq_turbo_kv_4b) * 8.0f / TQ_BK,
+        tq_ggml_from_float_turbo_kv_4b,
+        tq_ggml_to_float_turbo_kv_4b,
+        tq_ggml_vec_dot_turbo_kv_4b,
     },
 };
 
@@ -346,9 +372,15 @@ tq_type tq_parse_kv_cache_type(const char* arg) {
         { "uniform4",     TQ_TYPE_UNIFORM_4B },
         { "uniform_4b",   TQ_TYPE_UNIFORM_4B },
         { "tq-uniform-4b",TQ_TYPE_UNIFORM_4B },
-        { "uniform2",     TQ_TYPE_UNIFORM_2B },
-        { "uniform_2b",   TQ_TYPE_UNIFORM_2B },
-        { "tq-uniform-2b",TQ_TYPE_UNIFORM_2B },
+        { "uniform2",        TQ_TYPE_UNIFORM_2B },
+        { "uniform_2b",     TQ_TYPE_UNIFORM_2B },
+        { "tq-uniform-2b",  TQ_TYPE_UNIFORM_2B },
+        { "turbo_kv_3b",    TQ_TYPE_TURBO_KV_3B },
+        { "tq-turbo-kv-3b", TQ_TYPE_TURBO_KV_3B },
+        { "turbokv3",       TQ_TYPE_TURBO_KV_3B },
+        { "turbo_kv_4b",    TQ_TYPE_TURBO_KV_4B },
+        { "tq-turbo-kv-4b", TQ_TYPE_TURBO_KV_4B },
+        { "turbokv4",       TQ_TYPE_TURBO_KV_4B },
     };
 
     for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
