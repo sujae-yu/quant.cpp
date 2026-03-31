@@ -196,6 +196,14 @@ typedef struct {
     float* delta_ab;     /* [delta_n_heads * 2] workspace for a,b projections */
     float* delta_out;    /* [z_dim] workspace for output */
 
+    /* Dynamic workspace buffers (sized from model config, replacing stack arrays) */
+    int8_t* xb_q8;          /* [hidden_dim] pre-quantized activation for Q4 matmuls */
+    float*  xb_q8s;         /* [hidden_dim/32 + 1] Q8 scales for xb_q8 */
+    float*  gate_vals;       /* [delta_n_heads] DeltaNet gate values */
+    float*  decay_vals;      /* [delta_n_heads] DeltaNet precomputed exp(gate) */
+    float*  delta_sk;        /* [delta_value_head_dim] DeltaNet S@K workspace */
+    float*  delta_dvec;      /* [delta_value_head_dim] DeltaNet delta workspace */
+
     /* Quantization workspace */
     void* quant_key_buf;    /* workspace for quantized keys */
     float* quant_score_buf; /* workspace for quantized attention scores */
