@@ -7,7 +7,7 @@
 [![Tests](https://img.shields.io/badge/tests-23%20suites-brightgreen)]()
 [![KV Quality](https://img.shields.io/badge/KV%20quality-30%2F30%20byte--identical-brightgreen)]()
 
-### 1-bit KV cache. 10.7x compression. Quality preserved.
+### 1-bit KV keys. 10.7x key compression. Quality preserved up to ~120 tokens.
 
 ```
 Gemma 3 4B, greedy decode, 10 prompts × 100 tokens:
@@ -45,22 +45,28 @@ The [TurboQuant paper](https://arxiv.org/abs/2504.19874) (Google Research, ICLR 
 
 Gemma 3 4B, 100 tokens, greedy, 10 diverse prompts (math, knowledge, code, multilingual):
 
-| KV Type | Bits | Per-token KV | Compression | vs Uniform 4-bit |
-|---------|------|-------------|-------------|-------------------|
+| KV Type | Key bits | Key size/token | Key compression | Quality (100 tok) |
+|---------|----------|---------------|----------------|-------------------|
 | uniform_4b | 4 | 36.12 KB | 3.8x | baseline |
 | turbo_kv_4b | 4 | 38.25 KB | 3.6x | **byte-identical** |
 | turbo_kv_3b | 3 | 29.75 KB | 4.6x | **byte-identical** |
 | **turbo_kv_1b** | **1** | **12.75 KB** | **10.7x** | **byte-identical** |
 
-### Memory at Long Context
+> Keys only — values remain FP32. Greedy decode is byte-identical up to ~120 tokens; outputs diverge beyond that but remain coherent. Value quantization is planned.
+
+### Key Compression at Long Context
+
+Currently **keys are compressed, values remain FP32**. Value quantization is planned.
 
 ```
-Gemma 3 4B, 32K tokens — KV cache only:
-  FP16 (llama.cpp):       4,352 MB
-  Uniform 4-bit:          1,156 MB
-  TurboQuant 3-bit:         952 MB
-  TurboQuant 1-bit:         408 MB   ← 3.9 GB saved vs FP16
+Gemma 3 4B, 32K tokens — key vectors only:
+  FP16 keys:               2,176 MB
+  Uniform 4-bit keys:        578 MB  (3.8x)
+  TurboQuant 3-bit keys:     476 MB  (4.6x)
+  TurboQuant 1-bit keys:     204 MB  (10.7x)
 ```
+
+Full K+V savings require V compression — with FP16 values + 1-bit keys: **~1.8x total K+V reduction**. With future V quantization, this grows to **~5x+**.
 
 ### Speed vs llama.cpp
 
@@ -82,7 +88,7 @@ bash scripts/quickstart.sh "What is deep learning?"
 ### Choose Your KV Compression
 
 ```bash
-./build/tq_run model.tqm -p "Hello" -k turbo_kv_1b   # 1-bit  (10.7x compression)
+./build/tq_run model.tqm -p "Hello" -k turbo_kv_1b   # 1-bit keys (10.7x key compression)
 ./build/tq_run model.tqm -p "Hello" -k turbo_kv_3b   # 3-bit  (4.6x, recommended)
 ./build/tq_run model.tqm -p "Hello" -k turbo_kv_4b   # 4-bit TurboQuant
 ./build/tq_run model.tqm -p "Hello" -k uniform_4b     # 4-bit uniform (baseline)

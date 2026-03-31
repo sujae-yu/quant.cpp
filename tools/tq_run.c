@@ -237,17 +237,21 @@ int main(int argc, char** argv) {
          * 2 (K+V) * n_layers * n_kv_heads * head_dim * 2 bytes per token */
         size_t fp16_per_token = (size_t)2 * c->n_layers * c->n_kv_heads * c->head_dim * 2;
 
-        /* Compressed KV: both keys and values quantized to same type.
-         * blocks_per_head * type_size bytes per head per layer, times 2 for K+V */
+        /* Compressed KV: keys quantized, values remain FP32.
+         * K: blocks_per_head * type_size bytes per head per layer
+         * V: n_kv_heads * head_dim * 4 bytes (FP32) per layer */
         size_t block_size = tq_type_block_size(kv_type);
         size_t type_size_bytes = tq_type_type_size(kv_type);
-        if (block_size == 0) block_size = TQ_BK;
-        if (type_size_bytes == 0) type_size_bytes = sizeof(block_tq_uniform_4b);
+        if (block_size == 0) { block_size = TQ_BK; }
+        if (type_size_bytes == 0) { type_size_bytes = sizeof(block_tq_uniform_4b); }
         size_t blocks_per_head = ((size_t)c->head_dim + block_size - 1) / block_size;
 
-        /* Q4 K+V per token: 2 * n_layers * n_kv_heads * blocks_per_head * type_size */
-        size_t compressed_per_token = (size_t)2 * c->n_layers * c->n_kv_heads
-                                    * blocks_per_head * type_size_bytes;
+        /* K (compressed) + V (FP32) per token */
+        size_t k_per_token = (size_t)c->n_layers * c->n_kv_heads
+                            * blocks_per_head * type_size_bytes;
+        size_t v_per_token = (size_t)c->n_layers * c->n_kv_heads
+                            * c->head_dim * sizeof(float);
+        size_t compressed_per_token = k_per_token + v_per_token;
 
         /* If kv_type is fp32 (sentinel), both key and value are FP32 */
         if (kv_type >= TQ_TYPE_COUNT) {
@@ -267,15 +271,20 @@ int main(int argc, char** argv) {
                 c->n_layers, c->n_kv_heads, c->head_dim);
         fprintf(stderr, "KV type:              %s\n",
                 kv_type < TQ_TYPE_COUNT ? tq_type_name(kv_type) : "fp32");
-        fprintf(stderr, "Per-token KV (Q4):    %.2f KB\n",
+        fprintf(stderr, "Per-token K (%s): %.2f KB\n",
+                kv_type < TQ_TYPE_COUNT ? tq_type_name(kv_type) : "fp32",
+                (double)k_per_token / 1024.0);
+        fprintf(stderr, "Per-token V (FP32):   %.2f KB\n",
+                (double)v_per_token / 1024.0);
+        fprintf(stderr, "Per-token K+V total:  %.2f KB\n",
                 (double)compressed_per_token / 1024.0);
-        fprintf(stderr, "Per-token KV (FP16):  %.2f KB\n",
+        fprintf(stderr, "Per-token K+V (FP16): %.2f KB\n",
                 (double)fp16_per_token / 1024.0);
-        fprintf(stderr, "Total KV (Q4):        %.2f MB\n",
+        fprintf(stderr, "Total K+V:            %.2f MB\n",
                 (double)total_compressed / (1024.0 * 1024.0));
-        fprintf(stderr, "Total KV (FP16):      %.2f MB\n",
+        fprintf(stderr, "Total K+V (FP16):     %.2f MB\n",
                 (double)total_fp16 / (1024.0 * 1024.0));
-        fprintf(stderr, "Compression ratio:    %.2fx\n", ratio);
+        fprintf(stderr, "Compression ratio:    %.2fx (K+V combined)\n", ratio);
         fprintf(stderr, "Memory saved:         %.2f MB\n",
                 (double)(total_fp16 - total_compressed) / (1024.0 * 1024.0));
         fprintf(stderr, "=============================\n");
