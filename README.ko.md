@@ -9,13 +9,15 @@
 [![Build](https://img.shields.io/badge/build-passing-brightgreen)]()
 [![Tests](https://img.shields.io/badge/tests-70%2B%20pass-brightgreen)]()
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)]()
-[![Speed](https://img.shields.io/badge/47%20tok%2Fs-Qwen3.5--0.8B-blue)]()
+[![Speed](https://img.shields.io/badge/47%20tok%2Fs%20(Q4)-Qwen3.5--0.8B-blue)]()
 
 ```
-PyTorch CPU:     0.8 tok/s
-PyTorch GPU:      10 tok/s
-TurboQuant CPU:   47 tok/s  ← 59배 빠름, GPU 불필요
+PyTorch CPU (F32):     0.8 tok/s
+PyTorch GPU (F32):      10 tok/s
+TurboQuant CPU (Q4):    47 tok/s  ← GPU 불필요
 ```
+> **참고:** PyTorch는 F32, TurboQuant는 Q4 — 동일 조건 비교가 아닙니다.
+> 핵심 기여는 KV 캐시 압축(7.5x)과 정수 어텐션이며, 비양자화 PyTorch를 이기는 것이 아닙니다.
 
 ---
 
@@ -45,15 +47,17 @@ that uses artificial neural networks to learn complex patterns...
 
 ## 왜 TurboQuant인가?
 
-|  | PyTorch | TurboQuant.cpp |
+|  | PyTorch (F32) | TurboQuant.cpp (Q4) |
 |---|---|---|
-| **속도** | 0.8 tok/s | **47 tok/s** (59배) |
+| **속도** | 0.8 tok/s | **47 tok/s** |
 | **로딩** | 3초 | **0.3초** (mmap) |
-| **가중치 메모리** | 1.7 GB | **270 MB** (Q4) |
+| **가중치 메모리** | 1.7 GB (F32) | **270 MB** (Q4) |
 | **KV 캐시** | 전체 크기 | **7.5배 압축** |
 | **의존성** | PyTorch, transformers | **없음** |
 | **바이너리** | ~2 GB 설치 | **~1 MB** |
-| **품질** | 기준 | **코사인 0.999** (PyTorch 대비) |
+| **품질** | 기준 (F32) | **코사인 유사도 0.999** |
+
+> 속도 차이는 주로 Q4 양자화에 기인합니다. llama.cpp 대비 Q4-vs-Q4 공정 벤치마크를 준비 중입니다.
 
 ---
 

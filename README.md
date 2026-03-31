@@ -9,13 +9,15 @@ Load → Generate → Done. No Python. No GPU. Just one binary.
 [![Build](https://img.shields.io/badge/build-passing-brightgreen)]()
 [![Tests](https://img.shields.io/badge/tests-70%2B%20pass-brightgreen)]()
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)]()
-[![Speed](https://img.shields.io/badge/47%20tok%2Fs-Qwen3.5--0.8B-blue)]()
+[![Speed](https://img.shields.io/badge/47%20tok%2Fs%20(Q4)-Qwen3.5--0.8B-blue)]()
 
 ```
-PyTorch CPU:     0.8 tok/s
-PyTorch GPU:      10 tok/s
-TurboQuant CPU:   47 tok/s  ← 59x faster, no GPU needed
+PyTorch CPU (F32):     0.8 tok/s
+PyTorch GPU (F32):      10 tok/s
+TurboQuant CPU (Q4):    47 tok/s  ← no GPU needed
 ```
+> **Note:** PyTorch runs F32, TurboQuant runs Q4 — not an apples-to-apples comparison.
+> The real contribution is KV cache compression (7.5x) and integer attention, not beating unquantized PyTorch.
 
 ---
 
@@ -45,15 +47,17 @@ that uses artificial neural networks to learn complex patterns...
 
 ## Why TurboQuant?
 
-|  | PyTorch | TurboQuant.cpp |
+|  | PyTorch (F32) | TurboQuant.cpp (Q4) |
 |---|---|---|
-| **Speed** | 0.8 tok/s | **47 tok/s** (59x) |
+| **Speed** | 0.8 tok/s | **47 tok/s** |
 | **Loading** | 3 sec | **0.3 sec** (mmap) |
-| **Weight Memory** | 1.7 GB | **270 MB** (Q4) |
+| **Weight Memory** | 1.7 GB (F32) | **270 MB** (Q4) |
 | **KV Cache** | Full size | **7.5x compressed** |
 | **Dependencies** | PyTorch, transformers, torch | **None** |
 | **Binary Size** | ~2 GB installed | **~1 MB** |
-| **Quality** | Baseline | **0.999 cosine** (vs PyTorch) |
+| **Quality** | Baseline (F32) | **0.999 cosine similarity** |
+
+> Speed difference is largely due to Q4 quantization. A fair Q4-vs-Q4 benchmark against llama.cpp is planned.
 
 ---
 
