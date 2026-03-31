@@ -28,18 +28,25 @@ Qwen3.5-0.8B, Q4_0, CPU 전용, Apple Silicon M-series
 
 ---
 
-## 30초 빠른 시작
+## 빠른 시작
 
 ```bash
 git clone https://github.com/quantumaikr/TurboQuant.cpp && cd TurboQuant.cpp
+bash scripts/quickstart.sh "What is deep learning?"
+```
+
+이것만으로 끝입니다. 스크립트가 엔진 빌드, [Qwen3.5-0.8B](https://huggingface.co/Qwen/Qwen3.5-0.8B) 다운로드 (~1.5 GB), TQM 변환, 추론까지 자동 수행합니다.
+
+<details>
+<summary>수동 설정 (단계별 진행 시)</summary>
+
+```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc)
-
-# 모델 변환 (1회, HuggingFace 캐시 자동 감지)
-./build/tq_convert
-
-# 실행
+pip3 install huggingface_hub && python3 -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3.5-0.8B')"
+./build/tq_convert -o model.tqm
 ./build/tq_run model.tqm -p "What is deep learning?" -j 4
 ```
+</details>
 
 ```
 Prompt: What is deep learning?

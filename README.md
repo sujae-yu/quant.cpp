@@ -28,18 +28,25 @@ Same model, same quantization, same hardware. Apples-to-apples.
 
 ---
 
-## 30-Second Quick Start
+## Quick Start
 
 ```bash
 git clone https://github.com/quantumaikr/TurboQuant.cpp && cd TurboQuant.cpp
+bash scripts/quickstart.sh "What is deep learning?"
+```
+
+That's it. The script builds the engine, downloads [Qwen3.5-0.8B](https://huggingface.co/Qwen/Qwen3.5-0.8B) (~1.5 GB), converts it to TQM, and runs inference.
+
+<details>
+<summary>Manual setup (if you prefer step by step)</summary>
+
+```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc)
-
-# Convert model (one-time, auto-detects from HuggingFace cache)
-./build/tq_convert
-
-# Run
+pip3 install huggingface_hub && python3 -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3.5-0.8B')"
+./build/tq_convert -o model.tqm
 ./build/tq_run model.tqm -p "What is deep learning?" -j 4
 ```
+</details>
 
 ```
 Prompt: What is deep learning?
