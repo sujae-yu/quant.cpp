@@ -10,12 +10,14 @@ Qwen3.5 + Gemma 3 지원. Gemma 4 대응 준비 완료.
 [![Tests](https://img.shields.io/badge/tests-70%2B%20pass-brightgreen)]()
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)]()
 [![Qwen3.5](https://img.shields.io/badge/Qwen3.5--0.8B-82%20tok%2Fs-blue)]()
-[![Gemma3](https://img.shields.io/badge/Gemma3--270M-176%20tok%2Fs-blue)]()
+[![Gemma3-4B](https://img.shields.io/badge/Gemma3--4B-5.2%20tok%2Fs-blue)]()
+[![Gemma3-270M](https://img.shields.io/badge/Gemma3--270M-176%20tok%2Fs-blue)]()
 
 ### 지원 모델
 
 | 모델 | 파라미터 | 속도 (Q4, 6T) | 검증 |
 |------|----------|---------------|------|
+| **Gemma 3 4B** | 4B | 5.2 tok/s | "프랑스 수도" → "Paris" |
 | **Qwen3.5-0.8B** | 752M | 82 tok/s | PyTorch 대비 코사인 0.999 |
 | **Gemma 3 270M** | 270M | 176 tok/s | PyTorch 대비 레이어별 일치 |
 
