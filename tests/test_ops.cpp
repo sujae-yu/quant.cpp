@@ -593,9 +593,21 @@ TEST(TqOps, CreateFreeState) {
     EXPECT_NE(state->x, nullptr);
     EXPECT_NE(state->logits, nullptr);
     EXPECT_NE(state->key_cache, nullptr);
-    EXPECT_NE(state->value_cache, nullptr);
+    /* With KV quantization enabled, values are stored as FP16 */
+    EXPECT_EQ(state->use_fp16_values, 1);
+    EXPECT_NE(state->value_cache_fp16, nullptr);
+    EXPECT_EQ(state->value_cache, nullptr);
 
     tq_free_state(state);
+
+    /* FP32 path: when kv_type is fp32, value_cache should be FP32 */
+    tq_state_t* state_fp32 = tq_create_state(&config, TQ_TYPE_COUNT);
+    ASSERT_NE(state_fp32, nullptr);
+    EXPECT_EQ(state_fp32->use_fp16_values, 0);
+    EXPECT_NE(state_fp32->value_cache, nullptr);
+    EXPECT_EQ(state_fp32->value_cache_fp16, nullptr);
+
+    tq_free_state(state_fp32);
 }
 
 TEST(TqOps, CreateStateNull) {

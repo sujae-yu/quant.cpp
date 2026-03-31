@@ -30,6 +30,52 @@
 #endif
 
 /* ============================================================
+ * FP16 helpers (IEEE 754 half-precision, storage only)
+ * ============================================================ */
+
+static uint16_t f32_to_fp16(float v) {
+    union { float f; uint32_t u; } bits;
+    bits.f = v;
+    uint32_t sign = (bits.u >> 16) & 0x8000;
+    int32_t  exp  = ((bits.u >> 23) & 0xFF) - 127 + 15;
+    uint32_t mant = (bits.u >> 13) & 0x03FF;
+    if (exp <= 0) return (uint16_t)sign;
+    if (exp >= 31) return (uint16_t)(sign | 0x7C00);
+    return (uint16_t)(sign | ((uint32_t)exp << 10) | mant);
+}
+
+static float fp16_to_f32(uint16_t h) {
+    union { float f; uint32_t u; } bits;
+    uint32_t sign = (h & 0x8000) << 16;
+    uint32_t exp  = (h >> 10) & 0x1F;
+    uint32_t mant = h & 0x03FF;
+    if (exp == 0) { bits.u = sign; return bits.f; }
+    if (exp == 31) { bits.u = sign | 0x7F800000 | (mant << 13); return bits.f; }
+    exp = exp - 15 + 127;
+    bits.u = sign | (exp << 23) | (mant << 13);
+    return bits.f;
+}
+
+/* Convert n floats to FP16 (NEON-optimized where available) */
+static void f32_to_fp16_vec(const float* src, uint16_t* dst, int n) {
+#ifdef __ARM_NEON
+    int i = 0;
+    for (; i + 3 < n; i += 4) {
+        float32x4_t vf = vld1q_f32(src + i);
+        float16x4_t vh = vcvt_f16_f32(vf);
+        vst1_u16(dst + i, vreinterpret_u16_f16(vh));
+    }
+    for (; i < n; i++) {
+        dst[i] = f32_to_fp16(src[i]);
+    }
+#else
+    for (int i = 0; i < n; i++) {
+        dst[i] = f32_to_fp16(src[i]);
+    }
+#endif
+}
+
+/* ============================================================
  * State management
  * ============================================================ */
 
@@ -76,8 +122,20 @@ tq_state_t* tq_create_state(const tq_model_config_t* config, tq_type kv_type) {
     /* KV cache for self_attn layers */
     size_t kv_layer_size = (size_t)max_seq * kv_dim;
     s->key_cache   = (float*)calloc((size_t)n_layers * kv_layer_size, sizeof(float));
-    s->value_cache = (float*)calloc((size_t)n_layers * kv_layer_size, sizeof(float));
-    s->kv_cache_size = (size_t)n_layers * kv_layer_size * sizeof(float);
+
+    /* Use FP16 value cache when KV key quantization is enabled (saves 2x V memory).
+     * FP16 has sufficient precision for value vectors (used in weighted sum, not scoring). */
+    if (kv_type < TQ_TYPE_COUNT) {
+        s->use_fp16_values = 1;
+        s->value_cache_fp16 = (uint16_t*)calloc((size_t)n_layers * kv_layer_size, sizeof(uint16_t));
+        s->value_cache = NULL;
+        s->kv_cache_size = (size_t)n_layers * kv_layer_size * sizeof(uint16_t);
+    } else {
+        s->use_fp16_values = 0;
+        s->value_cache_fp16 = NULL;
+        s->value_cache = (float*)calloc((size_t)n_layers * kv_layer_size, sizeof(float));
+        s->kv_cache_size = (size_t)n_layers * kv_layer_size * sizeof(float);
+    }
 
     /* Dynamic workspace buffers (replacing fixed-size stack arrays).
      * xb_q8/xb_q8s are used in deltanet_forward, self_attn_forward, and FFN
@@ -140,9 +198,10 @@ tq_state_t* tq_create_state(const tq_model_config_t* config, tq_type kv_type) {
     }
 
     /* Verify critical allocations */
+    int value_cache_ok = s->use_fp16_values ? (s->value_cache_fp16 != NULL) : (s->value_cache != NULL);
     if (!s->x || !s->xb || !s->xb2 || !s->q || !s->k || !s->v ||
         !s->att || !s->hb || !s->hb2 || !s->logits ||
-        !s->key_cache || !s->value_cache ||
+        !s->key_cache || !value_cache_ok ||
         !s->xb_q8 || !s->xb_q8s) {
         tq_free_state(s);
         return NULL;
@@ -165,6 +224,7 @@ void tq_free_state(tq_state_t* state) {
     free(state->logits);
     free(state->key_cache);
     free(state->value_cache);
+    free(state->value_cache_fp16);
     free(state->delta_state);
     free(state->conv_state);
     free(state->delta_qkv);
@@ -792,9 +852,16 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
 
     /* Store K,V in cache */
     float* key_cache_layer = s->key_cache + l * kv_layer_stride;
-    float* val_cache_layer = s->value_cache + l * kv_layer_stride;
     memcpy(key_cache_layer + (size_t)pos * kv_dim, s->k, kv_dim * sizeof(float));
-    memcpy(val_cache_layer + (size_t)pos * kv_dim, s->v, kv_dim * sizeof(float));
+
+    /* Store V: FP16 if enabled, otherwise FP32 */
+    if (s->use_fp16_values) {
+        uint16_t* val_fp16_layer = s->value_cache_fp16 + l * kv_layer_stride;
+        f32_to_fp16_vec(s->v, val_fp16_layer + (size_t)pos * kv_dim, kv_dim);
+    } else {
+        float* val_cache_layer = s->value_cache + l * kv_layer_stride;
+        memcpy(val_cache_layer + (size_t)pos * kv_dim, s->v, kv_dim * sizeof(float));
+    }
 
     /* Quantize the new key into the quantized cache for integer attention.
      * Each KV head's key vector is quantized independently into blocks. */
@@ -900,11 +967,40 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
         /* Weighted sum of values */
         float* xbh = s->xb + h * head_dim;
         memset(xbh, 0, head_dim * sizeof(float));
-        for (int t = 0; t < seq_len; t++) {
-            const float* vt = val_cache_layer + (size_t)t * kv_dim + kv_h * head_dim;
-            float a = atth[t];
-            for (int d = 0; d < head_dim; d++) {
-                xbh[d] += a * vt[d];
+        if (s->use_fp16_values) {
+            /* FP16 value path: convert on the fly during weighted sum */
+            const uint16_t* vfp16_layer = s->value_cache_fp16 + l * kv_layer_stride;
+            for (int t = 0; t < seq_len; t++) {
+                const uint16_t* vt16 = vfp16_layer + (size_t)t * kv_dim + kv_h * head_dim;
+                float a = atth[t];
+                if (a == 0.0f) continue; /* skip zero-weight positions */
+#ifdef __ARM_NEON
+                float32x4_t va = vdupq_n_f32(a);
+                int d = 0;
+                for (; d + 3 < head_dim; d += 4) {
+                    uint16x4_t vh = vld1_u16(vt16 + d);
+                    float32x4_t vf = vcvt_f32_f16(vreinterpret_f16_u16(vh));
+                    float32x4_t vx = vld1q_f32(xbh + d);
+                    vst1q_f32(xbh + d, vfmaq_f32(vx, va, vf));
+                }
+                for (; d < head_dim; d++) {
+                    xbh[d] += a * fp16_to_f32(vt16[d]);
+                }
+#else
+                for (int d = 0; d < head_dim; d++) {
+                    xbh[d] += a * fp16_to_f32(vt16[d]);
+                }
+#endif
+            }
+        } else {
+            /* FP32 value path (original) */
+            const float* val_cache_layer_fp32 = s->value_cache + l * kv_layer_stride;
+            for (int t = 0; t < seq_len; t++) {
+                const float* vt = val_cache_layer_fp32 + (size_t)t * kv_dim + kv_h * head_dim;
+                float a = atth[t];
+                for (int d = 0; d < head_dim; d++) {
+                    xbh[d] += a * vt[d];
+                }
             }
         }
     }

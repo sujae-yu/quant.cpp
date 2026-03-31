@@ -210,7 +210,9 @@ typedef struct {
 
     /* KV cache for self_attn layers */
     float* key_cache;    /* [n_layers, max_seq_len, n_kv_heads * head_dim] */
-    float* value_cache;  /* [n_layers, max_seq_len, n_kv_heads * head_dim] */
+    float* value_cache;  /* [n_layers, max_seq_len, n_kv_heads * head_dim] FP32 (or NULL if FP16) */
+    uint16_t* value_cache_fp16; /* [n_layers, max_seq_len, n_kv_heads * head_dim] FP16 (NULL if FP32) */
+    int use_fp16_values; /* 1 if values stored as FP16, 0 for FP32 */
     tq_type kv_quant_type; /* quantization type for KV attention */
     size_t kv_cache_size;
 

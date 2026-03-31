@@ -246,11 +246,13 @@ int main(int argc, char** argv) {
         if (type_size_bytes == 0) { type_size_bytes = sizeof(block_tq_uniform_4b); }
         size_t blocks_per_head = ((size_t)c->head_dim + block_size - 1) / block_size;
 
-        /* K (compressed) + V (FP32) per token */
+        /* K (compressed) + V (FP16 when KV quant enabled, FP32 otherwise) per token */
         size_t k_per_token = (size_t)c->n_layers * c->n_kv_heads
                             * blocks_per_head * type_size_bytes;
+        int v_fp16 = (kv_type < TQ_TYPE_COUNT);  /* V stored as FP16 when K is quantized */
+        size_t v_bytes_per_elem = v_fp16 ? sizeof(uint16_t) : sizeof(float);
         size_t v_per_token = (size_t)c->n_layers * c->n_kv_heads
-                            * c->head_dim * sizeof(float);
+                            * c->head_dim * v_bytes_per_elem;
         size_t compressed_per_token = k_per_token + v_per_token;
 
         /* If kv_type is fp32 (sentinel), both key and value are FP32 */
@@ -274,7 +276,8 @@ int main(int argc, char** argv) {
         fprintf(stderr, "Per-token K (%s): %.2f KB\n",
                 kv_type < TQ_TYPE_COUNT ? tq_type_name(kv_type) : "fp32",
                 (double)k_per_token / 1024.0);
-        fprintf(stderr, "Per-token V (FP32):   %.2f KB\n",
+        fprintf(stderr, "Per-token V (%s):   %.2f KB\n",
+                v_fp16 ? "FP16" : "FP32",
                 (double)v_per_token / 1024.0);
         fprintf(stderr, "Per-token K+V total:  %.2f KB\n",
                 (double)compressed_per_token / 1024.0);

@@ -7,7 +7,7 @@
 [![Tests](https://img.shields.io/badge/tests-23%20suites-brightgreen)]()
 [![KV Quality](https://img.shields.io/badge/KV%20quality-30%2F30%20byte--identical-brightgreen)]()
 
-### 1-bit KV keys. 10.7x key compression. Quality preserved up to ~120 tokens.
+### 1-bit keys + FP16 values. 1.9x total K+V compression. 2 GB saved at 32K context.
 
 ```
 Gemma 3 4B, greedy decode, 10 prompts × 100 tokens:
@@ -52,21 +52,18 @@ Gemma 3 4B, 100 tokens, greedy, 10 diverse prompts (math, knowledge, code, multi
 | turbo_kv_3b | 3 | 29.75 KB | 4.6x | **byte-identical** |
 | **turbo_kv_1b** | **1** | **12.75 KB** | **10.7x** | **byte-identical** |
 
-> Keys only — values remain FP32. Greedy decode is byte-identical up to ~120 tokens; outputs diverge beyond that but remain coherent. Value quantization is planned.
+> Key compression shown. Values auto-stored as FP16 when KV quantization is active. Greedy decode byte-identical up to ~120 tokens; coherent beyond.
 
-### Key Compression at Long Context
+### Total K+V Memory at Scale
 
-Currently **keys are compressed, values remain FP32**. Value quantization is planned.
+Keys are compressed via TurboQuant. Values are stored as FP16 (auto-enabled with KV quantization).
 
 ```
-Gemma 3 4B, 32K tokens — key vectors only:
-  FP16 keys:               2,176 MB
-  Uniform 4-bit keys:        578 MB  (3.8x)
-  TurboQuant 3-bit keys:     476 MB  (4.6x)
-  TurboQuant 1-bit keys:     204 MB  (10.7x)
+Gemma 3 4B, 32K context — total K+V:
+  FP16 K+V (llama.cpp):    4,352 MB
+  uniform_4b K + FP16 V:   2,329 MB  (1.9x)
+  turbo_1b K + FP16 V:     2,278 MB  (1.9x, 2.0 GB saved)
 ```
-
-Full K+V savings require V compression — with FP16 values + 1-bit keys: **~1.8x total K+V reduction**. With future V quantization, this grows to **~5x+**.
 
 ### Speed vs llama.cpp
 
