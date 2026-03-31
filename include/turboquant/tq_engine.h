@@ -34,6 +34,13 @@ typedef struct {
     /* QK-norm for self_attn (Qwen3.5 style) */
     int use_qk_norm;         /* 1 if q_norm/k_norm weights present */
     int attn_output_gate;    /* 1 if q_proj includes output gate (doubled q_proj output) */
+
+    /* Multi-architecture support */
+    int model_type;          /* 0=qwen35, 1=gemma3 */
+    int sliding_window;      /* sliding window size (512 for gemma3, 0 for unlimited) */
+    float rope_local_base_freq; /* RoPE base freq for local/sliding layers (10000.0 for gemma3) */
+    int n_norms_per_block;   /* 2 for qwen35, 4 for gemma3 */
+    float query_pre_attn_scalar; /* attention scaling: 1/sqrt(this) instead of 1/sqrt(head_dim), 0=use head_dim */
 } tq_model_config_t;
 
 /* ============================================================
@@ -51,6 +58,11 @@ typedef struct {
     float* wo;            /* [hidden_dim, n_heads * head_dim] */
     float* q_norm;        /* [head_dim] QK-norm for queries */
     float* k_norm;        /* [head_dim] QK-norm for keys */
+
+    /* Gemma3 extra norms (NULL for Qwen3.5) */
+    float* post_attn_norm;   /* [hidden_dim] post_attention_layernorm (Gemma3 only) */
+    float* pre_ffn_norm;     /* [hidden_dim] pre_feedforward_layernorm (Gemma3 only) */
+    float* post_ffn_norm;    /* [hidden_dim] post_feedforward_layernorm (Gemma3 only) */
 
     /* SwiGLU FFN weights (present on ALL layers) */
     float* w_gate;        /* [intermediate_dim, hidden_dim] */
@@ -127,6 +139,9 @@ typedef struct {
     /* Hybrid architecture support (e.g., Qwen3.5 with DeltaNet layers) */
     int n_attn_layers;        /* number of layers with standard self_attn */
     int* attn_layer_indices;  /* which layer indices have self_attn [n_attn_layers] */
+
+    /* Gemma3 sliding window support */
+    int* layer_is_sliding;    /* [n_layers] per-layer flag: 1=sliding, 0=global (NULL if not used) */
 
     /* Q4 output weight (lm_head) — runtime quantized for fast logit projection */
     uint8_t* output_qs;       /* [vocab_size * n_blocks * 16] Q4 packed nibbles */
@@ -278,9 +293,16 @@ typedef struct {
     int32_t n_attn_layers;
     int32_t attn_layer_indices[64]; /* which layers are self_attn (max 64) */
 
+    /* Multi-architecture support (Gemma3) */
+    int32_t model_type;       /* 0=qwen35, 1=gemma3 */
+    int32_t sliding_window;   /* sliding window size (512 for gemma3, 0=unlimited) */
+    float   rope_local_base_freq; /* RoPE base for local/sliding layers */
+    int32_t n_norms_per_block;/* 2 for qwen35, 4 for gemma3 */
+    float   query_pre_attn_scalar; /* attention scaling (0=use head_dim) */
+
     /* Padding to 512 bytes.
-     * With pack(1): 8+32+8+16+12+8+32+260 = 376 used, 136 pad */
-    uint8_t _pad[136];
+     * With pack(1): 376 + 20 = 396 used, 116 pad */
+    uint8_t _pad[116];
 } tqm_header_t;
 #pragma pack(pop)
 
@@ -338,6 +360,7 @@ void tq_rmsnorm(float* out, const float* x, const float* weight, int n, float ep
 void tq_rope(float* q, float* k, int pos, int head_dim,
              int n_heads, int n_kv_heads, float freq_base);
 void tq_silu(float* x, int n);
+void tq_gelu_tanh(float* x, int n);
 void tq_softmax(float* x, int n);
 void tq_add(float* out, const float* a, const float* b, int n);
 void tq_mul(float* out, const float* a, const float* b, int n);

@@ -579,50 +579,73 @@ static tq_tokenizer_t* load_hf_tokenizer_json(const char* data, size_t size) {
             return NULL;
         }
 
-        /* Parse merge strings using binary search for fast lookup */
+        /* Parse merge strings using binary search for fast lookup.
+         * Supports two formats:
+         *   Qwen/GPT2 style: ["tok_a tok_b", ...]  (space-separated string)
+         *   Gemma/SentencePiece style: [["tok_a","tok_b"], ...]  (JSON array pairs) */
         {
             const char* p = merges_start;
             p = skip_ws(p);
             if (*p == '[') p++;
+            p = skip_ws(p);
+
+            /* Detect format: if first element starts with '[', it's array-pair format */
+            int array_pair_format = (*p == '[');
+
             int mi = 0;
-            char merge_str[2048];
+            char str_a[1024], str_b[1024];
             while (*p && mi < n_merges) {
                 p = skip_ws(p);
                 if (*p == ']') break;
                 if (*p == ',') { p++; p = skip_ws(p); }
                 if (*p == ']') break;
 
-                p = json_parse_string(p, merge_str, sizeof(merge_str));
-                if (!p) break;
-
-                /* Split "token_a token_b" at the FIRST space */
-                char* sep = strchr(merge_str, ' ');
-                if (!sep) { mi++; continue; }
-
-                *sep = '\0';
-                const char* tok_a = merge_str;
-                const char* tok_b = sep + 1;
+                if (array_pair_format) {
+                    /* Gemma style: ["tok_a", "tok_b"] */
+                    if (*p != '[') { p = json_skip_value(p); mi++; continue; }
+                    p++; /* skip '[' */
+                    p = skip_ws(p);
+                    p = json_parse_string(p, str_a, sizeof(str_a));
+                    if (!p) break;
+                    p = skip_ws(p);
+                    if (*p == ',') p++;
+                    p = skip_ws(p);
+                    p = json_parse_string(p, str_b, sizeof(str_b));
+                    if (!p) break;
+                    p = skip_ws(p);
+                    if (*p == ']') p++; /* skip closing ']' */
+                } else {
+                    /* Qwen/GPT2 style: "tok_a tok_b" */
+                    char merge_str[2048];
+                    p = json_parse_string(p, merge_str, sizeof(merge_str));
+                    if (!p) break;
+                    char* sep = strchr(merge_str, ' ');
+                    if (!sep) { mi++; continue; }
+                    *sep = '\0';
+                    strncpy(str_a, merge_str, sizeof(str_a) - 1);
+                    str_a[sizeof(str_a) - 1] = '\0';
+                    strncpy(str_b, sep + 1, sizeof(str_b) - 1);
+                    str_b[sizeof(str_b) - 1] = '\0';
+                }
 
                 /* Find the merged result: concatenation of tok_a + tok_b */
                 char merged[2048];
-                int la = (int)strlen(tok_a);
-                int lb = (int)strlen(tok_b);
+                int la = (int)strlen(str_a);
+                int lb = (int)strlen(str_b);
                 if (la + lb >= (int)sizeof(merged)) { mi++; continue; }
-                memcpy(merged, tok_a, (size_t)la);
-                memcpy(merged + la, tok_b, (size_t)lb);
+                memcpy(merged, str_a, (size_t)la);
+                memcpy(merged + la, str_b, (size_t)lb);
                 merged[la + lb] = '\0';
 
-                /* Look up token IDs using binary search */
-                int id_a = str_lookup(tok, tok_a);
-                int id_b = str_lookup(tok, tok_b);
+                /* Look up token IDs */
+                int id_a = str_lookup(tok, str_a);
+                int id_b = str_lookup(tok, str_b);
                 int id_merged = str_lookup(tok, merged);
 
                 if (id_a >= 0 && id_b >= 0 && id_merged >= 0) {
                     tok->merge_pairs[tok->n_merges * 3 + 0] = id_a;
                     tok->merge_pairs[tok->n_merges * 3 + 1] = id_b;
                     tok->merge_pairs[tok->n_merges * 3 + 2] = id_merged;
-                    /* Score: higher priority merges have higher score.
-                     * merges[0] has highest priority, so score = n_merges - mi. */
                     tok->scores[id_merged] = (float)(n_merges - mi);
                     tok->n_merges++;
                 }

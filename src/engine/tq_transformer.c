@@ -741,9 +741,13 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
             }
         }
     } else {
-        /* Full RoPE */
-        tq_rope(s->q, s->k, pos, head_dim, n_heads, n_kv_heads,
-                c->rope_freq_base);
+        /* Full RoPE — for Gemma3, use different freq base for sliding vs global layers */
+        float rope_base = c->rope_freq_base;
+        if (c->model_type == 1 && c->rope_local_base_freq > 0.0f &&
+            model->layer_is_sliding && model->layer_is_sliding[l]) {
+            rope_base = c->rope_local_base_freq;
+        }
+        tq_rope(s->q, s->k, pos, head_dim, n_heads, n_kv_heads, rope_base);
     }
 
     /* Store K,V in cache */
@@ -773,6 +777,22 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
     int seq_len = pos + 1;
     /* Use integer attention when enough cached keys to amortize overhead */
     int int_attn_threshold = 128; /* only use integer attention for long contexts */
+
+    /* Attention scaling: Gemma3 uses 1/sqrt(query_pre_attn_scalar), others use 1/sqrt(head_dim) */
+    float attn_scale_dim = (float)head_dim;
+    if (c->query_pre_attn_scalar > 0.0f) {
+        attn_scale_dim = c->query_pre_attn_scalar;
+    }
+
+    /* Gemma3 sliding window: limit attention to last sliding_window tokens for sliding layers */
+    int attn_start = 0;
+    if (c->model_type == 1 && c->sliding_window > 0 &&
+        model->layer_is_sliding && model->layer_is_sliding[l]) {
+        int window = c->sliding_window;
+        if (seq_len > window) {
+            attn_start = seq_len - window;
+        }
+    }
 
     for (int h = 0; h < n_heads; h++) {
         float* qh = s->q + h * head_dim;
@@ -808,20 +828,29 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
             traits->attention(qh, s->quant_key_buf, atth, seq_len, head_dim);
 
             /* The integer attention computes raw dot products;
-             * apply 1/sqrt(head_dim) scaling */
-            float scale = 1.0f / sqrtf((float)head_dim);
+             * apply 1/sqrt(attn_scale_dim) scaling */
+            float scale = 1.0f / sqrtf(attn_scale_dim);
             for (int t = 0; t < seq_len; t++) {
                 atth[t] *= scale;
             }
+            /* Apply sliding window mask: set scores before attn_start to -inf */
+            for (int t = 0; t < attn_start; t++) {
+                atth[t] = -1e30f;
+            }
         } else {
             /* FP32 attention scores (short sequences or no quantization) */
-            for (int t = 0; t < seq_len; t++) {
+            float inv_scale = 1.0f / sqrtf(attn_scale_dim);
+            /* Set positions outside sliding window to -inf */
+            for (int t = 0; t < attn_start; t++) {
+                atth[t] = -1e30f;
+            }
+            for (int t = attn_start; t < seq_len; t++) {
                 const float* kt = key_cache_layer + (size_t)t * kv_dim + kv_h * head_dim;
                 float score = 0.0f;
                 for (int d = 0; d < head_dim; d++) {
                     score += qh[d] * kt[d];
                 }
-                atth[t] = score / sqrtf((float)head_dim);
+                atth[t] = score * inv_scale;
             }
         }
 
@@ -924,7 +953,17 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
                dim * sizeof(float));
     }
 
+    /* Gemma3: scale embeddings by sqrt(hidden_dim) */
+    if (c->model_type == 1) {
+        float scale = sqrtf((float)dim);
+        for (int i = 0; i < dim; i++) {
+            s->x[i] *= scale;
+        }
+    }
+
     /* Step 2: Transformer layers */
+    int is_gemma3 = (c->model_type == 1);
+
     for (int l = 0; l < c->n_layers; l++) {
         tq_layer_weights_t* layer = &model->layers[l];
 
@@ -939,16 +978,42 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
                    (layer->wv || layer->wv_q8 || layer->wv_q4)) {
             /* Standard self-attention layer */
             self_attn_forward(model, s, l, pos);
+
+            /* Gemma3: apply post_attention_layernorm to attention output (xb2)
+             * before residual add. The residual was already added in self_attn_forward,
+             * so we undo it, apply norm, then re-add.
+             * Actually, self_attn_forward adds xb2 to x. For Gemma3, we need to
+             * apply post_attn_norm to xb2 before the add. We handle this by:
+             * 1. The residual add in self_attn_forward already happened.
+             * 2. For Gemma3: subtract xb2 from x, normalize xb2, add back. */
+            if (is_gemma3 && layer->post_attn_norm) {
+                /* xb2 still has the raw attention output from self_attn_forward.
+                 * x already has x_old + xb2. Undo: x = x - xb2 */
+                for (int i = 0; i < dim; i++) {
+                    s->x[i] -= s->xb2[i];
+                }
+                /* Apply post_attention_layernorm to xb2 */
+                tq_rmsnorm(s->xb2, s->xb2, layer->post_attn_norm, dim, c->rms_norm_eps);
+                /* Re-add normalized output */
+                tq_add(s->x, s->x, s->xb2, dim);
+            }
         }
         /* else: skip (should not happen for valid models) */
 
-        /* FFN Block (SwiGLU) — present on ALL layers.
+        /* FFN Block — SwiGLU (Qwen3.5) or GeGLU (Gemma3).
          * Optimization: cache Q8 quantization of xb for gate+up projections,
          * and cache Q8 of hb for down projection. */
         if ((layer->w_gate || layer->w_gate_q8 || layer->w_gate_q4) &&
             (layer->w_up || layer->w_up_q8 || layer->w_up_q4) &&
             (layer->w_down || layer->w_down_q8 || layer->w_down_q4)) {
-            tq_rmsnorm(s->xb, s->x, layer->ffn_norm, dim, c->rms_norm_eps);
+
+            /* Pre-FFN norm: Gemma3 uses pre_feedforward_layernorm,
+             * Qwen3.5 uses post_attention_layernorm (stored as ffn_norm) */
+            float* ffn_norm_w = layer->ffn_norm;
+            if (is_gemma3 && layer->pre_ffn_norm) {
+                ffn_norm_w = layer->pre_ffn_norm;
+            }
+            tq_rmsnorm(s->xb, s->x, ffn_norm_w, dim, c->rms_norm_eps);
 
             /* Pre-quantize xb for gate+up Q4 projections (same input, 2 matmuls) */
             if (layer->w_gate_q4) {
@@ -961,25 +1026,39 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
                 tq_matmul_q4_preq(s->hb2, layer->w_up_q4, layer->w_up_q4s,
                                    ffn_xb_q8, ffn_xb_q8s, c->intermediate_dim, dim);
             } else {
-                if (layer->w_gate_q8)
+                if (layer->w_gate_q8) {
                     tq_matmul_q8(s->hb, s->xb, layer->w_gate_q8, layer->w_gate_q8s, c->intermediate_dim, dim);
-                else
+                } else {
                     tq_matmul(s->hb, s->xb, layer->w_gate, c->intermediate_dim, dim);
-                if (layer->w_up_q8)
+                }
+                if (layer->w_up_q8) {
                     tq_matmul_q8(s->hb2, s->xb, layer->w_up_q8, layer->w_up_q8s, c->intermediate_dim, dim);
-                else
+                } else {
                     tq_matmul(s->hb2, s->xb, layer->w_up, c->intermediate_dim, dim);
+                }
             }
 
-            tq_silu(s->hb, c->intermediate_dim);
+            /* Activation: GeGLU for Gemma3, SwiGLU for others */
+            if (is_gemma3) {
+                tq_gelu_tanh(s->hb, c->intermediate_dim);
+            } else {
+                tq_silu(s->hb, c->intermediate_dim);
+            }
             tq_mul(s->hb, s->hb, s->hb2, c->intermediate_dim);
 
-            if (layer->w_down_q4)
+            if (layer->w_down_q4) {
                 tq_matmul_q4(s->xb2, s->hb, layer->w_down_q4, layer->w_down_q4s, dim, c->intermediate_dim);
-            else if (layer->w_down_q8)
+            } else if (layer->w_down_q8) {
                 tq_matmul_q8(s->xb2, s->hb, layer->w_down_q8, layer->w_down_q8s, dim, c->intermediate_dim);
-            else
+            } else {
                 tq_matmul(s->xb2, s->hb, layer->w_down, dim, c->intermediate_dim);
+            }
+
+            /* Gemma3: apply post_feedforward_layernorm to FFN output before residual */
+            if (is_gemma3 && layer->post_ffn_norm) {
+                tq_rmsnorm(s->xb2, s->xb2, layer->post_ffn_norm, dim, c->rms_norm_eps);
+            }
+
             tq_add(s->x, s->x, s->xb2, dim);
         }
     }

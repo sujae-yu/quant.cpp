@@ -1061,6 +1061,19 @@ void tq_silu(float* x, int n) {
 }
 
 /* ============================================================
+ * GELU with tanh approximation (Gemma3 GeGLU activation)
+ * gelu_tanh(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+ * ============================================================ */
+void tq_gelu_tanh(float* x, int n) {
+    for (int i = 0; i < n; i++) {
+        float xi = x[i];
+        float x3 = xi * xi * xi;
+        float inner = 0.7978845608f * (xi + 0.044715f * x3);
+        x[i] = 0.5f * xi * (1.0f + tanhf(inner));
+    }
+}
+
+/* ============================================================
  * Softmax: numerically stable with max subtraction
  * ============================================================ */
 void tq_softmax(float* x, int n) {

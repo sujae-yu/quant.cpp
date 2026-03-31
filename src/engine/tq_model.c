@@ -880,17 +880,42 @@ static tq_model_t* tq_load_safetensors(const char* path) {
         model->config.intermediate_dim = model->config.hidden_dim * 4;
     }
 
+    /* Detect Gemma3 architecture by presence of pre_feedforward_layernorm */
+    {
+        snprintf(name_buf, sizeof(name_buf),
+                 "model.layers.0.pre_feedforward_layernorm.weight");
+        tensor_info_t* gemma3_probe = find_tensor(tensors, n_tensors, name_buf);
+        if (gemma3_probe) {
+            model->config.model_type = 1; /* gemma3 */
+            model->config.n_norms_per_block = 4;
+            fprintf(stderr, "tq_load_model: detected Gemma3 architecture (4 norms per block)\n");
+        } else {
+            model->config.model_type = 0; /* qwen35 */
+            model->config.n_norms_per_block = 2;
+        }
+    }
+
     /* Defaults — tuned for Qwen3.5 if DeltaNet detected */
     model->config.max_seq_len = 4096;
-    if (model->config.delta_n_heads > 0) {
+    if (model->config.model_type == 1) {
+        /* Gemma3: rope_theta=1M for global, 10K for local, rms_norm_eps=1e-6 */
+        model->config.rope_freq_base = 1000000.0f; /* global layers */
+        model->config.rope_local_base_freq = 10000.0f; /* sliding/local layers */
+        model->config.rms_norm_eps = 1e-6f;
+        model->config.partial_rotary_factor = 0.0f;
+        model->config.sliding_window = 512;
+        model->config.query_pre_attn_scalar = 256.0f;
+    } else if (model->config.delta_n_heads > 0) {
         /* Qwen3.5 uses rope_theta=10M, rms_norm_eps=1e-6, partial_rotary=0.25 */
         model->config.rope_freq_base = 10000000.0f;
         model->config.rms_norm_eps = 1e-6f;
         model->config.partial_rotary_factor = 0.25f;
+        model->config.query_pre_attn_scalar = 0.0f;
     } else {
         model->config.rope_freq_base = 10000.0f;
         model->config.rms_norm_eps = 1e-5f;
         model->config.partial_rotary_factor = 0.0f;
+        model->config.query_pre_attn_scalar = 0.0f;
     }
 
     /* Allocate layer weight pointers */
@@ -917,12 +942,31 @@ static tq_model_t* tq_load_safetensors(const char* path) {
                                         find_tensor(tensors, n_tensors, name_buf),
                                         &conv_buf, &conv_used, conv_capacity);
 
-        /* FFN norm */
+        /* FFN norm (Qwen3.5: post_attention_layernorm used as pre-FFN norm) */
         snprintf(name_buf, sizeof(name_buf),
                  "model.layers.%d.post_attention_layernorm.weight", l);
         layer->ffn_norm = load_tensor(data_base,
                                        find_tensor(tensors, n_tensors, name_buf),
                                        &conv_buf, &conv_used, conv_capacity);
+
+        /* Gemma3 extra norms: post_attn, pre_ffn, post_ffn */
+        if (model->config.model_type == 1) {
+            /* For Gemma3, post_attention_layernorm is applied to attn output,
+             * not as pre-FFN norm. Store it in post_attn_norm. */
+            layer->post_attn_norm = layer->ffn_norm;
+
+            snprintf(name_buf, sizeof(name_buf),
+                     "model.layers.%d.pre_feedforward_layernorm.weight", l);
+            layer->pre_ffn_norm = load_tensor(data_base,
+                                               find_tensor(tensors, n_tensors, name_buf),
+                                               &conv_buf, &conv_used, conv_capacity);
+
+            snprintf(name_buf, sizeof(name_buf),
+                     "model.layers.%d.post_feedforward_layernorm.weight", l);
+            layer->post_ffn_norm = load_tensor(data_base,
+                                                find_tensor(tensors, n_tensors, name_buf),
+                                                &conv_buf, &conv_used, conv_capacity);
+        }
 
         /* Q, K, V, O projections — only exist for self_attn layers */
         snprintf(name_buf, sizeof(name_buf),
@@ -1105,6 +1149,77 @@ static tq_model_t* tq_load_safetensors(const char* path) {
                 model->output_norm[i] += 1.0f;
         }
         fprintf(stderr, "tq_load_model: applied Qwen3.5 RMSNorm +1 weight adjustment\n");
+    }
+
+    /* Gemma3 RMSNorm adjustment: same (1+w) scaling as Qwen3.5 */
+    if (model->config.model_type == 1) {
+        int dim_h = model->config.hidden_dim;
+        int head_dim_h = model->config.head_dim;
+
+        for (int l = 0; l < n_layers; l++) {
+            tq_layer_weights_t* layer_w = &model->layers[l];
+            if (layer_w->attn_norm) {
+                for (int i = 0; i < dim_h; i++) {
+                    layer_w->attn_norm[i] += 1.0f;
+                }
+            }
+            if (layer_w->post_attn_norm) {
+                for (int i = 0; i < dim_h; i++) {
+                    layer_w->post_attn_norm[i] += 1.0f;
+                }
+            }
+            if (layer_w->pre_ffn_norm) {
+                for (int i = 0; i < dim_h; i++) {
+                    layer_w->pre_ffn_norm[i] += 1.0f;
+                }
+            }
+            if (layer_w->post_ffn_norm) {
+                for (int i = 0; i < dim_h; i++) {
+                    layer_w->post_ffn_norm[i] += 1.0f;
+                }
+            }
+            if (layer_w->q_norm) {
+                for (int i = 0; i < head_dim_h; i++) {
+                    layer_w->q_norm[i] += 1.0f;
+                }
+            }
+            if (layer_w->k_norm) {
+                for (int i = 0; i < head_dim_h; i++) {
+                    layer_w->k_norm[i] += 1.0f;
+                }
+            }
+        }
+        if (model->output_norm) {
+            for (int i = 0; i < dim_h; i++) {
+                model->output_norm[i] += 1.0f;
+            }
+        }
+        fprintf(stderr, "tq_load_model: applied Gemma3 RMSNorm +1 weight adjustment\n");
+
+        /* Set up layer_is_sliding for Gemma3.
+         * Pattern: 5 sliding + 1 full, repeated. Layers 0-4=sliding, 5=full, etc.
+         * We detect by checking layer count modulo 6. */
+        model->layer_is_sliding = (int*)calloc((size_t)n_layers, sizeof(int));
+        if (model->layer_is_sliding) {
+            for (int l = 0; l < n_layers; l++) {
+                /* Full/global attention every 6th layer (indices 5, 11, 17, ...) */
+                if ((l + 1) % 6 == 0) {
+                    model->layer_is_sliding[l] = 0; /* global */
+                } else {
+                    model->layer_is_sliding[l] = 1; /* sliding */
+                }
+            }
+            int n_sliding = 0, n_global = 0;
+            for (int l = 0; l < n_layers; l++) {
+                if (model->layer_is_sliding[l]) {
+                    n_sliding++;
+                } else {
+                    n_global++;
+                }
+            }
+            fprintf(stderr, "tq_load_model: Gemma3 layer types: %d sliding, %d global\n",
+                    n_sliding, n_global);
+        }
     }
 
     fprintf(stderr, "tq_load_model: loaded %d layers (%d with self_attn), "
@@ -1679,6 +1794,13 @@ tq_model_t* tq_load_tqm(const char* path) {
     c->use_qk_norm         = hdr->use_qk_norm;
     c->attn_output_gate    = hdr->attn_output_gate;
 
+    /* Multi-architecture fields */
+    c->model_type              = hdr->model_type;
+    c->sliding_window          = hdr->sliding_window;
+    c->rope_local_base_freq    = hdr->rope_local_base_freq;
+    c->n_norms_per_block       = hdr->n_norms_per_block;
+    c->query_pre_attn_scalar   = hdr->query_pre_attn_scalar;
+
     /* Attn layer indices */
     model->n_attn_layers = hdr->n_attn_layers;
     if (hdr->n_attn_layers > 0) {
@@ -1748,6 +1870,13 @@ tq_model_t* tq_load_tqm(const char* path) {
         TQM_READ_FP32(layer->attn_norm, dim);
         TQM_READ_FP32(layer->ffn_norm, dim);
 
+        /* Gemma3 extra norms */
+        if (c->model_type == 1) {
+            layer->post_attn_norm = layer->ffn_norm; /* shares storage */
+            TQM_READ_FP32(layer->pre_ffn_norm, dim);
+            TQM_READ_FP32(layer->post_ffn_norm, dim);
+        }
+
         if (is_attn_layer && is_attn_layer[l]) {
             /* Self-attention layer */
             TQM_READ_Q4(layer->wq_q4, layer->wq_q4s, qg_dim, dim);
@@ -1813,6 +1942,20 @@ tq_model_t* tq_load_tqm(const char* path) {
 
     model->use_q4_weights = 1;
     free(is_attn_layer);
+
+    /* Set up Gemma3 layer_is_sliding from TQM */
+    if (c->model_type == 1 && c->sliding_window > 0) {
+        model->layer_is_sliding = (int*)calloc((size_t)c->n_layers, sizeof(int));
+        if (model->layer_is_sliding) {
+            for (int l = 0; l < c->n_layers; l++) {
+                if ((l + 1) % 6 == 0) {
+                    model->layer_is_sliding[l] = 0; /* global */
+                } else {
+                    model->layer_is_sliding[l] = 1; /* sliding */
+                }
+            }
+        }
+    }
 
     /* Runtime Q4 quantization of lm_head (output projection) for fast logit computation.
      * BF16 matmul on 248K x 1024 is slow; Q4 matmul is ~4x faster. */
@@ -1982,6 +2125,12 @@ int tq_save_tqm(tq_model_t* model, const char* tokenizer_path,
     hdr.use_qk_norm         = c->use_qk_norm;
     hdr.attn_output_gate    = c->attn_output_gate;
 
+    hdr.model_type              = c->model_type;
+    hdr.sliding_window          = c->sliding_window;
+    hdr.rope_local_base_freq    = c->rope_local_base_freq;
+    hdr.n_norms_per_block       = c->n_norms_per_block;
+    hdr.query_pre_attn_scalar   = c->query_pre_attn_scalar;
+
     hdr.weight_quant = 4; /* Q4 */
     hdr.embed_format = 16; /* BF16 */
 
@@ -2040,6 +2189,12 @@ int tq_save_tqm(tq_model_t* model, const char* tokenizer_path,
 
         TQM_WRITE_FP32(layer->attn_norm, dim);
         TQM_WRITE_FP32(layer->ffn_norm, dim);
+
+        /* Gemma3 extra norms */
+        if (c->model_type == 1) {
+            TQM_WRITE_FP32(layer->pre_ffn_norm, dim);
+            TQM_WRITE_FP32(layer->post_ffn_norm, dim);
+        }
 
         if (is_attn_layer[l]) {
             TQM_WRITE_Q4(layer->wq_q4, layer->wq_q4s, qg_dim, dim);
@@ -2144,6 +2299,7 @@ void tq_free_model(tq_model_t* model) {
     free(model->_q8_data);
     free(model->_q4_data);
     free(model->attn_layer_indices);
+    free(model->layer_is_sliding);
     free(model->layers);
     free(model);
 }
