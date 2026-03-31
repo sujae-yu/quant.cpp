@@ -1,27 +1,32 @@
 ## TurboQuant.cpp v0.1.0 — First Release
 
-Pure C LLM inference engine with KV cache compression. Matches llama.cpp single-thread speed.
+Multi-architecture LLM inference engine in pure C with KV cache compression.
 
 ### Highlights
 
-- **82 tok/s peak** on Qwen3.5-0.8B (Q4, CPU-only, Apple Silicon)
-- **51 tok/s single-thread** — on par with llama.cpp (50.7 tok/s)
-- **7.5x KV cache compression** with 0.999 cosine similarity
-- **8 quantization types**: Uniform, Mixed, PolarQuant, QJL, TurboQuant
-- **TQM format**: pre-quantized binary model, mmap instant load (0.3s)
+- **3 models supported**: Gemma 3 4B, Qwen3.5-0.8B, Gemma 3 270M
+- **3.8x KV cache compression** — at 32K context: 1.2 GB vs llama.cpp's 4.4 GB
+- **llama.cpp parity**: 51 tok/s single-thread (vs 50.7 tok/s)
+- **Multi-shard safetensors**: loads sharded models (Gemma 4B = 2 shards)
+- **Dual tokenizer**: GPT2 byte-level BPE + SentencePiece auto-detect
+- **TQM format**: pre-quantized mmap binary, instant loading
 - **Zero dependencies**: libc only, ~1MB binary
-- **One-command quickstart**: `bash scripts/quickstart.sh`
 
-### What's Included
+### Supported Models
 
-- Complete inference engine: DeltaNet + Self-Attention hybrid (Qwen3.5)
-- BPE tokenizer (248K vocab, embedded in TQM)
-- Q4 weight quantization with NEON 2-row batching
-- Thread pool with zero-overhead dispatch
-- Integer Q4×Q8 attention (ARM vdotq_s32)
-- 19 test suites, 135 tests
-- Python bindings (ctypes)
-- llama.cpp / vLLM integration stubs
+| Model | Speed (Q4, 6T) | Quality |
+|-------|----------------|---------|
+| Gemma 3 4B | 5.2 tok/s | "capital of France" → "Paris" |
+| Qwen3.5-0.8B | 82 tok/s | 0.999 cosine vs PyTorch |
+| Gemma 3 270M | 176 tok/s | per-layer exact match |
+
+### KV Cache Memory Savings
+
+```
+Gemma 3 4B at 32K context:
+  llama.cpp (FP16 KV):    4,352 MB
+  TurboQuant (Q4 KV):     1,156 MB  ← 3.8x compression
+```
 
 ### Quick Start
 
@@ -30,8 +35,18 @@ git clone https://github.com/quantumaikr/TurboQuant.cpp && cd TurboQuant.cpp
 bash scripts/quickstart.sh "What is deep learning?"
 ```
 
+### What's Inside
+
+- 9,000+ lines of pure C — complete inference engine
+- 8 quantization types: Uniform, Mixed, PolarQuant, QJL, TurboQuant
+- Architecture dispatch: Qwen3.5 (DeltaNet + Attention) + Gemma 3 (Sliding Window + GQA)
+- Q4 weight quantization with NEON 2-row batching + thread pool
+- Integer Q4×Q8 attention via ARM vdotq_s32
+- 20 test suites, 70+ tests
+- Python bindings (ctypes), llama.cpp/vLLM integration stubs
+
 ### References
 
-- [TurboQuant](https://arxiv.org/abs/2504.19874) (ICLR 2026)
-- [QJL](https://arxiv.org/abs/2406.03482) (AAAI 2025)
-- [PolarQuant](https://arxiv.org/abs/2502.02617) (AISTATS 2026)
+- [TurboQuant](https://arxiv.org/abs/2504.19874) (ICLR 2026) — KV cache compression
+- [QJL](https://arxiv.org/abs/2406.03482) (AAAI 2025) — 1-bit quantized JL transform
+- [PolarQuant](https://arxiv.org/abs/2502.02617) (AISTATS 2026) — Polar coordinate quantization
