@@ -1018,36 +1018,84 @@ int tq_encode(const tq_tokenizer_t* tok, const char* text,
 
     int n_tokens = 0;
 
-    /* Qwen tokenizer has no BOS token, but handle the flag gracefully */
+    /* Add BOS token if requested.
+     * Gemma: BOS=2, Qwen: no BOS (uses <|im_start|> instead) */
     if (add_bos) {
-        /* Qwen uses <|im_start|> for conversation start, not a generic BOS.
-         * For raw text generation, we skip BOS. */
+        /* Look up <bos> token in vocab; default to id 2 (Gemma convention) */
+        int bos_id = str_lookup(tok, "<bos>");
+        if (bos_id < 0) { bos_id = str_lookup(tok, "<|im_start|>"); }
+        if (bos_id >= 0) {
+            tokens[n_tokens++] = bos_id;
+        }
     }
 
     if (*text == '\0') return n_tokens;
 
-    /* Convert each byte of the input text to its BPE character token.
-     * For byte-level BPE, each input byte maps to a single BPE character
-     * which should exist in the vocab as a single-char token. */
+    /* Detect tokenizer style: Gemma uses ▁ (U+2581) for spaces in vocab,
+     * GPT2/Qwen uses byte-level BPE with Ġ/ĉ encoding.
+     * Check if '▁' exists in vocab as a simple heuristic. */
+    int is_sentencepiece = (str_lookup(tok, "\xe2\x96\x81") >= 0); /* ▁ = U+2581 = 0xE2 0x96 0x81 */
+
     int text_len = (int)strlen(text);
 
-    for (int i = 0; i < text_len && n_tokens < max_tokens; i++) {
-        unsigned char byte = (unsigned char)text[i];
-        char bpe_char[4];
-        encode_byte_to_bpe_char(byte, bpe_char);
+    if (is_sentencepiece) {
+        /* SentencePiece-style: replace spaces with ▁, then split into UTF-8 characters.
+         * Each character is looked up in vocab directly. */
+        /* First, build normalized text with ▁ replacing spaces, and ▁ prepended */
+        int norm_cap = text_len * 4 + 16;
+        char* norm = (char*)malloc((size_t)norm_cap);
+        if (!norm) return n_tokens;
+        int ni = 0;
+        /* Prepend ▁ (space before first word, SentencePiece convention) */
+        norm[ni++] = (char)0xE2; norm[ni++] = (char)0x96; norm[ni++] = (char)0x81;
+        for (int i = 0; i < text_len; i++) {
+            if (text[i] == ' ') {
+                norm[ni++] = (char)0xE2; norm[ni++] = (char)0x96; norm[ni++] = (char)0x81;
+            } else {
+                norm[ni++] = text[i];
+            }
+        }
+        norm[ni] = '\0';
 
-        int id = str_lookup(tok, bpe_char);
-        if (id >= 0) {
-            tokens[n_tokens++] = id;
-        } else {
-            /* Should not happen for valid byte-level BPE vocab */
-            /* Try direct byte as single-char string fallback */
-            char direct[2] = { (char)byte, '\0' };
-            id = str_lookup(tok, direct);
+        /* Split into individual UTF-8 characters */
+        for (int i = 0; i < ni && n_tokens < max_tokens; ) {
+            /* Determine UTF-8 character length */
+            unsigned char c = (unsigned char)norm[i];
+            int clen = 1;
+            if (c >= 0xF0) { clen = 4; }
+            else if (c >= 0xE0) { clen = 3; }
+            else if (c >= 0xC0) { clen = 2; }
+            if (i + clen > ni) break;
+
+            char ch_str[8];
+            memcpy(ch_str, norm + i, (size_t)clen);
+            ch_str[clen] = '\0';
+
+            int id = str_lookup(tok, ch_str);
             if (id >= 0) {
                 tokens[n_tokens++] = id;
             }
-            /* If still not found, skip the byte */
+            /* If not found, skip (byte fallback tokens handle this in merges) */
+            i += clen;
+        }
+        free(norm);
+    } else {
+        /* GPT2/Qwen byte-level BPE: each byte maps to a BPE character token */
+        for (int i = 0; i < text_len && n_tokens < max_tokens; i++) {
+            unsigned char byte = (unsigned char)text[i];
+            char bpe_char[4];
+            encode_byte_to_bpe_char(byte, bpe_char);
+
+            int id = str_lookup(tok, bpe_char);
+            if (id >= 0) {
+                tokens[n_tokens++] = id;
+            } else {
+                char direct[2] = { (char)byte, '\0' };
+                id = str_lookup(tok, direct);
+                if (id >= 0) {
+                    tokens[n_tokens++] = id;
+                }
+            }
         }
     }
 
@@ -1112,6 +1160,24 @@ const char* tq_decode(const tq_tokenizer_t* tok, int prev_token, int token) {
         return ""; /* Don't output special tokens as text */
     }
 
-    /* Decode BPE byte representation to actual UTF-8 */
+    /* SentencePiece: replace ▁ (U+2581) with space */
+    if (strstr(piece, "\xe2\x96\x81") != NULL) {
+        static __thread char sp_buf[1024];
+        int j = 0;
+        for (int i = 0; piece[i] && j < (int)sizeof(sp_buf) - 1; ) {
+            if ((unsigned char)piece[i] == 0xE2 &&
+                (unsigned char)piece[i+1] == 0x96 &&
+                (unsigned char)piece[i+2] == 0x81) {
+                sp_buf[j++] = ' ';
+                i += 3;
+            } else {
+                sp_buf[j++] = piece[i++];
+            }
+        }
+        sp_buf[j] = '\0';
+        return sp_buf;
+    }
+
+    /* GPT2/Qwen: decode BPE byte representation to actual UTF-8 */
     return decode_bpe_token(piece);
 }

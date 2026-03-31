@@ -163,13 +163,13 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
     if (tokenizer && prompt) {
         n_prompt = tq_encode(tokenizer, prompt, prompt_tokens, 4096, 1);
     } else {
-        /* No tokenizer: use BOS only */
-        prompt_tokens[0] = 1; /* BOS */
+        /* No tokenizer: use BOS only (Gemma=2, Qwen=skip) */
+        prompt_tokens[0] = (model->config.model_type == 1) ? 2 : 1;
         n_prompt = 1;
     }
 
     if (n_prompt <= 0) {
-        prompt_tokens[0] = 1;
+        prompt_tokens[0] = (model->config.model_type == 1) ? 2 : 1;
         n_prompt = 1;
     }
 

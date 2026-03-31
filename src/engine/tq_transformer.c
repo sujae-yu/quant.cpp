@@ -961,6 +961,13 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
         }
     }
 
+    /* Debug: print embedding for verification */
+    if (pos == 0 && getenv("TQ_DEBUG")) {
+        fprintf(stderr, "[DEBUG] embed[0:8] = ");
+        for (int i = 0; i < 8 && i < dim; i++) fprintf(stderr, "%.4f ", s->x[i]);
+        fprintf(stderr, "\n");
+    }
+
     /* Step 2: Transformer layers */
     int is_gemma3 = (c->model_type == 1);
 
@@ -1061,10 +1068,27 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
 
             tq_add(s->x, s->x, s->xb2, dim);
         }
+
+        /* Debug: print layer output */
+        if (pos == 0 && getenv("TQ_DEBUG") && (l == 0 || l == 5 || l == c->n_layers - 1)) {
+            fprintf(stderr, "[DEBUG] layer%d out[0:8] = ", l);
+            for (int i = 0; i < 8 && i < dim; i++) fprintf(stderr, "%.4f ", s->x[i]);
+            fprintf(stderr, "\n");
+        }
     }
 
     /* Step 3: Final RMSNorm */
+    if (pos == 0 && getenv("TQ_DEBUG")) {
+        fprintf(stderr, "[DEBUG] pre_norm[0:8] = ");
+        for (int i = 0; i < 8 && i < dim; i++) fprintf(stderr, "%.4f ", s->x[i]);
+        fprintf(stderr, "\n");
+    }
     tq_rmsnorm(s->x, s->x, model->output_norm, dim, c->rms_norm_eps);
+    if (pos == 0 && getenv("TQ_DEBUG")) {
+        fprintf(stderr, "[DEBUG] post_norm[0:8] = ");
+        for (int i = 0; i < 8 && i < dim; i++) fprintf(stderr, "%.4f ", s->x[i]);
+        fprintf(stderr, "\n");
+    }
 
     /* Step 4: Output projection to vocab logits */
     if (model->output_qs) {
