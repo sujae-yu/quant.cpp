@@ -25,13 +25,13 @@ Gemma 3 4B perplexity (101 tokens, teacher-forced):
 git clone https://github.com/quantumaikr/TurboQuant.cpp && cd TurboQuant.cpp
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DTQ_BUILD_TESTS=ON
 cmake --build build -j$(nproc)
+ctest --test-dir build   # 31/31 should pass
 
-# TQM format (recommended — fully verified)
 ./build/tq_run model.tqm -p "Hello" -k turbo_kv_1b -v q4
-
-# GGUF Q8_0 format (verified)
-./build/tq_run model-Q8_0.gguf -p "Hello" -k turbo_kv_1b -v q4
 ```
+
+> This is a standalone inference engine built from scratch — not a llama.cpp fork or wrapper.
+> Models are loaded in TQM format (pre-quantized) or GGUF Q8_0 (experimental).
 
 ---
 
@@ -41,13 +41,11 @@ cmake --build build -j$(nproc)
 |-------|--------|--------|------------|-------------|
 | **Gemma 3 4B** | 4B | TQM | 20.2 tok/s | PPL +0.03%, all KV types ✓ |
 | **Qwen3.5-0.8B** | 752M | TQM | 80.1 tok/s | all KV types ✓ |
-| **Qwen3.5-0.8B** | 752M | GGUF Q8_0 | 3.7 tok/s | 1b K + Q4 V ✓ |
 | **Gemma 3 270M** | 270M | TQM | 176 tok/s | all KV types ✓ |
 
 Architectures: Gemma 3 (sliding window, GeGLU), Qwen3.5 (DeltaNet hybrid).
 
-GGUF support: Q8_0 verified. K-quant (Q4_K, Q6_K) and IQ2 dequantization are implemented but not yet quality-verified — contributions welcome.
-MoE architecture (Qwen3.5-35B-A3B): loading and routing implemented, quality verification in progress.
+**Experimental:** GGUF Q8_0 loading verified for Qwen3.5-0.8B (3.7 tok/s). K-quant/IQ2 dequantization and MoE routing are implemented but not yet quality-verified.
 
 ---
 
@@ -138,20 +136,21 @@ Every NEON path verified against scalar reference (`test_neon_scalar`). A Q4 deq
 147 ns per 128-dim vector (NEON-vectorized). 1-bit attention: 1.2 ns/key. Compared to matmul (~1ms/layer), negligible. See `bench/bench_kv_overhead.cpp`.
 
 **Q: "Only small models?"**
-GGUF Q8_0 loading is verified for Qwen3.5 0.8B. MoE architecture (35B-A3B) loads and routes correctly; K-quant/IQ2 dequantization quality is being stabilized. The engine and KV compression are architecture-independent — verified on models from 270M to 4B.
+The engine and KV compression are architecture-independent. Verified from 270M to 4B with perplexity measurement. Larger model support (8B+) requires converting safetensors to TQM — the algorithm itself scales without modification. GGUF Q8_0 loading works; K-quant/IQ2 dequantization is being stabilized.
 
 ---
 
 ## Under the Hood
 
-- **15,000+ lines of C** — zero external dependencies
-- **GGUF v3 loading** — Q8_0 verified; K-quant/IQ2 dequant implemented (quality WIP)
-- **MoE routing** — top-K expert selection, shared expert, SwiGLU (quality WIP)
-- **12 KV quantization types** — Uniform, PolarQuant, QJL, TurboQuant, TurboQuant KV (1/3/4-bit)
-- **Fused Q4 attention** — weighted sum directly from packed nibbles
-- **Adaptive compression** — per-layer bit recommendation, codebook calibration
-- **NEON vectorized** — matmul, attention, RHT, Hamming distance, Q4 dequant
+**Self-built inference engine** — not a fork, not a wrapper. Every component written from scratch.
+
+- **15,000+ lines of C** — transformer, tokenizer, matmul, attention, sampling — zero external dependencies
+- **12 KV quantization types** — the core differentiator: RHT + Lloyd-Max + QJL for unbiased inner products
+- **Fused Q4 attention** — weighted sum directly from packed nibbles, no dequant buffer
+- **Adaptive compression** — per-layer bit recommendation, online codebook calibration (49.7% MSE gain)
+- **NEON vectorized** — matmul, attention, RHT butterfly, Hamming distance, Q4 dequant
 - **31 test suites** — perplexity, unbiasedness, attention distribution, codebook theory, NEON consistency, edge cases, rate-distortion, cumulative error
+- **Experimental:** GGUF v3 loading (Q8_0 verified), MoE routing (quality WIP)
 
 ---
 
