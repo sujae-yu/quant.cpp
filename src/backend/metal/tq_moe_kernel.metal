@@ -742,9 +742,9 @@ kernel void moe_down_accum(
         uint down_rb = (down_type == 22) ? n_blocks_down * 82u : uint(params.row_bytes_down);
         device const uchar* down_row = weights + down_off + row * down_rb;
         float dot_partial;
-        if (down_type == 22) { /* IQ2_S */
+        if (0 && down_type == 22) { /* IQ2_S — DISABLED: causes hang */
             dot_partial = iq2s_dot_partial(down_row, shared_hb, n_blocks_down, tid, tg_size);
-        } else { /* IQ2_XXS (16) or default */
+        } else { /* IQ2_XXS path for all types (temporary debug) */
             dot_partial = iq2xxs_dot_partial(down_row, shared_hb, n_blocks_down, tid, tg_size);
         }
         float dot_val = reduce_sum(dot_partial, tid, tg_size, simd_sums);
