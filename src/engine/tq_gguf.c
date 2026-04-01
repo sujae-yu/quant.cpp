@@ -157,7 +157,7 @@ size_t tq_ggml_type_size(tq_ggml_dtype type) {
         case TQ_GGML_TYPE_IQ3_XXS:  return 98;
         case TQ_GGML_TYPE_IQ3_S:    return 110;
         case TQ_GGML_TYPE_IQ4_NL:   return 18;
-        case TQ_GGML_TYPE_IQ4_XS:   return 36;
+        case TQ_GGML_TYPE_IQ4_XS:   return 136;
         case TQ_GGML_TYPE_IQ1_S:    return 50;
         default:                     return 0;
     }
@@ -186,7 +186,7 @@ int tq_ggml_type_blck(tq_ggml_dtype type) {
         case TQ_GGML_TYPE_IQ3_XXS:  return 256;
         case TQ_GGML_TYPE_IQ3_S:    return 256;
         case TQ_GGML_TYPE_IQ4_NL:   return 32;
-        case TQ_GGML_TYPE_IQ4_XS:   return 32;
+        case TQ_GGML_TYPE_IQ4_XS:   return 256;
         case TQ_GGML_TYPE_IQ1_S:    return 256;
         default:                     return 0;
     }

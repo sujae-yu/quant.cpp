@@ -25,7 +25,8 @@ typedef struct {
     float rms_norm_eps;
 
     /* DeltaNet (linear_attention) config */
-    int delta_n_heads;       /* number of DeltaNet heads (e.g., 16) */
+    int delta_n_heads;       /* number of V heads (num_v_heads, e.g., 32) */
+    int delta_n_kv_heads;    /* number of K/Q groups (num_k_heads, e.g., 16; 0=same as delta_n_heads) */
     int delta_key_head_dim;  /* key head dim (e.g., 128) */
     int delta_value_head_dim;/* value head dim (e.g., 128) */
     int delta_conv_width;    /* conv1d kernel width (e.g., 4) */

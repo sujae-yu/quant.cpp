@@ -106,7 +106,8 @@ tq_state_t* tq_create_state_ex(const tq_model_config_t* config, tq_type kv_type,
      * When attn_output_gate is enabled, q_proj outputs 2x for Q + gate. */
     int q_dim = n_heads * config->head_dim;
     int q_proj_dim = config->attn_output_gate ? q_dim * 2 : q_dim;
-    int delta_qkv_dim = 3 * config->delta_n_heads * config->delta_key_head_dim;
+    int delta_nkv = config->delta_n_kv_heads > 0 ? config->delta_n_kv_heads : config->delta_n_heads;
+    int delta_qkv_dim = delta_nkv * config->delta_key_head_dim * 2 + config->delta_n_heads * config->delta_value_head_dim;
     int delta_z_dim = config->delta_n_heads * config->delta_value_head_dim;
     int max_dim = dim;
     if (q_dim > max_dim) max_dim = q_dim;
@@ -457,10 +458,14 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
     tq_model_config_t* c = &model->config;
     tq_layer_weights_t* layer = &model->layers[l];
     int dim = c->hidden_dim;
-    int dn = c->delta_n_heads;
-    int dk = c->delta_key_head_dim;
-    int dv = c->delta_value_head_dim;
-    int qkv_dim = 3 * dn * dk;
+    int dn = c->delta_n_heads;        /* num_v_heads (e.g. 32) */
+    int dn_kv = c->delta_n_kv_heads;  /* num_k_heads (e.g. 16); 0 = same as dn */
+    if (dn_kv <= 0) dn_kv = dn;
+    int dk = c->delta_key_head_dim;   /* key head dim (e.g. 128) */
+    int dv = c->delta_value_head_dim; /* value head dim (e.g. 128) */
+    /* Note: GGUF V-heads are in tiled order (ggml broadcast convention).
+     * V-head h belongs to K-group (h % dn_kv), NOT (h / kv_mul). */
+    int qkv_dim = dn_kv * dk * 2 + dn * dv; /* Q[dn_kv*dk] + K[dn_kv*dk] + V[dn*dv] */
     int z_dim = dn * dv;
     int conv_width = c->delta_conv_width;
     int conv_buf_len = conv_width - 1;
@@ -553,19 +558,21 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
     causal_conv1d_silu_batch(s->delta_qkv, conv_st, layer->delta_conv1d,
                               qkv_dim, conv_width);
 
-    /* Step 5: Split into Q, K, V per head and L2 normalize Q, K */
+    /* Step 5: Split into Q, K, V per head and L2 normalize Q, K.
+     * Layout: Q[dn_kv * dk] + K[dn_kv * dk] + V[dn * dv]
+     * Q and K have dn_kv groups (GQA), V has dn heads. */
     float* Q_all = s->delta_qkv;
-    float* K_all = s->delta_qkv + dn * dk;
-    float* V_all = s->delta_qkv + 2 * dn * dk;
+    float* K_all = s->delta_qkv + dn_kv * dk;
+    float* V_all = s->delta_qkv + 2 * dn_kv * dk;
 
-    for (int h = 0; h < dn; h++) {
+    for (int h = 0; h < dn_kv; h++) {
         l2_normalize(Q_all + h * dk, dk);
         l2_normalize(K_all + h * dk, dk);
     }
 
     /* Step 6: Scale Q by 1/sqrt(head_dim) */
     float q_scale = 1.0f / sqrtf((float)dk);
-    for (int i = 0; i < dn * dk; i++) {
+    for (int i = 0; i < dn_kv * dk; i++) {
         Q_all[i] *= q_scale;
     }
 
@@ -580,8 +587,9 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
      *
      * State layout: S[h] is [dk, dv] (row-major, S[i][j]) */
     for (int h = 0; h < dn; h++) {
-        float* qh = Q_all + h * dk;
-        float* kh = K_all + h * dk;
+        int kv_group = h % dn_kv; /* tiled V-head order: GGUF reorders V-heads for ggml broadcast */
+        float* qh = Q_all + kv_group * dk;
+        float* kh = K_all + kv_group * dk;
         float* vh = V_all + h * dv;
         float* sh = state + (size_t)h * dk * dv;
         float beta_h = s->delta_ab[dn + h];

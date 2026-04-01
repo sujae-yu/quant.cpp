@@ -273,20 +273,28 @@ static void dequant_q2_k(const void* src, float* dst, int n) {
         const float d    = fp16_to_fp32(blk[b].d);
         const float dmin = fp16_to_fp32(blk[b].dmin);
 
-        /* 16 sub-blocks of 16 elements each */
-        for (int sb = 0; sb < 16; sb++) {
-            /* scales[sb]: low 4 bits = scale, high 4 bits = min */
-            const int sc = blk[b].scales[sb] & 0x0F;
-            const int m  = blk[b].scales[sb] >> 4;
+        const uint8_t* q = blk[b].qs;
+        float* y = dst + b * 256;
 
-            for (int j = 0; j < 16; j++) {
-                int idx = sb * 16 + j;
-                /* 2-bit value: 4 values per byte */
-                int byte_idx = idx / 4;
-                int bit_off  = (idx % 4) * 2;
-                int q = (blk[b].qs[byte_idx] >> bit_off) & 0x03;
-                dst[b * 256 + idx] = d * sc * q - dmin * m;
+        int is = 0;
+        for (int half = 0; half < 2; half++) {
+            int shift = 0;
+            for (int j = 0; j < 4; ++j) {
+                uint8_t sc_byte = blk[b].scales[is++];
+                float dl = d * (sc_byte & 0x0F);
+                float ml = dmin * (sc_byte >> 4);
+                for (int l = 0; l < 16; ++l)
+                    *y++ = dl * ((int8_t)((q[l] >> shift) & 3)) - ml;
+
+                sc_byte = blk[b].scales[is++];
+                dl = d * (sc_byte & 0x0F);
+                ml = dmin * (sc_byte >> 4);
+                for (int l = 0; l < 16; ++l)
+                    *y++ = dl * ((int8_t)((q[l + 16] >> shift) & 3)) - ml;
+
+                shift += 2;
             }
+            q += 32;
         }
     }
 }
@@ -298,64 +306,49 @@ static void dequant_q3_k(const void* src, float* dst, int n) {
     const int nb = n / 256;
     const block_q3_K* blk = (const block_q3_K*)src;
 
+    const uint32_t kmask1 = 0x03030303;
+    const uint32_t kmask2 = 0x0f0f0f0f;
+
+    uint32_t aux[4];
+    const int8_t* scales = (const int8_t*)aux;
+
     for (int b = 0; b < nb; b++) {
-        const float d = fp16_to_fp32(blk[b].d);
+        const float d_all = fp16_to_fp32(blk[b].d);
 
-        /* Decode 16 sub-block scales from 12 packed bytes.
-         * Encoding (matching ggml):
-         *   scales[0..3]  : bits 0..5 of sub-block scales 0..3 (low byte)
-         *   scales[4..7]  : bits 0..5 of sub-block scales 4..7
-         *   scales[8]     : bits 4..5 of scales 0..3 in pairs of 2
-         *   scales[9]     : bits 4..5 of scales 4..7 in pairs of 2
-         *   scales[10]    : bits 4..5 of scales 8..11
-         *   scales[11]    : bits 4..5 of scales 12..15
-         *   scales[0..7] low 4 bits: low 4 bits of 6-bit scale for sub-blocks 0..7
-         *   scales[8..11]: high 2 bits for sub-blocks 0..15
-         *
-         * Actually, the ggml Q3_K scale encoding:
-         *   aux = scales[sb & 7] for sb < 8, or reconstruct for sb >= 8
-         *   The 12 bytes encode sixteen 6-bit values, offset by 32.
-         */
-        int32_t sc[16];
+        const uint8_t* q  = blk[b].qs;
+        const uint8_t* hm = blk[b].hmask;
+        uint8_t m = 1;
 
-        /* Low 4 bits from first 8 bytes */
-        for (int i = 0; i < 8; i++) {
-            sc[i] = blk[b].scales[i] & 0x0F;
-        }
-        /* Sub-blocks 8..15 from first 8 bytes, high nibble */
-        for (int i = 0; i < 8; i++) {
-            sc[i + 8] = blk[b].scales[i] >> 4;
-        }
-        /* High 2 bits from bytes 8..11 */
-        for (int i = 0; i < 4; i++) {
-            uint8_t hb = blk[b].scales[8 + i];
-            sc[i * 2 + 0] |= ((hb >> 0) & 3) << 4;
-            sc[i * 2 + 1] |= ((hb >> 2) & 3) << 4;
-            sc[i * 2 + 8] |= ((hb >> 4) & 3) << 4;
-            sc[i * 2 + 9] |= ((hb >> 6) & 3) << 4;
-        }
-        /* Scales are stored with offset 32 */
-        for (int i = 0; i < 16; i++) {
-            sc[i] -= 32;
-        }
+        /* Decode 16 x 6-bit scales using the ggml bit-manipulation trick.
+         * The 12 packed bytes are loaded as three uint32, then rearranged
+         * into four uint32 that are reinterpreted as sixteen int8 values. */
+        memcpy(aux, blk[b].scales, 12);
+        uint32_t tmp = aux[2];
+        aux[2] = ((aux[0] >> 4) & kmask2) | (((tmp >> 4) & kmask1) << 4);
+        aux[3] = ((aux[1] >> 4) & kmask2) | (((tmp >> 6) & kmask1) << 4);
+        aux[0] = (aux[0] & kmask2) | (((tmp >> 0) & kmask1) << 4);
+        aux[1] = (aux[1] & kmask2) | (((tmp >> 2) & kmask1) << 4);
 
-        /* Dequantize */
-        for (int sb = 0; sb < 16; sb++) {
-            for (int j = 0; j < 16; j++) {
-                int idx = sb * 16 + j;
+        int is = 0;
+        float* y = dst + b * 256;
 
-                /* Low 2 bits from qs: 4 per byte */
-                int byte_idx = idx / 4;
-                int bit_off  = (idx % 4) * 2;
-                int q_lo = (blk[b].qs[byte_idx] >> bit_off) & 0x03;
+        for (int half = 0; half < 2; half++) {
+            int shift = 0;
+            for (int j = 0; j < 4; ++j) {
+                float dl = d_all * (scales[is++] - 32);
+                for (int l = 0; l < 16; ++l) {
+                    *y++ = dl * ((int8_t)((q[l + 0] >> shift) & 3) - ((hm[l + 0] & m) ? 0 : 4));
+                }
 
-                /* High bit from hmask */
-                int hbit = (blk[b].hmask[idx / 8] >> (idx % 8)) & 1;
+                dl = d_all * (scales[is++] - 32);
+                for (int l = 0; l < 16; ++l) {
+                    *y++ = dl * ((int8_t)((q[l + 16] >> shift) & 3) - ((hm[l + 16] & m) ? 0 : 4));
+                }
 
-                int q3 = q_lo | (hbit << 2);
-                /* q3 is 0..7, center at 4 */
-                dst[b * 256 + idx] = d * sc[sb] * (q3 - 4);
+                shift += 2;
+                m <<= 1;
             }
+            q += 32;
         }
     }
 }
@@ -407,23 +400,23 @@ static void dequant_q4_k(const void* src, float* dst, int n) {
         mn[6] = (blk[b].scales[10] >> 4) | ((blk[b].scales[6] >> 6) << 4);
         mn[7] = (blk[b].scales[11] >> 4) | ((blk[b].scales[7] >> 6) << 4);
 
-        /* 8 sub-blocks of 32 elements */
-        for (int sb = 0; sb < 8; sb++) {
-            const float scale = d * sc[sb];
-            const float min   = dmin * mn[sb];
-
-            for (int j = 0; j < 32; j++) {
-                int idx = sb * 32 + j;
-                /* 4-bit: 2 values per byte, low nibble first in lower half */
-                int byte_idx = idx / 2;
-                int q;
-                if (idx % 2 == 0) {
-                    q = blk[b].qs[byte_idx] & 0x0F;
-                } else {
-                    q = blk[b].qs[byte_idx] >> 4;
-                }
-                dst[b * 256 + idx] = scale * q - min;
-            }
+        /* 4 groups of 64 elements (2 sub-blocks each).
+         * Within each 64-element group, the first 32 elements use the low
+         * nibble and the next 32 use the high nibble of the same 32 bytes.
+         * This matches the ggml Q4_K packing exactly. */
+        const uint8_t* q = blk[b].qs;
+        int is = 0;
+        for (int j = 0; j < 256; j += 64) {
+            const float d1 = d * sc[is + 0];
+            const float m1 = dmin * mn[is + 0];
+            const float d2 = d * sc[is + 1];
+            const float m2 = dmin * mn[is + 1];
+            for (int l = 0; l < 32; ++l)
+                dst[b * 256 + j + l]      = d1 * (q[l] & 0x0F) - m1;
+            for (int l = 0; l < 32; ++l)
+                dst[b * 256 + j + 32 + l] = d2 * (q[l] >> 4) - m2;
+            q += 32;
+            is += 2;
         }
     }
 }
@@ -459,25 +452,26 @@ static void dequant_q5_k(const void* src, float* dst, int n) {
         mn[6] = (blk[b].scales[10] >> 4) | ((blk[b].scales[6] >> 6) << 4);
         mn[7] = (blk[b].scales[11] >> 4) | ((blk[b].scales[7] >> 6) << 4);
 
-        for (int sb = 0; sb < 8; sb++) {
-            const float scale = d * sc[sb];
-            const float min   = dmin * mn[sb];
-
-            for (int j = 0; j < 32; j++) {
-                int idx = sb * 32 + j;
-                /* Low 4 bits from qs */
-                int byte_idx = idx / 2;
-                int q;
-                if (idx % 2 == 0) {
-                    q = blk[b].qs[byte_idx] & 0x0F;
-                } else {
-                    q = blk[b].qs[byte_idx] >> 4;
-                }
-                /* High bit from qh */
-                int hbit = (blk[b].qh[idx / 8] >> (idx % 8)) & 1;
-                q |= (hbit << 4);
-                dst[b * 256 + idx] = scale * q - min;
-            }
+        /* 4 groups of 64 elements (2 sub-blocks each), matching ggml Q5_K.
+         * Low 4 bits: low nibble for first 32 elems, high nibble for next 32.
+         * High bit: from qh, using bitmasks u1/u2 that shift left by 2 each group. */
+        const uint8_t* ql = blk[b].qs;
+        const uint8_t* qh = blk[b].qh;
+        int is = 0;
+        uint8_t u1 = 1, u2 = 2;
+        for (int j = 0; j < 256; j += 64) {
+            const float d1 = d * sc[is + 0];
+            const float m1 = dmin * mn[is + 0];
+            const float d2 = d * sc[is + 1];
+            const float m2 = dmin * mn[is + 1];
+            for (int l = 0; l < 32; ++l)
+                dst[b * 256 + j + l]      = d1 * ((ql[l] & 0x0F) + (qh[l] & u1 ? 16 : 0)) - m1;
+            for (int l = 0; l < 32; ++l)
+                dst[b * 256 + j + 32 + l] = d2 * ((ql[l] >> 4) + (qh[l] & u2 ? 16 : 0)) - m2;
+            ql += 32;
+            is += 2;
+            u1 <<= 2;
+            u2 <<= 2;
         }
     }
 }
@@ -492,57 +486,31 @@ static void dequant_q6_k(const void* src, float* dst, int n) {
     for (int b = 0; b < nb; b++) {
         const float d = fp16_to_fp32(blk[b].d);
 
-        /* ql: 128 bytes = 256 4-bit values (low nibble first half, high nibble second half)
-         * qh: 64 bytes = 256 2-bit values (4 per byte)
-         * Layout matches ggml:
-         *   For i in 0..127: ql[i] holds two 4-bit values (low nibble, high nibble)
-         *   For i in 0..63:  qh[i] holds four 2-bit values
-         *
-         * ggml layout:
-         *   Elements 0..127:   low 4 bits from ql[i] & 0xF
-         *   Elements 128..255: low 4 bits from ql[i] >> 4  (i = elem - 128)
-         *   High 2 bits from qh:
-         *     elem 0..63:    (qh[i] >> 0) & 3
-         *     elem 64..127:  (qh[i-64] >> 2) & 3  -- wait, let me match ggml exactly
-         */
+        /* Match ggml dequantize_row_q6_K exactly.
+         * Processes in two 128-element halves. Within each half, 32
+         * iterations produce 4 output elements each by interleaving
+         * ql low/high nibbles and qh 2-bit fields. */
+        const uint8_t* ql = blk[b].ql;
+        const uint8_t* qh = blk[b].qh;
+        const int8_t*  sc = blk[b].scales;
+        float* y = dst + b * 256;
 
-        /* Match ggml dequantize_row_q6_K exactly */
-        for (int sb = 0; sb < 16; sb++) {
-            const int8_t scale = blk[b].scales[sb];
-
-            for (int j = 0; j < 16; j++) {
-                int idx = sb * 16 + j;
-
-                /* ql: element idx < 128 uses low nibble of ql[idx],
-                 *     element idx >= 128 uses high nibble of ql[idx - 128] */
-                int q_lo;
-                if (idx < 128) {
-                    q_lo = blk[b].ql[idx] & 0x0F;
-                } else {
-                    q_lo = blk[b].ql[idx - 128] >> 4;
-                }
-
-                /* qh: 64 bytes, 4 x 2-bit per byte
-                 * For element idx:
-                 *   idx 0..63:   bits 0..1 of qh[idx]
-                 *   idx 64..127: bits 2..3 of qh[idx-64]
-                 *   idx 128..191: bits 4..5 of qh[idx-128]
-                 *   idx 192..255: bits 6..7 of qh[idx-192]
-                 */
-                int q_hi;
-                if (idx < 64) {
-                    q_hi = (blk[b].qh[idx] >> 0) & 0x03;
-                } else if (idx < 128) {
-                    q_hi = (blk[b].qh[idx - 64] >> 2) & 0x03;
-                } else if (idx < 192) {
-                    q_hi = (blk[b].qh[idx - 128] >> 4) & 0x03;
-                } else {
-                    q_hi = (blk[b].qh[idx - 192] >> 6) & 0x03;
-                }
-
-                int q6 = q_lo | (q_hi << 4);
-                dst[b * 256 + idx] = d * scale * (q6 - 32);
+        for (int half = 0; half < 2; half++) {
+            for (int l = 0; l < 32; ++l) {
+                int is = l / 16;
+                int q1 = (int)((ql[l +  0] & 0xF) | (((qh[l] >> 0) & 3) << 4)) - 32;
+                int q2 = (int)((ql[l + 32] & 0xF) | (((qh[l] >> 2) & 3) << 4)) - 32;
+                int q3 = (int)((ql[l +  0]  >> 4) | (((qh[l] >> 4) & 3) << 4)) - 32;
+                int q4 = (int)((ql[l + 32]  >> 4) | (((qh[l] >> 6) & 3) << 4)) - 32;
+                y[l +  0] = d * sc[is + 0] * q1;
+                y[l + 32] = d * sc[is + 2] * q2;
+                y[l + 64] = d * sc[is + 4] * q3;
+                y[l + 96] = d * sc[is + 6] * q4;
             }
+            y  += 128;
+            ql += 64;
+            qh += 32;
+            sc += 8;
         }
     }
 }
@@ -982,6 +950,73 @@ static void dequant_iq2_s(const void* src, float* dst, int n) {
     }
 }
 
+/* ============================================================
+ * IQ4_NL dequantization — 18 bytes per 32 elements (4.5 bpw)
+ *
+ * Non-linear 4-bit quantization using a 16-entry lookup table.
+ * Block: d (fp16, 2 bytes) + qs[16] (4-bit packed pairs)
+ * ============================================================ */
+
+static const int8_t kvalues_iq4nl[16] = {
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
+};
+
+typedef struct {
+    uint16_t d;       /* fp16 scale */
+    uint8_t  qs[16];  /* 4-bit packed values, 2 per byte */
+} block_iq4_nl;
+
+static void dequant_iq4_nl(const void* src, float* dst, int n) {
+    const int nb = n / 32;
+    const block_iq4_nl* blk = (const block_iq4_nl*)src;
+
+    for (int b = 0; b < nb; b++) {
+        const float d = fp16_to_fp32(blk[b].d);
+        const uint8_t* qs = blk[b].qs;
+        for (int j = 0; j < 16; ++j) {
+            dst[b * 32 + j]      = d * kvalues_iq4nl[qs[j] & 0xf];
+            dst[b * 32 + j + 16] = d * kvalues_iq4nl[qs[j] >> 4];
+        }
+    }
+}
+
+/* ============================================================
+ * IQ4_XS dequantization — 136 bytes per 256 elements (4.25 bpw)
+ *
+ * Like IQ4_NL but with 256-element super-blocks and 6-bit sub-block scales.
+ * Block: d (fp16, 2) + scales_h (uint16, 2) + scales_l[4] + qs[128]
+ * ============================================================ */
+
+typedef struct {
+    uint16_t d;           /* fp16 super-block scale */
+    uint16_t scales_h;    /* high 2 bits of 8 sub-block scales */
+    uint8_t  scales_l[4]; /* low 4 bits of 8 sub-block scales, packed 2 per byte */
+    uint8_t  qs[128];     /* 4-bit packed values */
+} block_iq4_xs;
+
+static void dequant_iq4_xs(const void* src, float* dst, int n) {
+    const int nb = n / 256;
+    const block_iq4_xs* blk = (const block_iq4_xs*)src;
+
+    for (int b = 0; b < nb; b++) {
+        const float d = fp16_to_fp32(blk[b].d);
+        const uint8_t* qs = blk[b].qs;
+        float* y = dst + b * 256;
+
+        for (int ib = 0; ib < 8; ++ib) {
+            const int ls = ((blk[b].scales_l[ib / 2] >> 4 * (ib % 2)) & 0xf)
+                         | (((blk[b].scales_h >> 2 * ib) & 3) << 4);
+            const float dl = d * (ls - 32);
+            for (int j = 0; j < 16; ++j) {
+                y[j +  0] = dl * kvalues_iq4nl[qs[j] & 0xf];
+                y[j + 16] = dl * kvalues_iq4nl[qs[j] >> 4];
+            }
+            y  += 32;
+            qs += 16;
+        }
+    }
+}
+
 /* --- Other IQ type stubs --- */
 static void dequant_iq_stub(const char* type_name, float* dst, int n) {
     static int warned = 0;
@@ -1053,7 +1088,7 @@ void tq_dequant_row_gguf(tq_ggml_dtype type, const void* src, float* dst, int n)
             dequant_iq_stub("IQ1_S", dst, n);
             break;
         case TQ_GGML_TYPE_IQ4_NL:
-            dequant_iq_stub("IQ4_NL", dst, n);
+            dequant_iq4_nl(src, dst, n);
             break;
         case TQ_GGML_TYPE_IQ3_S:
             dequant_iq_stub("IQ3_S", dst, n);
@@ -1062,7 +1097,7 @@ void tq_dequant_row_gguf(tq_ggml_dtype type, const void* src, float* dst, int n)
             dequant_iq2_s(src, dst, n);
             break;
         case TQ_GGML_TYPE_IQ4_XS:
-            dequant_iq_stub("IQ4_XS", dst, n);
+            dequant_iq4_xs(src, dst, n);
             break;
 
         default:

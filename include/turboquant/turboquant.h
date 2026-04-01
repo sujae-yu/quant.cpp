@@ -43,10 +43,12 @@ const char* tq_status_string(tq_status status);
  * ============================================================ */
 
 typedef enum {
-    TQ_BACKEND_CPU   = 0,
-    TQ_BACKEND_CUDA  = 1,
-    TQ_BACKEND_METAL = 2,
-    TQ_BACKEND_AUTO  = 99,
+    TQ_BACKEND_CPU    = 0,
+    TQ_BACKEND_CUDA   = 1,
+    TQ_BACKEND_METAL  = 2,
+    TQ_BACKEND_VULKAN = 3,   /* AMD + cross-platform (SPIR-V compute shaders) */
+    TQ_BACKEND_ROCM   = 4,   /* AMD ROCm/HIP (CUDA-compatible API) */
+    TQ_BACKEND_AUTO   = 99,
 } tq_backend;
 
 /* ============================================================

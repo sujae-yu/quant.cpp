@@ -1057,6 +1057,7 @@ static tq_model_t* tq_load_safetensors(const char* path) {
 
     /* Detect DeltaNet config from first linear_attn layer */
     model->config.delta_n_heads = 0;
+    model->config.delta_n_kv_heads = 0;
     model->config.delta_key_head_dim = 0;
     model->config.delta_value_head_dim = 0;
     model->config.delta_conv_width = 4;
@@ -1543,7 +1544,8 @@ static size_t calc_q8_buffer_size(const tq_model_t* model) {
     int qg_dim = c->attn_output_gate ? q_dim * 2 : q_dim;
 
     /* DeltaNet dimensions */
-    int delta_qkv_dim = 3 * c->delta_n_heads * c->delta_key_head_dim;
+    int delta_nkv = c->delta_n_kv_heads > 0 ? c->delta_n_kv_heads : c->delta_n_heads;
+    int delta_qkv_dim = delta_nkv * c->delta_key_head_dim * 2 + c->delta_n_heads * c->delta_value_head_dim;
     int delta_z_dim = c->delta_n_heads * c->delta_value_head_dim;
     int delta_dn = c->delta_n_heads;
 
@@ -1632,7 +1634,8 @@ void tq_quantize_weights(tq_model_t* model) {
     int qg_dim = c->attn_output_gate ? q_dim * 2 : q_dim;
 
     /* DeltaNet dimensions */
-    int delta_qkv_dim = 3 * c->delta_n_heads * c->delta_key_head_dim;
+    int delta_nkv = c->delta_n_kv_heads > 0 ? c->delta_n_kv_heads : c->delta_n_heads;
+    int delta_qkv_dim = delta_nkv * c->delta_key_head_dim * 2 + c->delta_n_heads * c->delta_value_head_dim;
     int delta_z_dim = c->delta_n_heads * c->delta_value_head_dim;
     int delta_dn = c->delta_n_heads;
 
@@ -1771,7 +1774,8 @@ static size_t calc_q4_buffer_size(const tq_model_t* model) {
     int qg_dim = c->attn_output_gate ? q_dim * 2 : q_dim;
 
     /* DeltaNet dimensions */
-    int delta_qkv_dim = 3 * c->delta_n_heads * c->delta_key_head_dim;
+    int delta_nkv = c->delta_n_kv_heads > 0 ? c->delta_n_kv_heads : c->delta_n_heads;
+    int delta_qkv_dim = delta_nkv * c->delta_key_head_dim * 2 + c->delta_n_heads * c->delta_value_head_dim;
     int delta_z_dim = c->delta_n_heads * c->delta_value_head_dim;
     int delta_dn = c->delta_n_heads;
 
@@ -1858,7 +1862,8 @@ void tq_quantize_weights_q4(tq_model_t* model) {
     int qg_dim = c->attn_output_gate ? q_dim * 2 : q_dim;
 
     /* DeltaNet dimensions */
-    int delta_qkv_dim = 3 * c->delta_n_heads * c->delta_key_head_dim;
+    int delta_nkv = c->delta_n_kv_heads > 0 ? c->delta_n_kv_heads : c->delta_n_heads;
+    int delta_qkv_dim = delta_nkv * c->delta_key_head_dim * 2 + c->delta_n_heads * c->delta_value_head_dim;
     int delta_z_dim = c->delta_n_heads * c->delta_value_head_dim;
     int delta_dn = c->delta_n_heads;
 
@@ -1981,7 +1986,8 @@ static size_t calc_q2_buffer_size(const tq_model_t* model) {
     int kv_dim = c->n_kv_heads * c->head_dim;
     int inter = c->intermediate_dim;
     int qg_dim = c->attn_output_gate ? q_dim * 2 : q_dim;
-    int delta_qkv_dim = 3 * c->delta_n_heads * c->delta_key_head_dim;
+    int delta_nkv = c->delta_n_kv_heads > 0 ? c->delta_n_kv_heads : c->delta_n_heads;
+    int delta_qkv_dim = delta_nkv * c->delta_key_head_dim * 2 + c->delta_n_heads * c->delta_value_head_dim;
     int delta_z_dim = c->delta_n_heads * c->delta_value_head_dim;
     int delta_dn = c->delta_n_heads;
 
@@ -2013,7 +2019,8 @@ void tq_quantize_weights_q2(tq_model_t* model) {
     int kv_dim = c->n_kv_heads * c->head_dim;
     int inter = c->intermediate_dim;
     int qg_dim = c->attn_output_gate ? q_dim * 2 : q_dim;
-    int delta_qkv_dim = 3 * c->delta_n_heads * c->delta_key_head_dim;
+    int delta_nkv = c->delta_n_kv_heads > 0 ? c->delta_n_kv_heads : c->delta_n_heads;
+    int delta_qkv_dim = delta_nkv * c->delta_key_head_dim * 2 + c->delta_n_heads * c->delta_value_head_dim;
     int delta_z_dim = c->delta_n_heads * c->delta_value_head_dim;
     int delta_dn = c->delta_n_heads;
 
@@ -2225,7 +2232,8 @@ tq_model_t* tq_load_tqm(const char* path) {
     int kv_dim = c->n_kv_heads * c->head_dim;
     int inter = c->intermediate_dim;
     int qg_dim = c->attn_output_gate ? q_dim * 2 : q_dim;
-    int delta_qkv_dim = 3 * c->delta_n_heads * c->delta_key_head_dim;
+    int delta_nkv = c->delta_n_kv_heads > 0 ? c->delta_n_kv_heads : c->delta_n_heads;
+    int delta_qkv_dim = delta_nkv * c->delta_key_head_dim * 2 + c->delta_n_heads * c->delta_value_head_dim;
     int delta_z_dim = c->delta_n_heads * c->delta_value_head_dim;
     int delta_dn = c->delta_n_heads;
     int delta_conv_total = delta_qkv_dim; /* conv1d channels */
@@ -2718,21 +2726,40 @@ tq_model_t* tq_load_gguf(const char* path) {
 
             /* Infer DeltaNet config from tensor shapes if not set */
             if (c->delta_n_heads == 0 && layer->delta_a_log) {
+                /* Read SSM config from GGUF metadata (Qwen3.5 DeltaNet).
+                 * ssm_a shape[0] = num_v_heads (= ssm.time_step_rank)
+                 * ssm_norm shape[0] = value_head_dim
+                 * From GGUF metadata:
+                 *   ssm.state_size   = key_head_dim (ssm_d_state)
+                 *   ssm.group_count  = num_k_heads  (ssm_n_group)
+                 *   ssm.time_step_rank = num_v_heads
+                 *   ssm.inner_size   = num_v_heads * value_head_dim */
                 snprintf(tname, sizeof(tname), "blk.%d.ssm_a", l);
                 const tq_gguf_tensor_t* a_t = find_gguf_tensor(gguf, tname);
-                if (a_t) c->delta_n_heads = (int)a_t->shape[0];
+                if (a_t) c->delta_n_heads = (int)a_t->shape[0]; /* num_v_heads */
 
                 snprintf(tname, sizeof(tname), "blk.%d.ssm_norm.weight", l);
                 const tq_gguf_tensor_t* norm_t = find_gguf_tensor(gguf, tname);
                 if (norm_t) {
                     c->delta_value_head_dim = (int)norm_t->shape[0];
-                    c->delta_key_head_dim = c->delta_value_head_dim; /* typically same */
                 }
-                c->delta_conv_width = 4; /* standard for Qwen3.5 */
+
+                /* Try to read key_head_dim from metadata (ssm.state_size) */
+                c->delta_key_head_dim = tq_gguf_get_i32(gguf,
+                    GGUF_KEY("ssm.state_size"), c->delta_value_head_dim);
+
+                /* Try to read num_k_heads from metadata (ssm.group_count) */
+                c->delta_n_kv_heads = tq_gguf_get_i32(gguf,
+                    GGUF_KEY("ssm.group_count"), c->delta_n_heads);
+
+                c->delta_conv_width = tq_gguf_get_i32(gguf,
+                    GGUF_KEY("ssm.conv_kernel"), 4);
                 c->partial_rotary_factor = 0.25f;
 
-                fprintf(stderr, "tq_load_gguf: DeltaNet config — heads=%d, head_dim=%d, conv=%d\n",
-                        c->delta_n_heads, c->delta_key_head_dim, c->delta_conv_width);
+                fprintf(stderr, "tq_load_gguf: DeltaNet config — v_heads=%d, kv_heads=%d, "
+                        "key_dim=%d, val_dim=%d, conv=%d\n",
+                        c->delta_n_heads, c->delta_n_kv_heads,
+                        c->delta_key_head_dim, c->delta_value_head_dim, c->delta_conv_width);
             }
         }
 
@@ -2901,7 +2928,8 @@ int tq_save_tqm(tq_model_t* model, const char* tokenizer_path,
     int kv_dim = c->n_kv_heads * c->head_dim;
     int inter = c->intermediate_dim;
     int qg_dim = c->attn_output_gate ? q_dim * 2 : q_dim;
-    int delta_qkv_dim = 3 * c->delta_n_heads * c->delta_key_head_dim;
+    int delta_nkv = c->delta_n_kv_heads > 0 ? c->delta_n_kv_heads : c->delta_n_heads;
+    int delta_qkv_dim = delta_nkv * c->delta_key_head_dim * 2 + c->delta_n_heads * c->delta_value_head_dim;
     int delta_z_dim = c->delta_n_heads * c->delta_value_head_dim;
     int delta_dn = c->delta_n_heads;
     int delta_conv_total = delta_qkv_dim;

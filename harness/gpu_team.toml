@@ -1,0 +1,186 @@
+# TurboQuant.cpp GPU Backend Team — ClawTeam Configuration
+# Based on code audit: CUDA 100%, Metal 80%, NEON 95%, AVX2 40%
+# New: Vulkan (AMD support), ROCm/HIP, Metal completion, AVX2 completion
+#
+# Launch: clawteam launch harness/gpu_team.toml
+
+[team]
+name = "tq-gpu"
+goal = "Universal GPU backends + 35B quality fix"
+
+[leader]
+agent = "architect"
+backend = "claude"
+
+# ============================================================
+# Worker 1: Vulkan — AMD GPU 지원의 핵심 (신규)
+# ============================================================
+[[worker]]
+name = "vulkan-dev"
+backend = "claude"
+files = ["src/backend/vulkan/**"]
+task = """
+Create Vulkan compute shader backend for TurboQuant KV compression.
+This enables AMD GPU support (Radeon RX, MI250/MI300).
+
+REFERENCE: Port from CUDA kernels in src/backend/cuda/ (100% complete).
+DO NOT rewrite algorithms — translate CUDA → GLSL compute shaders.
+
+Create files:
+  src/backend/vulkan/tq_vulkan.h           — internal types + pipeline handles
+  src/backend/vulkan/tq_vulkan_init.c      — instance/device/queue creation, pipeline cache
+  src/backend/vulkan/tq_vulkan_dispatch.c  — host wrappers (buffer alloc, command record, submit)
+  src/backend/vulkan/shaders/polar_quantize.comp    — from tq_polar.cu
+  src/backend/vulkan/shaders/polar_attention.comp
+  src/backend/vulkan/shaders/qjl_quantize.comp      — from tq_qjl.cu
+  src/backend/vulkan/shaders/qjl_attention.comp
+  src/backend/vulkan/shaders/turbo_quantize.comp     — from tq_turbo.cu
+  src/backend/vulkan/shaders/turbo_attention.comp
+  src/backend/vulkan/shaders/value_quantize.comp     — from tq_value.cu (4b + 2b)
+  src/backend/vulkan/shaders/value_dequant_matmul.comp — fused dequant+dot
+  src/backend/vulkan/shaders/fused_cache.comp        — from tq_fused_cache.cu
+
+Constraints:
+  - Vulkan 1.1, GLSL 450, GL_KHR_shader_subgroup_basic
+  - Push constants for (n, head_dim, block_size, type)
+  - Storage buffers for input/output/workspace
+  - Workgroup size 256 (matches TQ_BK block size)
+  - subgroupAdd/subgroupOr for reductions (replaces CUDA warp primitives)
+
+CMake: Add TQ_BUILD_VULKAN option, find Vulkan SDK, compile shaders to SPIR-V.
+Test: tests/test_vulkan.cpp — compare output vs CPU reference, cosine > 0.999.
+"""
+
+# ============================================================
+# Worker 2: ROCm/HIP — CUDA → AMD 직접 변환 (기계적)
+# ============================================================
+[[worker]]
+name = "rocm-dev"
+backend = "claude"
+files = ["src/backend/rocm/**"]
+task = """
+Convert existing CUDA kernels to ROCm/HIP for native AMD GPU support.
+CUDA backend is 100% complete (1,922 LOC) — this is mechanical conversion.
+
+Steps:
+1. mkdir src/backend/rocm/
+2. For each .cu file in src/backend/cuda/:
+   - Copy to src/backend/rocm/ as .cpp
+   - Replace: #include <cuda_runtime.h> → <hip/hip_runtime.h>
+   - Replace: cudaMalloc → hipMalloc, cudaMemcpy → hipMemcpy, etc.
+   - Replace: <<<grid,block>>> → hipLaunchKernelGGL(kernel, grid, block, 0, 0, args...)
+   - Replace: __shfl_xor_sync(0xFFFFFFFF, val, mask) → __shfl_xor(val, mask)
+   - Replace: __syncwarp() → (remove, HIP doesn't need)
+   - Replace: __popc → __popcll for 64-bit, __popc for 32-bit
+
+Files to create:
+  src/backend/rocm/tq_rocm_dispatch.cpp  (from tq_cuda_dispatch.cu)
+  src/backend/rocm/tq_polar.cpp          (from tq_polar.cu)
+  src/backend/rocm/tq_qjl.cpp            (from tq_qjl.cu)
+  src/backend/rocm/tq_turbo.cpp          (from tq_turbo.cu)
+  src/backend/rocm/tq_value.cpp          (from tq_value.cu)
+  src/backend/rocm/tq_fused_cache.cpp    (from tq_fused_cache.cu)
+
+CMake: Add TQ_BUILD_ROCM option, find HIP SDK.
+Keep all kernel logic identical to CUDA — only API calls change.
+"""
+
+# ============================================================
+# Worker 3: Metal 완성 + AVX2 완성 (기존 코드 보완)
+# ============================================================
+[[worker]]
+name = "simd-dev"
+backend = "claude"
+files = ["src/backend/metal/tq_value.metal", "src/backend/cpu/tq_avx2.c"]
+task = """
+Complete the two partially-implemented backends.
+
+[Metal value.metal — currently 57 LOC, only 4-bit]
+Add to src/backend/metal/tq_value.metal:
+1. tq_value_quantize_2b() — 2-bit uniform quantization kernel
+2. tq_value_dequant_matmul_4b() — FUSED dequant + weighted aggregation
+   Port from CUDA's tq_value_dequant_matmul_4b_kernel() in tq_value.cu.
+   Use threadgroup memory for attention weights, SIMD reduction for dot.
+3. tq_value_dequant_matmul_2b() — same for 2-bit
+
+[AVX2 — currently 217 LOC, only uniform 4-bit, polar/QJL are stubs]
+Complete in src/backend/cpu/tq_avx2.c:
+1. tq_polar_quantize_avx2() — AVX2 atan2 approximation
+   Use the same 5-coefficient polynomial as NEON (see tq_neon.c:288).
+   AVX2: _mm256_mul_ps, _mm256_add_ps, _mm256_div_ps for the polynomial.
+2. tq_qjl_quantize_avx2() — AVX2 L2 norm + sign hash
+   Use _mm256_dp_ps or FMA for dot products, _mm256_movemask_ps for sign bits.
+3. tq_qjl_attention_avx2() — AVX2 XOR + popcount
+   Use _mm256_xor_si256 + _mm256_popcnt_epi8 (AVX512BITALG) or LUT fallback.
+
+Reference: All NEON implementations are in tq_neon.c (980 LOC) — translate to AVX2.
+"""
+
+# ============================================================
+# Worker 4: 35B 품질 수정 (expert[-1] + DeltaNet precision)
+# ============================================================
+[[worker]]
+name = "quality-dev"
+backend = "claude"
+files = ["src/engine/tq_moe.c", "src/engine/tq_gguf_quants.c", "src/engine/tq_model.c"]
+task = """
+Fix 35B MoE inference quality — currently outputs "!!!!" garbage.
+
+Root causes to fix:
+1. expert[-1] routing bug in tq_moe.c:
+   - tq_moe_route() sometimes returns -1 for expert IDs
+   - Fix: validate all K expert IDs after routing, replace any -1 with 0
+   - Better fix: use heap-based top-K (priority queue) instead of partial sort
+
+2. IQ2_XXS dequantization verification:
+   - Compare our dequant output for blk.0.ffn_gate_exps.weight against
+     llama-cpp-python's output for the same tensor
+   - Run: python3 -c "from llama_cpp import Llama; ..."
+   - Fix any byte-level discrepancies
+
+3. DeltaNet + low-bit weight divergence:
+   - Q5_K weights for DeltaNet (attn_qkv, attn_gate) should be OK (5-bit)
+   - But Q8_0 for alpha/beta might accumulate error in recurrent state
+   - Add mixed-precision loading: detect DeltaNet layers in tq_load_gguf,
+     keep alpha/beta as FP32 (they're small: [hidden, n_heads] = 2048*32*4 = 256KB each)
+
+Test: ./build/tq_run models/Qwen3.5-35B-A3B-UD-IQ2_XXS.gguf -p "Hello" -n 20
+should produce coherent English text, not "!!!!".
+"""
+
+# ============================================================
+# Worker 5: CMake 통합 + CI 테스트 (빌드 시스템)
+# ============================================================
+[[worker]]
+name = "build-dev"
+backend = "claude"
+files = ["CMakeLists.txt", "tests/test_vulkan.cpp", "tests/test_metal_gpu.mm", ".github/workflows/**"]
+task = """
+Integrate all new backends into the build system.
+
+CMakeLists.txt additions:
+1. option(TQ_BUILD_VULKAN "Build Vulkan backend" OFF)
+   - find_package(Vulkan REQUIRED)
+   - Compile .comp shaders to .spv using glslangValidator
+   - Embed .spv as C arrays or load at runtime
+
+2. option(TQ_BUILD_ROCM "Build ROCm/HIP backend" OFF)
+   - find_package(hip REQUIRED)
+   - Add src/backend/rocm/*.cpp as HIP sources
+
+3. Update backend enum registration in tq_cpu_dispatch.c
+   for Vulkan and ROCm dispatch paths.
+
+Test files:
+- tests/test_vulkan.cpp — Vulkan init + kernel correctness
+- tests/test_metal_gpu.mm — Metal kernel correctness (Obj-C++)
+- tests/test_rocm_gpu.cpp — ROCm kernel correctness
+
+GitHub Actions CI:
+- .github/workflows/gpu-ci.yml
+  - macOS: build + test Metal (M-series runner)
+  - Linux: build + test Vulkan (software renderer lavapipe)
+  - Linux: build CUDA (nvcc compile-only, no GPU)
+
+Run score.sh at the end — score must stay >= 0.98.
+"""
