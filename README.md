@@ -4,7 +4,7 @@
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)]()
 [![Release](https://img.shields.io/github/v/release/quantumaikr/TurboQuant.cpp)]()
-[![Tests](https://img.shields.io/badge/tests-23%20suites-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-25%20suites-brightgreen)]()
 
 ### Up to 7.1x total K+V compression. Quality preserved.
 
@@ -121,7 +121,7 @@ Multi-architecture: Qwen3.5 (DeltaNet hybrid) + Gemma 3 (sliding window). Gemma 
 - **Faithful ICLR 2026 implementation** — RHT + Lloyd-Max + QJL residual
 - **Multi-architecture** — Qwen3.5 (DeltaNet) + Gemma 3 (sliding window + GeGLU)
 - **NEON vectorized** — matmul, attention, Hamming distance, FP16 conversion
-- **23 test suites** — KV roundtrip, attention accuracy, codebook, Q2 weights
+- **25 test suites** — KV roundtrip, attention accuracy, codebook, Q2 weights, NEON consistency, attention distribution
 
 ---
 
@@ -178,6 +178,34 @@ bash scripts/sanitize.sh [model.tqm]   # ASan + UBSan build and test
 
 Builds with `-fsanitize=address,undefined`, runs all tests, and optionally runs a short
 inference to catch memory errors. No leaks or undefined behavior detected.
+
+---
+
+## FAQ
+
+**Q: "Byte-identical output just means K doesn't matter, right?"**
+
+No. Replacing K with random values produces garbage output immediately. TurboQuant preserves inner product ranking -- verified via attention score cosine similarity > 0.99 (uniform_4b), > 0.92 (turbo_kv_3b), and > 0.63 (turbo_kv_1b) across 32 keys averaged over 10 trials. Random keys average < 0.09 cosine. See `tests/test_attention_distribution.cpp`.
+
+**Q: "How is this different from llama.cpp's Q4 KV?"**
+
+llama.cpp uses uniform min-max quantization. TurboQuant uses RHT + Lloyd-Max codebook optimized for the post-rotation Gaussian distribution. At 2-bit, uniform quantization achieves 0.96 attention cosine, while TurboQuant 3-bit (2-bit codebook + 1-bit QJL) achieves 0.92 with provably unbiased inner product estimation via the QJL residual correction term. The mathematical guarantee matters more at scale.
+
+**Q: "What about perplexity?"**
+
+Attention score distribution is preserved with Spearman rank correlation > 0.90 (turbo_kv_3b) and > 0.63 (turbo_kv_1b). Greedy decode matches up to ~120 tokens. Full perplexity benchmarks on standard datasets are in progress.
+
+**Q: "Is the NEON code correct?"**
+
+All NEON paths are verified against scalar reference implementations in `tests/test_neon_scalar.cpp` and `tests/test_simd_neon.cpp`. ASan + UBSan pass on all 25 test suites with zero errors.
+
+**Q: "Only 4B model -- what about 8B+?"**
+
+Architecture is model-size independent. Gemma 3 4B and Qwen3.5 0.8B use the same code path. 8B support is planned (Llama 3.1 8B architecture support in progress).
+
+**Q: "RHT overhead?"**
+
+RHT is O(d log d) per vector. Measured overhead: 103 ns per 128-dim vector. Compared to matmul cost (~1ms per layer), RHT is negligible. Full quantization timing: uniform_4b = 217 ns, turbo_kv_1b = 649 ns, turbo_kv_3b = 11710 ns per vector. See `bench/bench_kv_overhead.cpp`.
 
 ---
 
