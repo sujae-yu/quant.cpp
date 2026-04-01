@@ -24,7 +24,7 @@ extern "C" {
 /* ============================================================
  * GGUF format constants
  * ============================================================ */
-#define TQ_GGUF_MAGIC       0x46475547  /* "GGUF" little-endian */
+#define TQ_GGUF_MAGIC       0x46554747  /* "GGUF" as uint32 LE */
 #define TQ_GGUF_VERSION_MIN 2
 #define TQ_GGUF_VERSION_MAX 3
 #define TQ_GGUF_MAX_NAME    256

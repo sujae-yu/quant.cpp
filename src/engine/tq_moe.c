@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdio.h>
 #include <stdint.h>
 
 #ifndef _WIN32
@@ -27,7 +28,7 @@ tq_moe_state_t* tq_moe_create_state(const tq_moe_config_t* config, int hidden_di
     if (!s) return NULL;
 
     s->router_logits  = (float*)malloc((size_t)config->num_experts * sizeof(float));
-    s->top_experts    = (int*)malloc((size_t)config->num_active * sizeof(int));
+    s->top_experts    = (int*)calloc((size_t)config->num_active, sizeof(int));
     s->expert_weights = (float*)malloc((size_t)config->num_active * sizeof(float));
     s->expert_out     = (float*)malloc((size_t)hidden_dim * sizeof(float));
 
@@ -144,6 +145,7 @@ void tq_moe_forward(const tq_moe_layer_t* layer,
     for (int k = 0; k < num_active; k++) {
         int eid = state->top_experts[k];
         float w = state->expert_weights[k];
+        if (eid < 0 || eid >= config->num_experts) continue; /* safety check */
         const tq_expert_weights_t* exp = &layer->experts[eid];
 
         /* gate = input @ w_gate^T   -> [expert_dim] */

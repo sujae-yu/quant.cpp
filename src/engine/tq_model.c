@@ -579,7 +579,7 @@ tq_model_t* tq_load_model(const char* path) {
                 fprintf(stderr, "tq_load_model: detected TQM format, using fast loader\n");
                 return tq_load_tqm(path);
             }
-            if (magic == 0x46475547) { /* "GGUF" */
+            if (magic == 0x46554747) { /* "GGUF" */
                 fprintf(stderr, "tq_load_model: detected GGUF format\n");
                 return tq_load_gguf(path);
             }
@@ -2493,6 +2493,11 @@ tq_model_t* tq_load_gguf(const char* path) {
     c->n_layers         = tq_gguf_get_i32(gguf, GGUF_KEY("block_count"), 0);
     c->hidden_dim       = tq_gguf_get_i32(gguf, GGUF_KEY("embedding_length"), 0);
     c->intermediate_dim = tq_gguf_get_i32(gguf, GGUF_KEY("feed_forward_length"), 0);
+    /* For MoE models, intermediate_dim may be 0 in metadata.
+     * Use expert_feed_forward_length as fallback for state allocation. */
+    if (c->intermediate_dim == 0) {
+        c->intermediate_dim = tq_gguf_get_i32(gguf, GGUF_KEY("expert_feed_forward_length"), 0);
+    }
     c->n_heads          = tq_gguf_get_i32(gguf, GGUF_KEY("attention.head_count"), 0);
     c->n_kv_heads       = tq_gguf_get_i32(gguf, GGUF_KEY("attention.head_count_kv"), c->n_heads);
     c->vocab_size       = (int)tq_gguf_get_u32(gguf, GGUF_KEY("vocab_size"),
@@ -2501,11 +2506,17 @@ tq_model_t* tq_load_gguf(const char* path) {
     c->rope_freq_base   = tq_gguf_get_f32(gguf, GGUF_KEY("rope.freq_base"), 1000000.0f);
     c->rms_norm_eps     = tq_gguf_get_f32(gguf, GGUF_KEY("attention.layer_norm_rms_epsilon"), 1e-6f);
 
-    /* Cap context for memory safety on small machines */
-    if (c->max_seq_len > 131072) c->max_seq_len = 131072;
+    /* Cap context for memory safety on small machines.
+     * GGUF models often claim 262K context but we cap at 4096 by default.
+     * Users can override with --ctx flag in tq_run. */
+    if (c->max_seq_len > 4096) c->max_seq_len = 4096;
 
-    /* Compute head_dim */
-    if (c->n_heads > 0) c->head_dim = c->hidden_dim / c->n_heads;
+    /* Compute head_dim — prefer explicit key_length from metadata (Qwen3.5 has
+     * head_dim > hidden_dim/n_heads because attention expands the dimension) */
+    c->head_dim = tq_gguf_get_i32(gguf, GGUF_KEY("attention.key_length"), 0);
+    if (c->head_dim == 0 && c->n_heads > 0) {
+        c->head_dim = c->hidden_dim / c->n_heads;
+    }
 
     /* MoE configuration */
     c->num_experts        = tq_gguf_get_i32(gguf, GGUF_KEY("expert_count"), 0);
@@ -2595,6 +2606,11 @@ tq_model_t* tq_load_gguf(const char* path) {
 
         snprintf(tname, sizeof(tname), "blk.%d.ffn_norm.weight", l);
         t = find_gguf_tensor(gguf, tname);
+        if (!t) {
+            /* Qwen3.5 uses post_attention_norm as FFN norm */
+            snprintf(tname, sizeof(tname), "blk.%d.post_attention_norm.weight", l);
+            t = find_gguf_tensor(gguf, tname);
+        }
         if (t) layer->ffn_norm = dequant_tensor_fp32(t);
 
         /* QK-norm (optional) */
@@ -2611,40 +2627,113 @@ tq_model_t* tq_load_gguf(const char* path) {
          * the existing FP32 weight pointer fields. For GGUF models, we use a special
          * dispatch: if gguf_ctx is non-NULL, the forward pass uses tq_matmul_gguf. */
         snprintf(tname, sizeof(tname), "blk.%d.attn_q.weight", l);
-        t = find_gguf_tensor(gguf, tname);
-        int is_attn_layer = (t != NULL);
+        const tq_gguf_tensor_t* wq_t = find_gguf_tensor(gguf, tname);
+        int is_attn_layer = (wq_t != NULL);
         if (is_attn_layer) {
-            /* For now, dequant attention weights to FP32 at load time.
-             * These are used every token and are not MoE, so the cost is fixed.
-             * For 30B models with 10 attn layers, this is manageable (~500MB). */
-            layer->wq = dequant_tensor_fp32(t);
+            /* Detect attn_output_gate on first self_attn layer:
+             * If Q proj out_dim = 2 * O proj in_dim, Q includes gate */
+            if (n_attn_layers == 0 && wq_t->n_dims >= 2) {
+                snprintf(tname, sizeof(tname), "blk.%d.attn_output.weight", l);
+                const tq_gguf_tensor_t* wo_t = find_gguf_tensor(gguf, tname);
+                if (wo_t && wo_t->n_dims >= 2) {
+                    int q_out = (int)wq_t->shape[1];  /* Q: [hidden, q_out] */
+                    int o_in  = (int)wo_t->shape[0];   /* O: [o_in, hidden] */
+                    if (q_out == o_in * 2) {
+                        c->attn_output_gate = 1;
+                        /* Don't override n_heads from metadata — gate doubles Q proj only */
+                        fprintf(stderr, "tq_load_gguf: detected attn_output_gate=1 "
+                                "(q=%d = 2 * o=%d, n_heads=%d, head_dim=%d)\n",
+                                q_out, o_in, c->n_heads, c->head_dim);
+                    }
+                }
+            }
+
+            /* Store GGUF quantized pointers for on-the-fly dequant in forward.
+             * This saves ~5GB for 35B models (vs full FP32 dequant at load). */
+            layer->gguf_wq = wq_t->data;
+            layer->gguf_wq_type = wq_t->type;
 
             snprintf(tname, sizeof(tname), "blk.%d.attn_k.weight", l);
             t = find_gguf_tensor(gguf, tname);
-            if (t) layer->wk = dequant_tensor_fp32(t);
+            if (t) { layer->gguf_wk = t->data; layer->gguf_wk_type = t->type; }
 
             snprintf(tname, sizeof(tname), "blk.%d.attn_v.weight", l);
             t = find_gguf_tensor(gguf, tname);
-            if (t) layer->wv = dequant_tensor_fp32(t);
+            if (t) { layer->gguf_wv = t->data; layer->gguf_wv_type = t->type; }
 
             snprintf(tname, sizeof(tname), "blk.%d.attn_output.weight", l);
             t = find_gguf_tensor(gguf, tname);
-            if (t) layer->wo = dequant_tensor_fp32(t);
+            if (t) { layer->gguf_wo = t->data; layer->gguf_wo_type = t->type; }
 
             attn_indices[n_attn_layers++] = l;
         }
 
-        /* Check for DeltaNet weights */
-        snprintf(tname, sizeof(tname), "blk.%d.ssm_a_log", l);
+        /* Check for DeltaNet / SSM weights (Qwen3.5 hybrid) */
+        snprintf(tname, sizeof(tname), "blk.%d.ssm_a", l);
         t = find_gguf_tensor(gguf, tname);
-        if (!t) {
-            snprintf(tname, sizeof(tname), "blk.%d.time_decay", l);
-            t = find_gguf_tensor(gguf, tname);
-        }
         if (t) {
             layer->delta_a_log = dequant_tensor_fp32(t);
-            /* Load remaining DeltaNet tensors... */
-            /* TODO: full DeltaNet GGUF loading for hybrid models */
+            /* GGUF stores ssm_a as -exp(a_log), but our forward pass expects a_log.
+             * Convert back: a_log = log(-ssm_a) */
+            if (layer->delta_a_log) {
+                for (int64_t j = 0; j < t->shape[0]; j++) {
+                    float v = layer->delta_a_log[j];
+                    layer->delta_a_log[j] = (v < 0) ? logf(-v) : 0.0f;
+                }
+            }
+
+            snprintf(tname, sizeof(tname), "blk.%d.ssm_conv1d.weight", l);
+            t = find_gguf_tensor(gguf, tname);
+            if (t) layer->delta_conv1d = dequant_tensor_fp32(t);
+
+            snprintf(tname, sizeof(tname), "blk.%d.ssm_dt.bias", l);
+            t = find_gguf_tensor(gguf, tname);
+            if (t) layer->delta_dt_bias = dequant_tensor_fp32(t);
+
+            /* Small DeltaNet weights: dequant to FP32 (alpha, beta are small) */
+            snprintf(tname, sizeof(tname), "blk.%d.ssm_alpha.weight", l);
+            t = find_gguf_tensor(gguf, tname);
+            if (t) { layer->gguf_delta_a = t->data; layer->gguf_delta_a_type = t->type; }
+
+            snprintf(tname, sizeof(tname), "blk.%d.ssm_beta.weight", l);
+            t = find_gguf_tensor(gguf, tname);
+            if (t) { layer->gguf_delta_b = t->data; layer->gguf_delta_b_type = t->type; }
+
+            /* Large DeltaNet projections: GGUF on-the-fly dequant */
+            snprintf(tname, sizeof(tname), "blk.%d.attn_qkv.weight", l);
+            t = find_gguf_tensor(gguf, tname);
+            if (t) { layer->gguf_delta_qkv = t->data; layer->gguf_delta_qkv_type = t->type; }
+
+            snprintf(tname, sizeof(tname), "blk.%d.attn_gate.weight", l);
+            t = find_gguf_tensor(gguf, tname);
+            if (t) { layer->gguf_delta_z = t->data; layer->gguf_delta_z_type = t->type; }
+
+            snprintf(tname, sizeof(tname), "blk.%d.ssm_norm.weight", l);
+            t = find_gguf_tensor(gguf, tname);
+            if (t) layer->delta_norm = dequant_tensor_fp32(t);
+
+            snprintf(tname, sizeof(tname), "blk.%d.ssm_out.weight", l);
+            t = find_gguf_tensor(gguf, tname);
+            if (t) { layer->gguf_delta_out = t->data; layer->gguf_delta_out_type = t->type; }
+
+            /* Infer DeltaNet config from tensor shapes if not set */
+            if (c->delta_n_heads == 0 && layer->delta_a_log) {
+                snprintf(tname, sizeof(tname), "blk.%d.ssm_a", l);
+                const tq_gguf_tensor_t* a_t = find_gguf_tensor(gguf, tname);
+                if (a_t) c->delta_n_heads = (int)a_t->shape[0];
+
+                snprintf(tname, sizeof(tname), "blk.%d.ssm_norm.weight", l);
+                const tq_gguf_tensor_t* norm_t = find_gguf_tensor(gguf, tname);
+                if (norm_t) {
+                    c->delta_value_head_dim = (int)norm_t->shape[0];
+                    c->delta_key_head_dim = c->delta_value_head_dim; /* typically same */
+                }
+                c->delta_conv_width = 4; /* standard for Qwen3.5 */
+                c->partial_rotary_factor = 0.25f;
+
+                fprintf(stderr, "tq_load_gguf: DeltaNet config — heads=%d, head_dim=%d, conv=%d\n",
+                        c->delta_n_heads, c->delta_key_head_dim, c->delta_conv_width);
+            }
         }
 
         /* FFN weights */
@@ -2712,35 +2801,35 @@ tq_model_t* tq_load_gguf(const char* path) {
                         moe->shared_expert.w_down = t->data;
                         moe->shared_expert.down_type = t->type;
                     }
-                    snprintf(tname, sizeof(tname), "blk.%d.ffn_gate_shexp_gate.weight", l);
+                    snprintf(tname, sizeof(tname), "blk.%d.ffn_gate_inp_shexp.weight", l);
                     t = find_gguf_tensor(gguf, tname);
                     if (t) moe->shared_gate = dequant_tensor_fp32(t);
                 }
 
                 layer->moe = moe;
             } else {
-                /* Dense FFN in an otherwise MoE model */
+                /* Dense FFN in an otherwise MoE model — use GGUF on-the-fly */
                 snprintf(tname, sizeof(tname), "blk.%d.ffn_gate.weight", l);
                 t = find_gguf_tensor(gguf, tname);
-                if (t) layer->w_gate = dequant_tensor_fp32(t);
+                if (t) { layer->gguf_w_gate = t->data; layer->gguf_w_gate_type = t->type; }
                 snprintf(tname, sizeof(tname), "blk.%d.ffn_up.weight", l);
                 t = find_gguf_tensor(gguf, tname);
-                if (t) layer->w_up = dequant_tensor_fp32(t);
+                if (t) { layer->gguf_w_up = t->data; layer->gguf_w_up_type = t->type; }
                 snprintf(tname, sizeof(tname), "blk.%d.ffn_down.weight", l);
                 t = find_gguf_tensor(gguf, tname);
-                if (t) layer->w_down = dequant_tensor_fp32(t);
+                if (t) { layer->gguf_w_down = t->data; layer->gguf_w_down_type = t->type; }
             }
         } else {
-            /* Dense model: load FFN weights (dequant to FP32) */
+            /* Dense model: use GGUF on-the-fly dequant */
             snprintf(tname, sizeof(tname), "blk.%d.ffn_gate.weight", l);
             t = find_gguf_tensor(gguf, tname);
-            if (t) layer->w_gate = dequant_tensor_fp32(t);
+            if (t) { layer->gguf_w_gate = t->data; layer->gguf_w_gate_type = t->type; }
             snprintf(tname, sizeof(tname), "blk.%d.ffn_up.weight", l);
             t = find_gguf_tensor(gguf, tname);
-            if (t) layer->w_up = dequant_tensor_fp32(t);
+            if (t) { layer->gguf_w_up = t->data; layer->gguf_w_up_type = t->type; }
             snprintf(tname, sizeof(tname), "blk.%d.ffn_down.weight", l);
             t = find_gguf_tensor(gguf, tname);
-            if (t) layer->w_down = dequant_tensor_fp32(t);
+            if (t) { layer->gguf_w_down = t->data; layer->gguf_w_down_type = t->type; }
         }
     }
 

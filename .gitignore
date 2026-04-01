@@ -41,3 +41,4 @@ refs/.venv/
 *.tqm
 .venv/
 refs/
+models/

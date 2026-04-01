@@ -8,6 +8,7 @@
  */
 
 #include "turboquant/tq_engine.h"
+#include "turboquant/tq_gguf.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -165,6 +166,18 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
         return -1;
     }
 
+    /* Allocate MoE state if model uses MoE */
+    if (model->config.is_moe && model->moe_config) {
+        state->moe_state = tq_moe_create_state(
+            (const tq_moe_config_t*)model->moe_config,
+            model->config.hidden_dim);
+        if (!state->moe_state) {
+            fprintf(stderr, "tq_generate: failed to allocate MoE state\n");
+            tq_free_state(state);
+            return -1;
+        }
+    }
+
     /* Set up V highres window if requested */
     if (config->v_highres_window > 0 &&
         (config->value_quant_bits == 4 || config->value_quant_bits == 2)) {
@@ -181,7 +194,10 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
     int n_prompt = 0;
 
     if (tokenizer && prompt) {
-        n_prompt = tq_encode(tokenizer, prompt, prompt_tokens, 4096, 1);
+        /* Qwen3.5 uses chat template — don't prepend BOS for raw text completion.
+         * Gemma3 (model_type=1) uses BOS=2. */
+        int add_bos = (model->config.model_type == 1) ? 1 : 0;
+        n_prompt = tq_encode(tokenizer, prompt, prompt_tokens, 4096, add_bos);
     } else {
         /* No tokenizer: use BOS only (Gemma=2, Qwen=skip) */
         prompt_tokens[0] = (model->config.model_type == 1) ? 2 : 1;

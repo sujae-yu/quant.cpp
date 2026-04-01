@@ -133,6 +133,24 @@ typedef struct {
     uint8_t* delta_in_proj_b_q2;   float* delta_in_proj_b_q2s;
     uint8_t* delta_out_proj_q2;    float* delta_out_proj_q2s;
 
+    /* GGUF on-the-fly dequant: raw quantized weight pointers + type.
+     * When gguf_wq is non-NULL, the forward pass uses tq_matmul_gguf
+     * instead of FP32/Q4/Q8 matmul. Saves ~5GB for 35B models. */
+    const void* gguf_wq;  int gguf_wq_type;  /* Q proj (quantized, mmap'd) */
+    const void* gguf_wk;  int gguf_wk_type;  /* K proj */
+    const void* gguf_wv;  int gguf_wv_type;  /* V proj */
+    const void* gguf_wo;  int gguf_wo_type;  /* O proj */
+    /* GGUF on-the-fly for DeltaNet weights */
+    const void* gguf_delta_qkv;  int gguf_delta_qkv_type;
+    const void* gguf_delta_z;    int gguf_delta_z_type;
+    const void* gguf_delta_a;    int gguf_delta_a_type;
+    const void* gguf_delta_b;    int gguf_delta_b_type;
+    const void* gguf_delta_out;  int gguf_delta_out_type;
+    /* GGUF FFN (dense layers in MoE models) */
+    const void* gguf_w_gate; int gguf_w_gate_type;
+    const void* gguf_w_up;   int gguf_w_up_type;
+    const void* gguf_w_down; int gguf_w_down_type;
+
     /* MoE expert weights (NULL for dense FFN layers) */
     void* moe;               /* tq_moe_layer_t* (from tq_gguf.h), NULL if dense */
 
@@ -433,6 +451,7 @@ int tq_sample_topp(const float* logits, int vocab_size,
 tq_tokenizer_t* tq_load_tokenizer(const char* path);
 tq_tokenizer_t* tq_load_tokenizer_from_memory(const char* data, size_t size);
 tq_tokenizer_t* tq_load_tokenizer_from_tqm(const char* tqm_path);
+tq_tokenizer_t* tq_load_tokenizer_from_gguf(const void* gguf_ctx);
 void tq_free_tokenizer(tq_tokenizer_t* tok);
 int tq_encode(const tq_tokenizer_t* tok, const char* text,
               int* tokens, int max_tokens, int add_bos);

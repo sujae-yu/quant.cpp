@@ -13,10 +13,20 @@
  */
 
 #include "turboquant/tq_engine.h"
+#include "turboquant/tq_gguf.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
+
+/* Global for qsort comparator (vocab index sorting) */
+static char** g_vocab_for_sort;
+static int cmp_vocab_idx(const void* a, const void* b) {
+    int ia = *(const int*)a, ib = *(const int*)b;
+    const char* sa = g_vocab_for_sort[ia] ? g_vocab_for_sort[ia] : "";
+    const char* sb = g_vocab_for_sort[ib] ? g_vocab_for_sort[ib] : "";
+    return strcmp(sa, sb);
+}
 
 /* ============================================================
  * Minimal JSON helpers (reused from tq_model.c pattern)
@@ -789,6 +799,112 @@ tq_tokenizer_t* tq_load_tokenizer_from_memory(const char* data, size_t size) {
     }
 
     free(buf);
+    return tok;
+}
+
+/* ============================================================
+ * Load tokenizer from GGUF metadata
+ *
+ * GGUF stores tokenizer data in metadata keys:
+ *   tokenizer.ggml.tokens: string array of token strings
+ *   tokenizer.ggml.scores: float array of BPE merge scores
+ *   tokenizer.ggml.merges: string array of merge rules (optional)
+ * ============================================================ */
+tq_tokenizer_t* tq_load_tokenizer_from_gguf(const void* gguf_ctx_ptr) {
+    if (!gguf_ctx_ptr) return NULL;
+
+    const tq_gguf_ctx_t* gguf = (const tq_gguf_ctx_t*)gguf_ctx_ptr;
+
+    /* Find the tokens array */
+    int64_t tokens_idx = tq_gguf_find_key(gguf, "tokenizer.ggml.tokens");
+    if (tokens_idx < 0) {
+        fprintf(stderr, "tq_load_tokenizer_from_gguf: no tokenizer.ggml.tokens\n");
+        return NULL;
+    }
+
+    const tq_gguf_kv_t* kv = &gguf->kv[tokens_idx];
+    if (kv->type != TQ_GGUF_TYPE_ARRAY || kv->value.array.elem_type != TQ_GGUF_TYPE_STRING) {
+        fprintf(stderr, "tq_load_tokenizer_from_gguf: tokens is not a string array\n");
+        return NULL;
+    }
+
+    uint64_t vocab_size = kv->value.array.count;
+    if (vocab_size == 0 || vocab_size > 1000000) {
+        fprintf(stderr, "tq_load_tokenizer_from_gguf: invalid vocab_size=%llu\n",
+                (unsigned long long)vocab_size);
+        return NULL;
+    }
+
+    tq_tokenizer_t* tok = (tq_tokenizer_t*)calloc(1, sizeof(tq_tokenizer_t));
+    if (!tok) return NULL;
+
+    tok->vocab_size = (int)vocab_size;
+    tok->vocab = (char**)calloc(vocab_size, sizeof(char*));
+    tok->scores = (float*)calloc(vocab_size, sizeof(float));
+    if (!tok->vocab || !tok->scores) {
+        free(tok->vocab);
+        free(tok->scores);
+        free(tok);
+        return NULL;
+    }
+
+    /* Copy token strings from GGUF string array.
+     * The array data contains tq_gguf_string_t structs laid out sequentially. */
+    tq_gguf_string_t* strings = (tq_gguf_string_t*)kv->value.array.data;
+    int max_len = 0;
+    for (uint64_t i = 0; i < vocab_size; i++) {
+        if (strings[i].str && strings[i].len > 0) {
+            tok->vocab[i] = (char*)malloc((size_t)strings[i].len + 1);
+            if (tok->vocab[i]) {
+                memcpy(tok->vocab[i], strings[i].str, (size_t)strings[i].len);
+                tok->vocab[i][strings[i].len] = '\0';
+                if ((int)strings[i].len > max_len) max_len = (int)strings[i].len;
+            }
+        } else {
+            tok->vocab[i] = (char*)calloc(1, 1); /* empty string */
+        }
+    }
+    tok->max_token_len = max_len;
+
+    /* Load scores if available */
+    int64_t scores_idx = tq_gguf_find_key(gguf, "tokenizer.ggml.scores");
+    if (scores_idx >= 0) {
+        const tq_gguf_kv_t* skv = &gguf->kv[scores_idx];
+        if (skv->type == TQ_GGUF_TYPE_ARRAY &&
+            skv->value.array.elem_type == TQ_GGUF_TYPE_FLOAT32 &&
+            skv->value.array.count == vocab_size) {
+            memcpy(tok->scores, skv->value.array.data, vocab_size * sizeof(float));
+        }
+    }
+
+    /* Load merges if available */
+    int64_t merges_idx = tq_gguf_find_key(gguf, "tokenizer.ggml.merges");
+    if (merges_idx >= 0) {
+        const tq_gguf_kv_t* mkv = &gguf->kv[merges_idx];
+        if (mkv->type == TQ_GGUF_TYPE_ARRAY &&
+            mkv->value.array.elem_type == TQ_GGUF_TYPE_STRING) {
+            /* Parse merge rules: "token_a token_b" -> find IDs, store as merge pairs */
+            uint64_t n_merges = mkv->value.array.count;
+            tok->n_merges = (int)n_merges;
+            tok->merge_pairs = (int*)malloc(n_merges * 3 * sizeof(int));
+            if (tok->merge_pairs) {
+                memset(tok->merge_pairs, 0, n_merges * 3 * sizeof(int));
+            }
+        }
+    }
+
+    /* Build sorted indices for encoding (binary search by string).
+     * Use qsort for O(n log n) instead of insertion sort O(n²) — critical
+     * for 248K vocab where insertion sort would take minutes. */
+    tok->sorted_indices = (int*)malloc(vocab_size * sizeof(int));
+    if (tok->sorted_indices) {
+        for (int i = 0; i < (int)vocab_size; i++) tok->sorted_indices[i] = i;
+        g_vocab_for_sort = tok->vocab;
+        qsort(tok->sorted_indices, vocab_size, sizeof(int), cmp_vocab_idx);
+    }
+
+    fprintf(stderr, "tq_load_tokenizer_from_gguf: loaded %d tokens (max_len=%d)\n",
+            tok->vocab_size, tok->max_token_len);
     return tok;
 }
 

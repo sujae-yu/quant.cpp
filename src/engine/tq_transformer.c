@@ -485,6 +485,8 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
         tq_matmul_q4_preq(s->delta_qkv, layer->delta_in_proj_qkv_q4, layer->delta_in_proj_qkv_q4s, s->xb_q8, s->xb_q8s, qkv_dim, dim);
     else if (layer->delta_in_proj_qkv_q8)
         tq_matmul_q8(s->delta_qkv, s->xb, layer->delta_in_proj_qkv_q8, layer->delta_in_proj_qkv_q8s, qkv_dim, dim);
+    else if (layer->gguf_delta_qkv)
+        tq_matmul_gguf(s->delta_qkv, s->xb, layer->gguf_delta_qkv, layer->gguf_delta_qkv_type, qkv_dim, dim);
     else
         tq_matmul(s->delta_qkv, s->xb, layer->delta_in_proj_qkv, qkv_dim, dim);
 
@@ -494,6 +496,8 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
         tq_matmul_q4_preq(s->delta_z, layer->delta_in_proj_z_q4, layer->delta_in_proj_z_q4s, s->xb_q8, s->xb_q8s, z_dim, dim);
     else if (layer->delta_in_proj_z_q8)
         tq_matmul_q8(s->delta_z, s->xb, layer->delta_in_proj_z_q8, layer->delta_in_proj_z_q8s, z_dim, dim);
+    else if (layer->gguf_delta_z)
+        tq_matmul_gguf(s->delta_z, s->xb, layer->gguf_delta_z, layer->gguf_delta_z_type, z_dim, dim);
     else
         tq_matmul(s->delta_z, s->xb, layer->delta_in_proj_z, z_dim, dim);
 
@@ -505,6 +509,8 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
         tq_matmul_q4_preq(s->delta_ab, layer->delta_in_proj_a_q4, layer->delta_in_proj_a_q4s, s->xb_q8, s->xb_q8s, dn, dim);
     else if (layer->delta_in_proj_a_q8)
         tq_matmul_q8(s->delta_ab, s->xb, layer->delta_in_proj_a_q8, layer->delta_in_proj_a_q8s, dn, dim);
+    else if (layer->gguf_delta_a)
+        tq_matmul_gguf(s->delta_ab, s->xb, layer->gguf_delta_a, layer->gguf_delta_a_type, dn, dim);
     else
         tq_matmul(s->delta_ab, s->xb, layer->delta_in_proj_a, dn, dim);
 
@@ -515,6 +521,8 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
         tq_matmul_q4_preq(s->delta_ab + dn, layer->delta_in_proj_b_q4, layer->delta_in_proj_b_q4s, s->xb_q8, s->xb_q8s, dn, dim);
     else if (layer->delta_in_proj_b_q8)
         tq_matmul_q8(s->delta_ab + dn, s->xb, layer->delta_in_proj_b_q8, layer->delta_in_proj_b_q8s, dn, dim);
+    else if (layer->gguf_delta_b)
+        tq_matmul_gguf(s->delta_ab + dn, s->xb, layer->gguf_delta_b, layer->gguf_delta_b_type, dn, dim);
     else
         tq_matmul(s->delta_ab + dn, s->xb, layer->delta_in_proj_b, dn, dim);
     for (int h = 0; h < dn; h++) {
@@ -760,6 +768,8 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
         tq_matmul_q4(s->xb2, s->delta_out, layer->delta_out_proj_q4, layer->delta_out_proj_q4s, dim, z_dim);
     else if (layer->delta_out_proj_q8)
         tq_matmul_q8(s->xb2, s->delta_out, layer->delta_out_proj_q8, layer->delta_out_proj_q8s, dim, z_dim);
+    else if (layer->gguf_delta_out)
+        tq_matmul_gguf(s->xb2, s->delta_out, layer->gguf_delta_out, layer->gguf_delta_out_type, dim, z_dim);
     else
         tq_matmul(s->xb2, s->delta_out, layer->delta_out_proj, dim, z_dim);
 
@@ -785,6 +795,7 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
      * This eliminates redundant tq_quantize_row_q8 + malloc/free in each matmul call. */
     int has_q2 = (layer->wq_q2 != NULL);
     int has_q4 = (layer->wq_q4 != NULL);
+    int has_gguf = (layer->gguf_wq != NULL);
     if (has_q2 || has_q4) {
         tq_quantize_row_q8(s->xb, s->xb_q8, s->xb_q8s, dim);
     }
@@ -801,6 +812,8 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
             tq_matmul_q4_preq(s->xb2, layer->wq_q4, layer->wq_q4s, s->xb_q8, s->xb_q8s, qg_dim, dim);
         } else if (layer->wq_q8) {
             tq_matmul_q8(s->xb2, s->xb, layer->wq_q8, layer->wq_q8s, qg_dim, dim);
+        } else if (has_gguf) {
+            tq_matmul_gguf(s->xb2, s->xb, layer->gguf_wq, layer->gguf_wq_type, qg_dim, dim);
         } else {
             tq_matmul(s->xb2, s->xb, layer->wq, qg_dim, dim);
         }
@@ -823,6 +836,8 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
             tq_matmul_q4_preq(s->q, layer->wq_q4, layer->wq_q4s, s->xb_q8, s->xb_q8s, n_heads * head_dim, dim);
         } else if (layer->wq_q8) {
             tq_matmul_q8(s->q, s->xb, layer->wq_q8, layer->wq_q8s, n_heads * head_dim, dim);
+        } else if (has_gguf) {
+            tq_matmul_gguf(s->q, s->xb, layer->gguf_wq, layer->gguf_wq_type, n_heads * head_dim, dim);
         } else {
             tq_matmul(s->q, s->xb, layer->wq, n_heads * head_dim, dim);
         }
@@ -833,6 +848,8 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
         tq_matmul_q4_preq(s->k, layer->wk_q4, layer->wk_q4s, s->xb_q8, s->xb_q8s, kv_dim, dim);
     } else if (layer->wk_q8) {
         tq_matmul_q8(s->k, s->xb, layer->wk_q8, layer->wk_q8s, kv_dim, dim);
+    } else if (has_gguf) {
+        tq_matmul_gguf(s->k, s->xb, layer->gguf_wk, layer->gguf_wk_type, kv_dim, dim);
     } else {
         tq_matmul(s->k, s->xb, layer->wk, kv_dim, dim);
     }
@@ -842,6 +859,8 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
         tq_matmul_q4_preq(s->v, layer->wv_q4, layer->wv_q4s, s->xb_q8, s->xb_q8s, kv_dim, dim);
     } else if (layer->wv_q8) {
         tq_matmul_q8(s->v, s->xb, layer->wv_q8, layer->wv_q8s, kv_dim, dim);
+    } else if (has_gguf) {
+        tq_matmul_gguf(s->v, s->xb, layer->gguf_wv, layer->gguf_wv_type, kv_dim, dim);
     } else {
         tq_matmul(s->v, s->xb, layer->wv, kv_dim, dim);
     }
@@ -1342,6 +1361,8 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
         tq_matmul_q4(s->xb2, s->xb, layer->wo_q4, layer->wo_q4s, dim, n_heads * head_dim);
     else if (layer->wo_q8)
         tq_matmul_q8(s->xb2, s->xb, layer->wo_q8, layer->wo_q8s, dim, n_heads * head_dim);
+    else if (layer->gguf_wo)
+        tq_matmul_gguf(s->xb2, s->xb, layer->gguf_wo, layer->gguf_wo_type, dim, n_heads * head_dim);
     else
         tq_matmul(s->xb2, s->xb, layer->wo, dim, n_heads * head_dim);
 
@@ -1416,9 +1437,9 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
         if (layer->delta_a_log) {
             /* DeltaNet layer */
             deltanet_forward(model, s, l);
-        } else if ((layer->wq || layer->wq_q8 || layer->wq_q4) &&
-                   (layer->wk || layer->wk_q8 || layer->wk_q4) &&
-                   (layer->wv || layer->wv_q8 || layer->wv_q4)) {
+        } else if ((layer->wq || layer->wq_q8 || layer->wq_q4 || layer->gguf_wq) &&
+                   (layer->wk || layer->wk_q8 || layer->wk_q4 || layer->gguf_wk) &&
+                   (layer->wv || layer->wv_q8 || layer->wv_q4 || layer->gguf_wv)) {
             /* Standard self-attention layer */
             self_attn_forward(model, s, l, pos);
 
@@ -1465,9 +1486,9 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
         /* Dense FFN path — SwiGLU (Qwen3.5) or GeGLU (Gemma3).
          * Optimization: cache Q8 quantization of xb for gate+up projections,
          * and cache Q8 of hb for down projection. */
-        else if ((layer->w_gate || layer->w_gate_q8 || layer->w_gate_q4 || layer->w_gate_q2) &&
-            (layer->w_up || layer->w_up_q8 || layer->w_up_q4 || layer->w_up_q2) &&
-            (layer->w_down || layer->w_down_q8 || layer->w_down_q4 || layer->w_down_q2)) {
+        else if ((layer->w_gate || layer->w_gate_q8 || layer->w_gate_q4 || layer->w_gate_q2 || layer->gguf_w_gate) &&
+            (layer->w_up || layer->w_up_q8 || layer->w_up_q4 || layer->w_up_q2 || layer->gguf_w_up) &&
+            (layer->w_down || layer->w_down_q8 || layer->w_down_q4 || layer->w_down_q2 || layer->gguf_w_down)) {
 
             /* Pre-FFN norm: Gemma3 uses pre_feedforward_layernorm,
              * Qwen3.5 uses post_attention_layernorm (stored as ffn_norm) */
@@ -1492,6 +1513,9 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
                                    s->xb_q8, s->xb_q8s, c->intermediate_dim, dim);
                 tq_matmul_q4_preq(s->hb2, layer->w_up_q4, layer->w_up_q4s,
                                    s->xb_q8, s->xb_q8s, c->intermediate_dim, dim);
+            } else if (layer->gguf_w_gate) {
+                tq_matmul_gguf(s->hb, s->xb, layer->gguf_w_gate, layer->gguf_w_gate_type, c->intermediate_dim, dim);
+                tq_matmul_gguf(s->hb2, s->xb, layer->gguf_w_up, layer->gguf_w_up_type, c->intermediate_dim, dim);
             } else {
                 if (layer->w_gate_q8) {
                     tq_matmul_q8(s->hb, s->xb, layer->w_gate_q8, layer->w_gate_q8s, c->intermediate_dim, dim);
@@ -1519,6 +1543,8 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
                 tq_matmul_q4(s->xb2, s->hb, layer->w_down_q4, layer->w_down_q4s, dim, c->intermediate_dim);
             } else if (layer->w_down_q8) {
                 tq_matmul_q8(s->xb2, s->hb, layer->w_down_q8, layer->w_down_q8s, dim, c->intermediate_dim);
+            } else if (layer->gguf_w_down) {
+                tq_matmul_gguf(s->xb2, s->hb, layer->gguf_w_down, layer->gguf_w_down_type, dim, c->intermediate_dim);
             } else {
                 tq_matmul(s->xb2, s->hb, layer->w_down, dim, c->intermediate_dim);
             }

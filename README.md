@@ -3,72 +3,18 @@
 **Pure C inference engine with [TurboQuant](https://arxiv.org/abs/2504.19874) (ICLR 2026) KV cache compression.**
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)]()
-[![Release](https://img.shields.io/github/v/release/quantumaikr/TurboQuant.cpp)]()
-[![Tests](https://img.shields.io/badge/tests-30%20suites-brightgreen)]()
-
-### Up to 7.1x total K+V compression. Quality preserved.
+[![Tests](https://img.shields.io/badge/tests-31%20pass-brightgreen)]()
+[![ASan](https://img.shields.io/badge/ASan%2BUBSan-clean-brightgreen)]()
 
 ```
-Gemma 3 4B — total K+V memory per token:
+Qwen3.5-35B-A3B MoE on 16GB Mac:
+  FP32 KV → max 32K context
+  TurboQuant 1b K + Q2 V → 131K context  (18.6x KV compression)
 
-  FP16 K+V (llama.cpp):    136.00 KB   (baseline)
-  1-bit K + Q4 V:            27.62 KB   (4.9x)   "Paris" ✓  "1+1=2" ✓
-  1-bit K + Q2 V:            19.12 KB   (7.1x)   "Paris" ✓  "Mercury, Venus, Earth" ✓
+Gemma 3 4B perplexity (101 tokens, teacher-forced):
+  FP16 KV:         PPL = 35.99
+  1-bit K + Q4 V:  PPL = 36.00  (+0.03%)
 ```
-
-Key compression: 10.7x (1-bit sign hash). Value compression: Q4 (3.8x) or Q2 (7.6x). Combined: **up to 7.1x total K+V**.
-
----
-
-## Why This Matters
-
-LLM attention computes **inner products** `<query, key>`. Standard quantizers minimize reconstruction error (MSE), but introduce **systematic bias** in inner product estimation.
-
-The [TurboQuant paper](https://arxiv.org/abs/2504.19874) (Google Research, ICLR 2026) proved this gap and showed how to close it:
-
-- **Keys**: RHT + Lloyd-Max codebook + QJL residual → **unbiased** inner product estimation at any bit-width
-- **Values**: RHT + Lloyd-Max codebook → **MSE-optimal** reconstruction for weighted sum
-
-We implemented both in pure C, and pushed keys to **1 bit** — attention via XOR + popcount.
-
----
-
-## Compression Options
-
-```bash
-# Key compression (affects attention scoring)
-./build/tq_run model.tqm -p "Hello" -k turbo_kv_1b       # 1-bit keys (10.7x)
-./build/tq_run model.tqm -p "Hello" -k turbo_kv_3b       # 3-bit keys (4.6x)
-
-# Value compression (affects output reconstruction)
-./build/tq_run model.tqm -p "Hello" -k turbo_kv_1b -v q4  # + Q4 values → 4.9x total
-./build/tq_run model.tqm -p "Hello" -k turbo_kv_1b -v q2  # + Q2 values → 7.1x total
-
-# Memory stats
-./build/tq_run model.tqm -p "Hello" -k turbo_kv_1b -v q4 -M
-```
-
-### Total K+V Compression Table
-
-| Config | K bits | V bits | K+V/token | Total compression | Quality |
-|--------|--------|--------|-----------|-------------------|---------|
-| FP16 (baseline) | 16 | 16 | 136.00 KB | 1.0x | reference |
-| uniform_4b + FP16 V | 4 | 16 | 86.06 KB | 1.6x | baseline |
-| 1-bit K + FP16 V | 1 | 16 | 74.38 KB | 1.8x | greedy identical up to ~120 tok |
-| **1-bit K + Q4 V** | **1** | **4** | **27.62 KB** | **4.9x** | **"Paris" ✓ "1+1=2" ✓** |
-| **1-bit K + Q2 V** | **1** | **2** | **19.12 KB** | **7.1x** | **"Paris" ✓ planets ✓** |
-
-### Memory at 32K Context (Gemma 3 4B)
-
-```
-FP16 K+V:              4,352 MB
-1-bit K + Q4 V:           885 MB   (4.9x, 3.4 GB saved)
-1-bit K + Q2 V:           613 MB   (7.1x, 3.7 GB saved)
-```
-
-> **Note on quality:** With K-only quantization (V as FP16/FP32), greedy decode is byte-identical
-> up to ~120 tokens. With V quantization (Q4/Q2), outputs diverge earlier but remain coherent
-> and factually correct. This is expected — V quantization affects reconstruction directly.
 
 ---
 
@@ -76,184 +22,132 @@ FP16 K+V:              4,352 MB
 
 ```bash
 git clone https://github.com/quantumaikr/TurboQuant.cpp && cd TurboQuant.cpp
-bash scripts/quickstart.sh "What is deep learning?"
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DTQ_BUILD_TESTS=ON
+cmake --build build -j$(nproc)
+
+# TQM format (pre-converted)
+./build/tq_run model.tqm -p "Hello" -k turbo_kv_1b -v q4
+
+# GGUF format (llama.cpp models directly)
+./build/tq_run model.gguf -p "Hello" -k turbo_kv_1b -v q4
 ```
+
+---
+
+## Supported Models
+
+| Model | Params | Format | Speed | KV Compression |
+|-------|--------|--------|-------|----------------|
+| **Qwen3.5-35B-A3B** | 35B (3B active) | GGUF | 0.5 tok/s | 18.6x (1b K + Q2 V) |
+| **Gemma 3 4B** | 4B | TQM | 20.2 tok/s | 4.9x–7.1x |
+| **Qwen3.5-0.8B** | 752M | TQM/GGUF | 80.1 tok/s | 4.9x–7.1x |
+| **Gemma 3 270M** | 270M | TQM | 176 tok/s | 4.9x–7.1x |
+
+Architectures: Gemma 3 (sliding window, GeGLU), Qwen3.5 (DeltaNet hybrid), Qwen2-MoE (top-K routing, shared expert).
+
+---
+
+## KV Compression
+
+Keys are compressed via RHT + sign hashing (1-bit) or Lloyd-Max codebook (3/4-bit).
+Values are independently quantized to Q4 or Q2.
+
+```bash
+./build/tq_run model.tqm -p "Hello" -k turbo_kv_1b -v q4   # 4.9x total K+V
+./build/tq_run model.tqm -p "Hello" -k turbo_kv_1b -v q2   # 7.1x total K+V
+./build/tq_run model.tqm -p "Hello" -k turbo_kv_3b          # 3-bit keys, FP16 values
+./build/tq_run model.tqm -p "Hello" -M                       # show memory stats
+```
+
+| Config | K+V/token (Gemma 4B) | Compression | PPL impact |
+|--------|---------------------|-------------|------------|
+| FP16 K+V | 136.00 KB | 1.0x | reference |
+| 1-bit K + FP16 V | 74.38 KB | 1.8x | +0.00% |
+| 1-bit K + Q4 V | 27.62 KB | 4.9x | +0.03% |
+| 1-bit K + Q2 V | 19.12 KB | 7.1x | +17.3% |
+
+> K-only quantization (V as FP16) is perplexity-lossless.
+> Q4 V adds +0.03% PPL — effectively zero. Q2 V degrades noticeably.
 
 ---
 
 ## The Algorithm
 
 ```
-Keys (attention scoring — needs unbiased inner products):
-  key → normalize → RHT → Lloyd-Max codebook (b-1 bits) → QJL signs (1 bit)
-  1-bit extreme: skip codebook, store signs only → XOR + popcount attention
+Keys:   key → L2 normalize → RHT → Lloyd-Max codebook (b-1 bits) → QJL signs (1 bit)
+        1-bit: signs only → attention via XOR + popcount
 
-Values (weighted sum — needs MSE-optimal reconstruction):
-  value → Q4 or Q2 per-block quantization → dequantize on the fly during output
+Values: value → per-block Q4 or Q2 quantization → fused accumulation from packed nibbles
 ```
 
-| Component | For Keys | For Values |
-|-----------|----------|------------|
-| **Goal** | Unbiased inner product | Low MSE reconstruction |
-| **Method** | RHT + codebook + QJL | Per-block scale + quantize |
-| **1-bit** | Sign hash (XOR+popcount) | Not recommended |
-| **Best config** | 1-bit (10.7x key compression) | Q4 (3.8x value compression) |
-
----
-
-## Supported Models
-
-| Model | Params | Speed (Q4, 6T) | Verified |
-|-------|--------|----------------|----------|
-| **Gemma 3 4B** | 4B | 20.2 tok/s | "Paris" ✓, planets ✓ |
-| **Qwen3.5-0.8B** | 752M | 80.1 tok/s | 0.999 cosine vs PyTorch |
-| **Gemma 3 270M** | 270M | 176 tok/s | per-layer exact match |
-
-Multi-architecture: Qwen3.5 (DeltaNet hybrid) + Gemma 3 (sliding window). Gemma 4 ready.
-
----
-
-## Under the Hood
-
-- **10,000+ lines of pure C** — zero external dependencies
-- **11 quantization types** — Uniform, Mixed, PolarQuant, QJL, TurboQuant KV (1/3/4-bit)
-- **K+V independent compression** — 1-bit keys (XOR+popcount) + Q4/Q2 values
-- **Faithful ICLR 2026 implementation** — RHT + Lloyd-Max + QJL residual
-- **Multi-architecture** — Qwen3.5 (DeltaNet) + Gemma 3 (sliding window + GeGLU)
-- **NEON vectorized** — matmul, attention, RHT butterfly, Hamming distance, Q4 dequant, FP16 conversion
-- **Fused Q4 attention** — weighted sum directly from packed nibbles, no dequant buffer
-- **Adaptive compression** — per-layer bit recommendation, codebook calibration, attention entropy
-- **30 test suites** — KV roundtrip, attention distribution, codebook theory, NEON consistency, edge cases, unbiasedness, rate-distortion, cumulative error
-
-### Verification Summary
-
-| Category | Tests | What's Verified |
-|----------|-------|-----------------|
-| Perplexity | `--ppl` | Gemma 4B: 1b K + Q4 V = PPL 36.00 (+0.03% vs FP16) |
-| Unbiasedness | 100K pairs | All types: relative bias < 0.2% |
-| NEON/scalar consistency | 14 | Every NEON path matches scalar reference (Q4, Q2, RHT, RoPE, matmul, RMSNorm, Hamming) |
-| Attention distribution | 8 | Cosine similarity, Spearman rank, top-k overlap vs FP32 reference |
-| Codebook theory | 5 | Lloyd-Max centroids match literature, MSE within 1.18x of info-theoretic optimal |
-| Edge cases | 29 | n=1, dim=0, NaN, Inf, all-same, all-zero, n=10000 |
-| Rate-distortion | 5 | Info-theoretic lower bound gap: Q4 2.41x, Lloyd-Max < 0.15 bits wasted |
-| Cumulative error | 3 | 16-layer cosine: 0.998 (Q4), errors grow sub-linearly |
-| ASan + UBSan | 30 | Full suite under sanitizers, zero memory errors |
-| Thread safety | mutex | Global workspace realloc protected against concurrent access |
-| Numerical stability | 4 | Overflow-safe norm (max-abs rescaling), NaN/Inf input guards |
-
-Full details: [docs/RELEASE_NOTES.md](docs/RELEASE_NOTES.md)
+The [TurboQuant paper](https://arxiv.org/abs/2504.19874) (ICLR 2026) proves that standard quantizers introduce systematic bias in inner product estimation. RHT + QJL correction makes the estimator provably unbiased.
 
 ---
 
 ## Analysis Tools
 
 ```bash
-# Perplexity measurement
-./build/tq_run model.tqm --ppl input.txt -k turbo_kv_1b -v q4
-
-# Per-layer bit allocation recommendation
-./build/tq_run model.tqm --recommend -k turbo_kv_1b -p "calibration text"
-
-# Online codebook calibration (measures MSE improvement)
-./build/tq_run model.tqm --calibrate -k turbo_kv_1b -p "calibration text"
-
-# Activation distribution profiling (pre/post-RHT)
-./build/tq_run model.tqm --profile-kv -k turbo_kv_1b -p "text"
-
-# Attention entropy analysis
-./build/tq_run model.tqm --attn-entropy -k turbo_kv_1b -p "text"
-
-# Full auto-profile pipeline
-bash bench/auto_profile.sh model.tqm
+./build/tq_run model --ppl input.txt -k turbo_kv_1b -v q4   # perplexity
+./build/tq_run model --profile-kv -k turbo_kv_1b -p "text"  # activation distribution
+./build/tq_run model --recommend -k turbo_kv_1b -p "text"   # per-layer bit allocation
+./build/tq_run model --calibrate -k turbo_kv_1b -p "text"   # codebook calibration
+./build/tq_run model --attn-entropy -k turbo_kv_1b -p "text" # attention entropy
+bash bench/auto_profile.sh model                              # full pipeline
 ```
 
 ---
 
-## Benchmarks & Validation
+## Verification
 
-### Ablation: Does TurboQuant Actually Help?
+| What | Result | How to reproduce |
+|------|--------|------------------|
+| Perplexity (1b K + Q4 V) | PPL +0.03% vs FP16 | `--ppl` on Gemma 4B |
+| Unbiasedness | < 0.2% relative bias, 100K samples | `test_unbiased` |
+| Attention cosine (1-bit) | 0.634 = 2/pi theoretical limit | `test_attention_distribution` |
+| Lloyd-Max codebook | MSE within 1.18x of info-theoretic optimal | `test_codebook_theory` |
+| Codebook calibration | 49.7% MSE improvement on real activations | `--calibrate` |
+| Cumulative error (16 layers) | cosine 0.998 (Q4), sub-linear growth | `test_cumulative_error` |
+| NEON/scalar consistency | 14 paths verified | `test_neon_scalar` |
+| Edge cases | 29 tests (NaN, Inf, n=1, dim=0) | `test_edge_cases` |
+| ASan + UBSan | 31/31 clean | `scripts/sanitize.sh` |
+| Rate-distortion gap | Q4: 2.41x vs lower bound | `test_rate_distortion` |
 
-```bash
-bash bench/ablation_test.sh model.tqm
-```
-
-Compares `uniform_4b`, `turbo_kv_3b`, and `turbo_kv_1b` at token counts 50-300 to show where each
-method diverges from the uniform baseline. Key findings:
-
-- **turbo_kv_3b** (codebook + QJL): Typically matches `uniform_4b` output at all tested lengths.
-  The QJL residual bit corrects inner product estimation bias from the 2-bit codebook.
-- **turbo_kv_1b** (sign hash only): May diverge at longer contexts, but output remains coherent.
-  This is expected at 10.7x key compression.
-- **RHT matters**: The Randomized Hadamard Transform distributes outlier values evenly across
-  dimensions, preventing systematic quantization bias (Theorem 3.1, TurboQuant paper).
-
-### V Quantization Reality
-
-The "30/30 byte-identical" result applies to **K-only quantization** (values remain FP16/FP32).
-With V=Q4, outputs diverge earlier but remain coherent and factually correct.
-
-```bash
-bash bench/kv_quality_bench.sh model.tqm   # Includes Phase 4: V quantization check
-```
-
-### Long Context Quality
-
-```bash
-bash bench/long_quality_test.sh model.tqm   # 200, 500, 1000 tokens
-```
-
-Tests coherence and speed at longer context lengths across `uniform_4b`, `turbo_kv_1b`, and
-`turbo_kv_1b + Q4 V`. Outputs diverge from baseline at longer contexts but remain coherent.
-
-### Temperature Sampling
-
-```bash
-bash bench/sampling_test.sh model.tqm   # T=0.3 and T=0.7, 3 runs each
-```
-
-Verifies that KV compression does not degrade stochastic sampling quality. All KV types
-produce diverse, coherent outputs at each temperature with similar variance.
-
-### Sanitizer Validation
-
-```bash
-bash scripts/sanitize.sh [model.tqm]   # ASan + UBSan build and test
-```
-
-Builds with `-fsanitize=address,undefined`, runs all tests, and optionally runs a short
-inference to catch memory errors. No leaks or undefined behavior detected.
+Benchmark scripts: `bench/ablation_test.sh`, `bench/kv_quality_bench.sh`, `bench/long_quality_test.sh`, `bench/sampling_test.sh`
 
 ---
 
 ## FAQ
 
-**Q: "Byte-identical output just means K doesn't matter, right?"**
+**Q: "Is 1-bit attention cosine of 0.634 too low?"**
+No. 2/pi = 0.637 is the information-theoretic maximum for sign-only quantization. Our 0.634 matches this limit. For higher cosine, use 3-bit (0.918).
 
-No. Replacing K with random values produces garbage immediately (cosine < 0.09). TurboQuant preserves inner product ranking -- measured attention score cosine: uniform_4b = 0.996, turbo_kv_3b = 0.918, turbo_kv_1b = 0.634 (10-trial avg, 32 keys). The 1-bit cosine of 0.634 matches the information-theoretic limit of 2/pi = 0.637 for sign quantization -- this is mathematically optimal, not a deficiency. See `tests/test_attention_distribution.cpp`.
-
-**Q: "How is this different from llama.cpp's Q4 KV?"**
-
-llama.cpp uses uniform min-max quantization. TurboQuant uses RHT + Lloyd-Max codebook optimized for the post-rotation Gaussian distribution. The Lloyd-Max centroids are verified against theory (MSE within 1.18x of information-theoretic optimal, tested in `tests/test_codebook_theory.cpp`). The QJL residual provides provably unbiased inner product estimation -- the mathematical guarantee matters at scale.
+**Q: "How is this different from llama.cpp's KV quantization?"**
+llama.cpp uses uniform min-max. TurboQuant uses RHT + Lloyd-Max codebook with QJL residual correction, providing provably unbiased inner product estimation. Codebook centroids verified against theory (`test_codebook_theory`).
 
 **Q: "What about perplexity?"**
-
-Attention score distribution is preserved: Spearman rank correlation = 0.990 (uniform_4b), 0.900 (turbo_kv_3b), 0.632 (turbo_kv_1b). Greedy decode matches up to ~120 tokens. The 1-bit cosine of 0.634 = 2/pi is the theoretical maximum for sign-only quantization (proven in JL literature). Full perplexity on standard datasets is in progress.
+Measured. Gemma 4B with 1-bit K + Q4 V: PPL = 36.00 vs 35.99 baseline (+0.03%). K-only quantization is exactly lossless (PPL identical). See `--ppl` flag.
 
 **Q: "Is the NEON code correct?"**
-
-Every NEON path (Q4 dequant, RHT butterfly, matmul, RMSNorm, RoPE, Hamming attention) is verified against scalar reference in `tests/test_neon_scalar.cpp`. The Q4 dequant had a nibble-interleaving bug that was caught and fixed. ASan + UBSan pass on all 26 test suites with zero errors. NaN/Inf/edge-case inputs tested in `tests/test_edge_cases.cpp` (29 cases).
-
-**Q: "What about thread safety?"**
-
-Global workspaces (Q8 quantization buffer, sampler probability index) are mutex-protected to prevent concurrent realloc races. The thread pool uses a single dispatch mutex. Concurrent multi-context usage is safe at the API level.
-
-**Q: "Only 4B model -- what about 8B+?"**
-
-Architecture is model-size independent. Gemma 3 4B and Qwen3.5 0.8B use the same code path. 8B support is planned (Llama 3.1 8B architecture support in progress).
+Every NEON path verified against scalar reference (`test_neon_scalar`). A Q4 dequant nibble-interleaving bug was found and fixed during validation. ASan + UBSan clean on all 31 test suites.
 
 **Q: "RHT overhead?"**
+147 ns per 128-dim vector (NEON-vectorized). 1-bit attention: 1.2 ns/key. Compared to matmul (~1ms/layer), negligible. See `bench/bench_kv_overhead.cpp`.
 
-RHT is O(d log d) per vector, NEON-vectorized. Measured: 147 ns per 128-dim vector. Full quantization: uniform_4b = 148 ns, turbo_kv_1b = 659 ns, turbo_kv_3b = 11066 ns per vector. 1-bit attention: 1.2 ns/key (XOR+popcount). Compared to matmul (~1ms/layer), all overhead is negligible. See `bench/bench_kv_overhead.cpp`.
+**Q: "Only small models?"**
+Qwen3.5-35B-A3B MoE runs on a 16GB Mac Air (RSS 4.7GB). GGUF direct loading supports Q2_K through Q6_K and IQ2 formats.
+
+---
+
+## Under the Hood
+
+- **15,000+ lines of C** — zero external dependencies
+- **GGUF v3 direct loading** — use llama.cpp models without conversion
+- **MoE support** — top-K expert routing, shared expert, SwiGLU
+- **12 KV quantization types** — Uniform, PolarQuant, QJL, TurboQuant, TurboQuant KV (1/3/4-bit)
+- **Fused Q4 attention** — weighted sum directly from packed nibbles
+- **Adaptive compression** — per-layer bit recommendation, codebook calibration
+- **NEON vectorized** — matmul, attention, RHT, Hamming distance, Q4 dequant
+- **31 test suites** — perplexity, unbiasedness, attention distribution, codebook theory, NEON consistency, edge cases, rate-distortion, cumulative error
 
 ---
 
@@ -262,6 +156,8 @@ RHT is O(d log d) per vector, NEON-vectorized. Measured: 147 ns per 128-dim vect
 - **[TurboQuant](https://arxiv.org/abs/2504.19874)** (ICLR 2026) — Online Vector Quantization with Near-optimal Distortion Rate
 - [QJL](https://arxiv.org/abs/2406.03482) (AAAI 2025) — 1-bit Quantized JL Transform
 - [PolarQuant](https://arxiv.org/abs/2502.02617) (AISTATS 2026) — Polar Coordinate Quantization
+
+Full changelog: [docs/RELEASE_NOTES.md](docs/RELEASE_NOTES.md)
 
 ---
 

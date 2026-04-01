@@ -531,6 +531,13 @@ int main(int argc, char** argv) {
         if (tokenizer) {
             fprintf(stderr, "Loaded embedded tokenizer from TQM file\n");
         }
+        /* Try GGUF tokenizer if model was loaded from GGUF */
+        if (!tokenizer && model->gguf_ctx) {
+            tokenizer = tq_load_tokenizer_from_gguf(model->gguf_ctx);
+            if (tokenizer) {
+                fprintf(stderr, "Loaded tokenizer from GGUF metadata\n");
+            }
+        }
     }
 
     /* Set thread count for matmul parallelism */

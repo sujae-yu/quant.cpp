@@ -283,7 +283,7 @@ TEST(GGUF, MagicDetection) {
     const char* tmppath = "/tmp/test_gguf_magic.gguf";
     FILE* f = fopen(tmppath, "wb");
     ASSERT_NE(f, nullptr);
-    uint32_t magic = 0x46475547; /* "GGUF" */
+    uint32_t magic = 0x46554747; /* "GGUF" as LE uint32 */
     fwrite(&magic, 4, 1, f);
     fclose(f);
 
