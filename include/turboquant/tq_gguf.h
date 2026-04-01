@@ -231,6 +231,15 @@ typedef struct {
     tq_ggml_dtype gate_type;
     tq_ggml_dtype up_type;
     tq_ggml_dtype down_type;
+
+    /* Q4 pre-converted weights (NULL if not converted) */
+    uint8_t* gate_q4_qs;      /* packed Q4 for gate */
+    float*   gate_q4_scales;
+    uint8_t* up_q4_qs;        /* packed Q4 for up */
+    float*   up_q4_scales;
+    uint8_t* down_q4_qs;      /* packed Q4 for down */
+    float*   down_q4_scales;
+    int      q4_converted;    /* 1 if Q4 conversion done */
 } tq_expert_weights_t;
 
 /* MoE layer (per transformer layer) */
@@ -260,12 +269,17 @@ void tq_moe_route(const float* hidden, const float* router_weight,
                   int num_experts, int num_active, int hidden_dim,
                   int* out_expert_ids, float* out_expert_weights);
 
-/* Full MoE FFN forward: route + dispatch + accumulate */
+/* Full MoE FFN forward: route + dispatch + accumulate
+ * layer_idx is needed for the per-layer expert Q4 LRU cache. */
 void tq_moe_forward(const tq_moe_layer_t* layer,
                     const tq_moe_config_t* config,
                     tq_moe_state_t* state,
                     const float* input, float* output,
-                    int hidden_dim);
+                    int hidden_dim, int layer_idx);
+
+/* Expert Q4 LRU cache — runtime on-demand conversion */
+void tq_moe_cache_init(int n_layers, const tq_moe_config_t* config, int hidden_dim);
+void tq_moe_cache_free(void);
 
 /* Expert memory hints (madvise for active/inactive experts) */
 void tq_moe_advise(const tq_moe_layer_t* layer,

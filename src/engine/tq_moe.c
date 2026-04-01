@@ -2,11 +2,12 @@
  * tq_moe.c — Mixture of Experts routing and expert dispatch
  *
  * Implements top-K expert selection with softmax renormalization,
- * SwiGLU FFN dispatch per expert, shared expert support, and
- * memory advise hints for expert paging.
+ * SwiGLU FFN dispatch per expert, shared expert support,
+ * runtime LRU Q4 cache for routed experts, and memory advise hints.
  */
 
 #include "turboquant/tq_gguf.h"
+#include "turboquant/tq_engine.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -17,6 +18,190 @@
 #ifndef _WIN32
 #include <sys/mman.h>
 #endif
+
+/* ============================================================
+ * Runtime Expert Q4 LRU Cache
+ *
+ * MoE models with 256 experts x 40 layers would need ~19 GB
+ * if all experts were pre-converted to Q4. Instead, we cache
+ * only the EXPERT_CACHE_SIZE most-recently-used experts per
+ * layer. With 32 slots per layer, this is ~1.9 GB total.
+ *
+ * Cache hits use fast Q4 matmul; misses dequant from GGUF
+ * mmap on the fly, then cache the result for next time.
+ * ============================================================ */
+
+#define EXPERT_CACHE_SIZE 32  /* per layer */
+
+typedef struct {
+    int      expert_id;       /* -1 = empty slot */
+    uint8_t* gate_q4_qs;
+    float*   gate_q4_scales;
+    uint8_t* up_q4_qs;
+    float*   up_q4_scales;
+    uint8_t* down_q4_qs;
+    float*   down_q4_scales;
+    int      last_used;       /* token counter for LRU eviction */
+} expert_cache_entry_t;
+
+typedef struct {
+    expert_cache_entry_t entries[EXPERT_CACHE_SIZE];
+    int count;                /* number of occupied slots */
+} expert_layer_cache_t;
+
+static expert_layer_cache_t* g_expert_cache = NULL; /* [n_layers] */
+static int    g_cache_n_layers   = 0;
+static int    g_cache_hidden_dim = 0;
+static int    g_cache_exp_inter  = 0;
+static int    g_token_counter    = 0;
+static float* g_cache_fp32_temp  = NULL;  /* reusable dequant buffer */
+
+void tq_moe_cache_init(int n_layers, const tq_moe_config_t* config, int hidden_dim)
+{
+    if (g_expert_cache) return; /* already initialized */
+    if (!config) return;
+
+    g_cache_n_layers   = n_layers;
+    g_cache_hidden_dim = hidden_dim;
+    g_cache_exp_inter  = config->expert_intermediate_dim;
+    g_token_counter    = 0;
+
+    g_expert_cache = (expert_layer_cache_t*)calloc(
+        (size_t)n_layers, sizeof(expert_layer_cache_t));
+    if (!g_expert_cache) {
+        fprintf(stderr, "tq_moe_cache_init: allocation failed\n");
+        return;
+    }
+
+    /* Mark all slots empty */
+    for (int l = 0; l < n_layers; l++) {
+        for (int s = 0; s < EXPERT_CACHE_SIZE; s++) {
+            g_expert_cache[l].entries[s].expert_id = -1;
+        }
+    }
+
+    /* Allocate reusable FP32 temp buffer (max of gate/up and down sizes) */
+    size_t gate_up_elems = (size_t)g_cache_exp_inter * hidden_dim;
+    size_t down_elems    = (size_t)hidden_dim * g_cache_exp_inter;
+    size_t max_elems     = gate_up_elems > down_elems ? gate_up_elems : down_elems;
+    g_cache_fp32_temp = (float*)malloc(max_elems * sizeof(float));
+
+    float cache_mb = (float)(n_layers * EXPERT_CACHE_SIZE) *
+                     (3.0f * (float)(gate_up_elems + 31) / 32.0f * 20.0f) /
+                     (1024.0f * 1024.0f);
+    fprintf(stderr, "tq_moe_cache_init: LRU cache for %d layers x %d slots "
+            "(max %.0f MB)\n", n_layers, EXPERT_CACHE_SIZE, (double)cache_mb);
+}
+
+static void free_cache_entry(expert_cache_entry_t* e)
+{
+    free(e->gate_q4_qs);     e->gate_q4_qs = NULL;
+    free(e->gate_q4_scales); e->gate_q4_scales = NULL;
+    free(e->up_q4_qs);       e->up_q4_qs = NULL;
+    free(e->up_q4_scales);   e->up_q4_scales = NULL;
+    free(e->down_q4_qs);     e->down_q4_qs = NULL;
+    free(e->down_q4_scales); e->down_q4_scales = NULL;
+    e->expert_id = -1;
+}
+
+void tq_moe_cache_free(void)
+{
+    if (!g_expert_cache) return;
+    for (int l = 0; l < g_cache_n_layers; l++) {
+        for (int s = 0; s < EXPERT_CACHE_SIZE; s++) {
+            free_cache_entry(&g_expert_cache[l].entries[s]);
+        }
+    }
+    free(g_expert_cache);
+    g_expert_cache = NULL;
+    free(g_cache_fp32_temp);
+    g_cache_fp32_temp = NULL;
+    g_cache_n_layers = 0;
+}
+
+/* Find a cached entry for expert_id in layer, or evict LRU and create one.
+ * Returns the entry with Q4 data populated. */
+static expert_cache_entry_t* cache_get_or_create(
+    int layer_idx, int expert_id, const tq_expert_weights_t* exp)
+{
+    expert_layer_cache_t* lc = &g_expert_cache[layer_idx];
+
+    /* Search for existing entry */
+    for (int s = 0; s < EXPERT_CACHE_SIZE; s++) {
+        if (lc->entries[s].expert_id == expert_id) {
+            lc->entries[s].last_used = g_token_counter;
+            return &lc->entries[s];
+        }
+    }
+
+    /* Cache miss: find an empty slot or evict LRU */
+    int target = -1;
+    if (lc->count < EXPERT_CACHE_SIZE) {
+        /* Find first empty slot */
+        for (int s = 0; s < EXPERT_CACHE_SIZE; s++) {
+            if (lc->entries[s].expert_id < 0) {
+                target = s;
+                break;
+            }
+        }
+        lc->count++;
+    } else {
+        /* Evict least-recently-used */
+        int oldest_time = g_token_counter + 1;
+        for (int s = 0; s < EXPERT_CACHE_SIZE; s++) {
+            if (lc->entries[s].last_used < oldest_time) {
+                oldest_time = lc->entries[s].last_used;
+                target = s;
+            }
+        }
+        free_cache_entry(&lc->entries[target]);
+    }
+
+    expert_cache_entry_t* ce = &lc->entries[target];
+    ce->expert_id = expert_id;
+    ce->last_used = g_token_counter;
+
+    int dim = g_cache_hidden_dim;
+    int inter = g_cache_exp_inter;
+
+    /* Convert gate: [inter, dim] */
+    {
+        int n = inter * dim;
+        int n_blocks = (n + 31) / 32;
+        tq_dequant_row_gguf(exp->gate_type, exp->w_gate, g_cache_fp32_temp, n);
+        ce->gate_q4_qs = (uint8_t*)malloc((size_t)n_blocks * 16);
+        ce->gate_q4_scales = (float*)malloc((size_t)n_blocks * sizeof(float));
+        if (ce->gate_q4_qs && ce->gate_q4_scales)
+            tq_quantize_row_q4(g_cache_fp32_temp, ce->gate_q4_qs,
+                               ce->gate_q4_scales, n);
+    }
+
+    /* Convert up: [inter, dim] */
+    {
+        int n = inter * dim;
+        int n_blocks = (n + 31) / 32;
+        tq_dequant_row_gguf(exp->up_type, exp->w_up, g_cache_fp32_temp, n);
+        ce->up_q4_qs = (uint8_t*)malloc((size_t)n_blocks * 16);
+        ce->up_q4_scales = (float*)malloc((size_t)n_blocks * sizeof(float));
+        if (ce->up_q4_qs && ce->up_q4_scales)
+            tq_quantize_row_q4(g_cache_fp32_temp, ce->up_q4_qs,
+                               ce->up_q4_scales, n);
+    }
+
+    /* Convert down: [dim, inter] */
+    {
+        int n = dim * inter;
+        int n_blocks = (n + 31) / 32;
+        tq_dequant_row_gguf(exp->down_type, exp->w_down, g_cache_fp32_temp, n);
+        ce->down_q4_qs = (uint8_t*)malloc((size_t)n_blocks * 16);
+        ce->down_q4_scales = (float*)malloc((size_t)n_blocks * sizeof(float));
+        if (ce->down_q4_qs && ce->down_q4_scales)
+            tq_quantize_row_q4(g_cache_fp32_temp, ce->down_q4_qs,
+                               ce->down_q4_scales, n);
+    }
+
+    return ce;
+}
 
 /* ============================================================
  * State management
@@ -151,7 +336,7 @@ void tq_moe_forward(const tq_moe_layer_t* layer,
                     const tq_moe_config_t* config,
                     tq_moe_state_t* state,
                     const float* input, float* output,
-                    int hidden_dim)
+                    int hidden_dim, int layer_idx)
 {
     int num_active = config->num_active;
     int expert_dim = config->expert_intermediate_dim;
@@ -164,6 +349,9 @@ void tq_moe_forward(const tq_moe_layer_t* layer,
     /* Step 2: Zero the output accumulator */
     memset(output, 0, (size_t)hidden_dim * sizeof(float));
 
+    /* Advance the global token counter for LRU tracking */
+    g_token_counter++;
+
     /* Step 3: For each selected expert, compute SwiGLU FFN and accumulate */
     for (int k = 0; k < num_active; k++) {
         int eid = state->top_experts[k];
@@ -171,34 +359,83 @@ void tq_moe_forward(const tq_moe_layer_t* layer,
         if (eid < 0 || eid >= config->num_experts) continue; /* safety check */
         const tq_expert_weights_t* exp = &layer->experts[eid];
 
-        /* Batch gate+up matmuls into one GPU command buffer.
-         * These are independent (same input, different weights/outputs)
-         * so they can execute as a single GPU dispatch. */
-        tq_metal_batch_begin_if_available();
+        /* Try LRU cache for Q4 weights (runtime on-demand conversion) */
+        if (g_expert_cache && layer_idx >= 0 && layer_idx < g_cache_n_layers
+            && exp->w_gate) {
+            expert_cache_entry_t* ce = cache_get_or_create(layer_idx, eid, exp);
+            if (ce->gate_q4_qs && ce->up_q4_qs && ce->down_q4_qs) {
+                /* Fast Q4 matmul path from LRU cache */
+                tq_matmul_q4(state->expert_hb, input,
+                             ce->gate_q4_qs, ce->gate_q4_scales,
+                             expert_dim, hidden_dim);
+                tq_matmul_q4(state->expert_hb2, input,
+                             ce->up_q4_qs, ce->up_q4_scales,
+                             expert_dim, hidden_dim);
 
-        /* gate = input @ w_gate^T   -> [expert_dim] */
-        tq_matmul_gguf(state->expert_hb, input,
-                       exp->w_gate, exp->gate_type,
-                       expert_dim, hidden_dim);
+                /* SwiGLU activation: hb = silu(gate) * up */
+                for (int i = 0; i < expert_dim; i++) {
+                    float g = state->expert_hb[i];
+                    state->expert_hb[i] = (g / (1.0f + expf(-g))) * state->expert_hb2[i];
+                }
 
-        /* up = input @ w_up^T   -> [expert_dim] */
-        tq_matmul_gguf(state->expert_hb2, input,
-                       exp->w_up, exp->up_type,
-                       expert_dim, hidden_dim);
+                tq_matmul_q4(state->expert_out, state->expert_hb,
+                             ce->down_q4_qs, ce->down_q4_scales,
+                             hidden_dim, expert_dim);
 
-        /* Flush: commit + wait + copy results before CPU-side SwiGLU */
-        tq_metal_batch_flush_if_available();
-
-        /* SwiGLU activation: hb = silu(gate) * up */
-        for (int i = 0; i < expert_dim; i++) {
-            float g = state->expert_hb[i];
-            state->expert_hb[i] = (g / (1.0f + expf(-g))) * state->expert_hb2[i];
+                /* Weighted accumulation: output += weight * down_proj */
+                for (int i = 0; i < hidden_dim; i++)
+                    output[i] += w * state->expert_out[i];
+                continue;
+            }
         }
 
-        /* down = hb @ w_down^T   -> [hidden_dim] */
-        tq_matmul_gguf(state->expert_out, state->expert_hb,
-                       exp->w_down, exp->down_type,
-                       hidden_dim, expert_dim);
+        if (exp->q4_converted) {
+            /* Fast Q4 matmul path — pre-converted expert weights (shared expert)
+             * tq_matmul_q4(out, x, w_qs, w_scales, n=out_rows, d=in_cols) */
+            tq_matmul_q4(state->expert_hb, input,
+                         exp->gate_q4_qs, exp->gate_q4_scales,
+                         expert_dim, hidden_dim);
+            tq_matmul_q4(state->expert_hb2, input,
+                         exp->up_q4_qs, exp->up_q4_scales,
+                         expert_dim, hidden_dim);
+
+            /* SwiGLU activation: hb = silu(gate) * up */
+            for (int i = 0; i < expert_dim; i++) {
+                float g = state->expert_hb[i];
+                state->expert_hb[i] = (g / (1.0f + expf(-g))) * state->expert_hb2[i];
+            }
+
+            tq_matmul_q4(state->expert_out, state->expert_hb,
+                         exp->down_q4_qs, exp->down_q4_scales,
+                         hidden_dim, expert_dim);
+        } else {
+            /* Fallback: on-the-fly GGUF dequant path */
+            tq_metal_batch_begin_if_available();
+
+            /* gate = input @ w_gate^T   -> [expert_dim] */
+            tq_matmul_gguf(state->expert_hb, input,
+                           exp->w_gate, exp->gate_type,
+                           expert_dim, hidden_dim);
+
+            /* up = input @ w_up^T   -> [expert_dim] */
+            tq_matmul_gguf(state->expert_hb2, input,
+                           exp->w_up, exp->up_type,
+                           expert_dim, hidden_dim);
+
+            /* Flush: commit + wait + copy results before CPU-side SwiGLU */
+            tq_metal_batch_flush_if_available();
+
+            /* SwiGLU activation: hb = silu(gate) * up */
+            for (int i = 0; i < expert_dim; i++) {
+                float g = state->expert_hb[i];
+                state->expert_hb[i] = (g / (1.0f + expf(-g))) * state->expert_hb2[i];
+            }
+
+            /* down = hb @ w_down^T   -> [hidden_dim] */
+            tq_matmul_gguf(state->expert_out, state->expert_hb,
+                           exp->w_down, exp->down_type,
+                           hidden_dim, expert_dim);
+        }
 
         /* Weighted accumulation: output += weight * down_proj */
         for (int i = 0; i < hidden_dim; i++)
@@ -219,29 +456,47 @@ void tq_moe_forward(const tq_moe_layer_t* layer,
             shared_gate_val = 1.0f / (1.0f + expf(-dot)); /* sigmoid */
         }
 
-        /* Batch shared expert gate+up into one GPU command buffer */
-        tq_metal_batch_begin_if_available();
+        if (layer->shared_expert.q4_converted) {
+            /* Fast Q4 path for shared expert
+             * tq_matmul_q4(out, x, w_qs, w_scales, n=out_rows, d=in_cols) */
+            tq_matmul_q4(state->expert_hb, input,
+                         layer->shared_expert.gate_q4_qs, layer->shared_expert.gate_q4_scales,
+                         shared_dim, hidden_dim);
+            tq_matmul_q4(state->expert_hb2, input,
+                         layer->shared_expert.up_q4_qs, layer->shared_expert.up_q4_scales,
+                         shared_dim, hidden_dim);
 
-        /* SwiGLU for shared expert */
-        tq_matmul_gguf(state->expert_hb, input,
-                       layer->shared_expert.w_gate, layer->shared_expert.gate_type,
-                       shared_dim, hidden_dim);
+            for (int i = 0; i < shared_dim; i++) {
+                float g = state->expert_hb[i];
+                state->expert_hb[i] = (g / (1.0f + expf(-g))) * state->expert_hb2[i];
+            }
 
-        tq_matmul_gguf(state->expert_hb2, input,
-                       layer->shared_expert.w_up, layer->shared_expert.up_type,
-                       shared_dim, hidden_dim);
+            tq_matmul_q4(state->expert_out, state->expert_hb,
+                         layer->shared_expert.down_q4_qs, layer->shared_expert.down_q4_scales,
+                         hidden_dim, shared_dim);
+        } else {
+            /* Fallback: on-the-fly GGUF dequant */
+            tq_metal_batch_begin_if_available();
 
-        /* Flush before CPU-side SwiGLU activation */
-        tq_metal_batch_flush_if_available();
+            tq_matmul_gguf(state->expert_hb, input,
+                           layer->shared_expert.w_gate, layer->shared_expert.gate_type,
+                           shared_dim, hidden_dim);
 
-        for (int i = 0; i < shared_dim; i++) {
-            float g = state->expert_hb[i];
-            state->expert_hb[i] = (g / (1.0f + expf(-g))) * state->expert_hb2[i];
+            tq_matmul_gguf(state->expert_hb2, input,
+                           layer->shared_expert.w_up, layer->shared_expert.up_type,
+                           shared_dim, hidden_dim);
+
+            tq_metal_batch_flush_if_available();
+
+            for (int i = 0; i < shared_dim; i++) {
+                float g = state->expert_hb[i];
+                state->expert_hb[i] = (g / (1.0f + expf(-g))) * state->expert_hb2[i];
+            }
+
+            tq_matmul_gguf(state->expert_out, state->expert_hb,
+                           layer->shared_expert.w_down, layer->shared_expert.down_type,
+                           hidden_dim, shared_dim);
         }
-
-        tq_matmul_gguf(state->expert_out, state->expert_hb,
-                       layer->shared_expert.w_down, layer->shared_expert.down_type,
-                       hidden_dim, shared_dim);
 
         for (int i = 0; i < hidden_dim; i++)
             output[i] += shared_gate_val * state->expert_out[i];

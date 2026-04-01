@@ -1492,7 +1492,7 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
             tq_moe_forward((const tq_moe_layer_t*)layer->moe,
                            (const tq_moe_config_t*)model->moe_config,
                            (tq_moe_state_t*)s->moe_state,
-                           s->xb, s->xb2, dim);
+                           s->xb, s->xb2, dim, l);
 
             if (is_gemma3 && layer->post_ffn_norm)
                 tq_rmsnorm(s->xb2, s->xb2, layer->post_ffn_norm, dim, c->rms_norm_eps);

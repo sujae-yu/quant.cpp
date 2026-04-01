@@ -387,7 +387,7 @@ TEST(MoE, ForwardSmokeTest) {
     float input[4] = {1.0f, 0.5f, 0.1f, 0.0f};
     float output[4] = {};
 
-    tq_moe_forward(&layer, &config, state, input, output, hidden_dim);
+    tq_moe_forward(&layer, &config, state, input, output, hidden_dim, /*layer_idx=*/0);
 
     /* Output should be non-zero (experts produced something) */
     float out_norm = 0;

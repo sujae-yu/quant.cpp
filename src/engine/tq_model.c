@@ -2933,15 +2933,18 @@ tq_model_t* tq_load_gguf(const char* path) {
             c->hidden_dim, c->n_heads, c->n_kv_heads, c->vocab_size);
 
     /* ============================================================
-     * Load-time weight conversion: GGUF -> Q4 for small models
+     * Load-time weight conversion: GGUF -> Q4
      *
-     * For models where total FP32 weight size < 8GB, dequantize GGUF
-     * weights to FP32 (temporary), then quantize to Q4. This replaces
-     * the slow on-the-fly GGUF dequant path with the fast Q4×Q8
-     * integer matmul path, yielding ~10x speedup.
+     * For non-MoE weights (attention, DeltaNet, dense FFN): batch
+     * dequantize GGUF -> FP32 (temporary), then quantize to Q4.
+     *
+     * For MoE expert weights: convert expert-by-expert using a small
+     * reusable FP32 temp buffer (~12 MB) to avoid multi-GB allocation.
+     * This replaces the slow on-the-fly GGUF dequant path with the
+     * fast Q4xQ8 integer matmul path, yielding ~10x speedup.
      * ============================================================ */
-    if (!c->is_moe) {
-        /* Estimate total FP32 weight size for non-MoE layers */
+    {
+        /* Estimate total FP32 weight size for non-MoE layer weights */
         int dim = c->hidden_dim;
         int q_dim = c->n_heads * c->head_dim;
         int kv_dim = c->n_kv_heads * c->head_dim;
@@ -2964,6 +2967,7 @@ tq_model_t* tq_load_gguf(const char* path) {
                 est_fp32 += (size_t)kv_dim * dim * sizeof(float);
             if (layer->gguf_wo)
                 est_fp32 += (size_t)dim * q_dim * sizeof(float);
+            /* Dense FFN weights (not present in MoE layers) */
             if (layer->gguf_w_gate)
                 est_fp32 += (size_t)inter * dim * sizeof(float);
             if (layer->gguf_w_up)
@@ -2986,7 +2990,8 @@ tq_model_t* tq_load_gguf(const char* path) {
         const size_t MAX_FP32_BYTES = (size_t)8 * 1024 * 1024 * 1024ULL; /* 8 GB */
         int has_gguf_weights = 0;
         for (int l = 0; l < c->n_layers && !has_gguf_weights; l++) {
-            if (model->layers[l].gguf_wq || model->layers[l].gguf_w_gate)
+            if (model->layers[l].gguf_wq || model->layers[l].gguf_w_gate
+                || model->layers[l].moe)
                 has_gguf_weights = 1;
         }
 
@@ -3046,7 +3051,7 @@ tq_model_t* tq_load_gguf(const char* path) {
                     }
                 }
 
-                /* FFN weights: dequant GGUF -> FP32 */
+                /* Dense FFN weights: dequant GGUF -> FP32 */
                 if (layer->gguf_w_gate) {
                     int n = inter * dim;
                     float* fp = (float*)malloc((size_t)n * sizeof(float));
@@ -3143,6 +3148,110 @@ tq_model_t* tq_load_gguf(const char* path) {
 
             fprintf(stderr, "tq_load_gguf: Q4 conversion complete — fast matmul path active\n");
         }
+
+        /* ============================================================
+         * MoE shared expert Q4 conversion + LRU cache init
+         *
+         * Routed experts use a runtime LRU cache (in tq_moe.c) that
+         * converts on-demand — only ~32 most-recently-used experts per
+         * layer stay in Q4 form, keeping memory under ~2 GB.
+         *
+         * Shared experts are always active, so convert them at load time.
+         * ============================================================ */
+        if (c->is_moe) {
+            int shared_inter = c->shared_expert_intermediate_dim;
+            if (shared_inter == 0) shared_inter = c->expert_intermediate_dim;
+
+            size_t max_elems = (size_t)shared_inter * dim;
+            if ((size_t)dim * shared_inter > max_elems)
+                max_elems = (size_t)dim * shared_inter;
+
+            float* fp32_temp = NULL;
+            if (c->has_shared_expert && max_elems > 0)
+                fp32_temp = (float*)malloc(max_elems * sizeof(float));
+
+            size_t total_q4_shared = 0;
+            int n_shared_converted = 0;
+
+            if (c->has_shared_expert && fp32_temp) {
+                for (int l = 0; l < c->n_layers; l++) {
+                    tq_moe_layer_t* moe = (tq_moe_layer_t*)model->layers[l].moe;
+                    if (!moe || !moe->shared_expert.w_gate) continue;
+                    tq_expert_weights_t* se = &moe->shared_expert;
+
+                    /* gate: [shared_inter, dim] */
+                    {
+                        int n = shared_inter * dim;
+                        int n_blocks = (n + 31) / 32;
+                        tq_dequant_row_gguf(se->gate_type, se->w_gate, fp32_temp, n);
+                        se->gate_q4_qs = (uint8_t*)malloc((size_t)n_blocks * 16);
+                        se->gate_q4_scales = (float*)malloc((size_t)n_blocks * sizeof(float));
+                        if (se->gate_q4_qs && se->gate_q4_scales) {
+                            tq_quantize_row_q4(fp32_temp, se->gate_q4_qs,
+                                               se->gate_q4_scales, n);
+                            total_q4_shared += (size_t)n_blocks * 16 + (size_t)n_blocks * sizeof(float);
+                        }
+                    }
+
+                    /* up: [shared_inter, dim] */
+                    {
+                        int n = shared_inter * dim;
+                        int n_blocks = (n + 31) / 32;
+                        tq_dequant_row_gguf(se->up_type, se->w_up, fp32_temp, n);
+                        se->up_q4_qs = (uint8_t*)malloc((size_t)n_blocks * 16);
+                        se->up_q4_scales = (float*)malloc((size_t)n_blocks * sizeof(float));
+                        if (se->up_q4_qs && se->up_q4_scales) {
+                            tq_quantize_row_q4(fp32_temp, se->up_q4_qs,
+                                               se->up_q4_scales, n);
+                            total_q4_shared += (size_t)n_blocks * 16 + (size_t)n_blocks * sizeof(float);
+                        }
+                    }
+
+                    /* down: [dim, shared_inter] */
+                    {
+                        int n = dim * shared_inter;
+                        int n_blocks = (n + 31) / 32;
+                        tq_dequant_row_gguf(se->down_type, se->w_down, fp32_temp, n);
+                        se->down_q4_qs = (uint8_t*)malloc((size_t)n_blocks * 16);
+                        se->down_q4_scales = (float*)malloc((size_t)n_blocks * sizeof(float));
+                        if (se->down_q4_qs && se->down_q4_scales) {
+                            tq_quantize_row_q4(fp32_temp, se->down_q4_qs,
+                                               se->down_q4_scales, n);
+                            total_q4_shared += (size_t)n_blocks * 16 + (size_t)n_blocks * sizeof(float);
+                        }
+                    }
+
+                    se->q4_converted = (se->gate_q4_qs && se->up_q4_qs && se->down_q4_qs);
+                    if (se->q4_converted) n_shared_converted++;
+                }
+            }
+
+            free(fp32_temp);
+
+            /* Initialize runtime LRU cache for routed experts */
+            tq_moe_cache_init(c->n_layers,
+                              (const tq_moe_config_t*)model->moe_config, dim);
+
+            fprintf(stderr, "tq_load_gguf: MoE — %d shared experts Q4-converted "
+                    "(%.1f MB), routed experts use runtime LRU cache\n",
+                    n_shared_converted, (double)total_q4_shared / (1024.0 * 1024.0));
+        }
+
+        /* Advise OS to release mmap'd GGUF pages — the original quantized
+         * data is no longer needed after Q4 conversion.
+         * NOTE: For MoE models we must NOT release mmap pages since routed
+         * expert weights are still read on-demand from the mmap. */
+#ifndef _WIN32
+        if (model->gguf_ctx && !c->is_moe) {
+            /* MoE models keep mmap alive for on-demand expert dequant */
+            tq_gguf_ctx_t* gctx = (tq_gguf_ctx_t*)model->gguf_ctx;
+            if (gctx->mmap_data && gctx->mmap_size > 0) {
+                madvise(gctx->mmap_data, gctx->mmap_size, MADV_DONTNEED);
+                fprintf(stderr, "tq_load_gguf: madvise(MADV_DONTNEED) on %.1f GB mmap\n",
+                        (double)gctx->mmap_size / (1024.0 * 1024.0 * 1024.0));
+            }
+        }
+#endif
     }
 
     #undef GGUF_KEY
@@ -3425,11 +3534,34 @@ void tq_free_model(tq_model_t* model) {
     free(model->attn_layer_indices);
     free(model->layer_is_sliding);
 
+    /* Free MoE LRU cache (must happen before freeing layers) */
+    tq_moe_cache_free();
+
     /* Free MoE resources */
     if (model->config.is_moe && model->layers) {
         for (int l = 0; l < model->config.n_layers; l++) {
             tq_moe_layer_t* moe = (tq_moe_layer_t*)model->layers[l].moe;
             if (moe) {
+                /* Free Q4 expert weight data */
+                if (moe->experts) {
+                    for (int e = 0; e < model->config.num_experts; e++) {
+                        tq_expert_weights_t* exp = &moe->experts[e];
+                        free(exp->gate_q4_qs);
+                        free(exp->gate_q4_scales);
+                        free(exp->up_q4_qs);
+                        free(exp->up_q4_scales);
+                        free(exp->down_q4_qs);
+                        free(exp->down_q4_scales);
+                    }
+                }
+                /* Free shared expert Q4 data */
+                free(moe->shared_expert.gate_q4_qs);
+                free(moe->shared_expert.gate_q4_scales);
+                free(moe->shared_expert.up_q4_qs);
+                free(moe->shared_expert.up_q4_scales);
+                free(moe->shared_expert.down_q4_qs);
+                free(moe->shared_expert.down_q4_scales);
+
                 free(moe->router_weight);
                 free(moe->shared_gate);
                 free(moe->experts);
