@@ -359,8 +359,9 @@ void tq_moe_forward(const tq_moe_layer_t* layer,
         if (eid < 0 || eid >= config->num_experts) continue; /* safety check */
         const tq_expert_weights_t* exp = &layer->experts[eid];
 
-        /* Try LRU cache for Q4 weights (runtime on-demand conversion) */
-        if (g_expert_cache && layer_idx >= 0 && layer_idx < g_cache_n_layers
+        /* LRU cache disabled — cache miss dequant+Q4 overhead dominates.
+         * Direct fused GGUF dot product is faster than cache miss penalty. */
+        if (0 && g_expert_cache && layer_idx >= 0 && layer_idx < g_cache_n_layers
             && exp->w_gate) {
             expert_cache_entry_t* ce = cache_get_or_create(layer_idx, eid, exp);
             if (ce->gate_q4_qs && ce->up_q4_qs && ce->down_q4_qs) {

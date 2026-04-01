@@ -25,10 +25,38 @@
 #include <string.h>
 #include <math.h>
 #include <stdio.h>
+#include <time.h>
 
 #ifdef __ARM_NEON
 #include <arm_neon.h>
 #endif
+
+/* ============================================================
+ * Lightweight forward-pass profiling (clock_gettime only)
+ * Activated by setting g_tq_profile_enabled = 1 (via --profile flag)
+ * ============================================================ */
+typedef struct {
+    double matmul_ns;
+    double recurrent_ns;
+    double moe_ns;
+    double conv1d_ns;
+    double attn_ns;       /* softmax + weighted-sum in self_attn */
+    double total_fwd_ns;  /* total forward pass wall time */
+    int    n_tokens;
+} tq_profile_t;
+
+static tq_profile_t g_profile = {0};
+int g_tq_profile_enabled = 0;  /* set from tq_run --profile */
+
+static inline double tq_now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1e9 + (double)ts.tv_nsec;
+}
+
+/* Usage: double _tp; TQ_PROF_START(_tp); ... TQ_PROF_STOP(_tp, field); */
+#define TQ_PROF_START(var) do { var = g_tq_profile_enabled ? tq_now_ns() : 0; } while(0)
+#define TQ_PROF_STOP(var, field) do { if (g_tq_profile_enabled) g_profile.field += tq_now_ns() - var; } while(0)
 
 /* ============================================================
  * FP16 helpers (IEEE 754 half-precision, storage only)
@@ -455,6 +483,7 @@ static void causal_conv1d_silu_batch(float* data, float* conv_st,
  *   8. Apply group norm, multiply by swish(z), output projection
  * ============================================================ */
 static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
+    double _tp = 0;  /* profiling timestamp */
     tq_model_config_t* c = &model->config;
     tq_layer_weights_t* layer = &model->layers[l];
     int dim = c->hidden_dim;
@@ -484,6 +513,7 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
     }
 
     /* Step 1: Project input through QKV and Z */
+    TQ_PROF_START(_tp);
     if (layer->delta_in_proj_qkv_q2)
         tq_matmul_q2_preq(s->delta_qkv, layer->delta_in_proj_qkv_q2, layer->delta_in_proj_qkv_q2s, s->xb_q8, s->xb_q8s, qkv_dim, dim);
     else if (layer->delta_in_proj_qkv_q4)
@@ -534,6 +564,8 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
         s->delta_ab[dn + h] = 1.0f / (1.0f + fast_expf(-s->delta_ab[dn + h]));
     }
 
+    TQ_PROF_STOP(_tp, matmul_ns);
+
     /* Step 3: Compute gate (decay) per head
      * gate = softplus(alpha + dt_bias) * (-exp(A_log))
      * exp(gate) is the per-step multiplicative decay (< 1).
@@ -555,8 +587,10 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
     }
 
     /* Step 4: Causal conv1d on QKV + SiLU (batched, NEON-optimized) */
+    TQ_PROF_START(_tp);
     causal_conv1d_silu_batch(s->delta_qkv, conv_st, layer->delta_conv1d,
                               qkv_dim, conv_width);
+    TQ_PROF_STOP(_tp, conv1d_ns);
 
     /* Step 5: Split into Q, K, V per head and L2 normalize Q, K.
      * Layout: Q[dn_kv * dk] + K[dn_kv * dk] + V[dn * dv]
@@ -576,6 +610,7 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
         Q_all[i] *= q_scale;
     }
 
+    TQ_PROF_START(_tp);
     /* Step 7: Per-head recurrent delta rule update (NEON-optimized).
      *
      * Following the llama.cpp autoregressive implementation:
@@ -706,6 +741,8 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
 #endif
     }
 
+    TQ_PROF_STOP(_tp, recurrent_ns);
+
     /* Step 8: Apply group norm (per-head RMSNorm), then z gate (swish), then output projection */
     for (int h = 0; h < dn; h++) {
         float* oh = s->delta_out + h * dv;
@@ -770,6 +807,7 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
     }
 
     /* Output projection: [dim, z_dim] @ delta_out[z_dim] -> xb2[dim] */
+    TQ_PROF_START(_tp);
     if (layer->delta_out_proj_q2)
         tq_matmul_q2(s->xb2, s->delta_out, layer->delta_out_proj_q2, layer->delta_out_proj_q2s, dim, z_dim);
     else if (layer->delta_out_proj_q4)
@@ -781,6 +819,8 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
     else
         tq_matmul(s->xb2, s->delta_out, layer->delta_out_proj, dim, z_dim);
 
+    TQ_PROF_STOP(_tp, matmul_ns);
+
     /* Residual connection */
     tq_add(s->x, s->x, s->xb2, dim);
 }
@@ -789,6 +829,7 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
  * Self-attention forward pass with QK-norm and partial RoPE
  * ============================================================ */
 static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) {
+    double _tp = 0;  /* profiling timestamp */
     tq_model_config_t* c = &model->config;
     tq_layer_weights_t* layer = &model->layers[l];
     int dim = c->hidden_dim;
@@ -808,8 +849,9 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
         tq_quantize_row_q8(s->xb, s->xb_q8, s->xb_q8s, dim);
     }
 
-    /* QKV projections.
-     * When attn_output_gate is enabled, wq has shape [2*n_heads*head_dim, dim]
+    /* QKV projections (timed as matmul) */
+    TQ_PROF_START(_tp);
+    /* When attn_output_gate is enabled, wq has shape [2*n_heads*head_dim, dim]
      * and outputs [Q, gate_q] concatenated. We project into xb2 as temp.
      *
      * Batch Q+K+V GPU dispatches into one command buffer when using GGUF path.
@@ -880,6 +922,7 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
 
     /* Flush batched Q+K+V GPU dispatches before using results */
     if (has_gguf) tq_metal_batch_flush_if_available();
+    TQ_PROF_STOP(_tp, matmul_ns);
 
     /* Apply QK-norm if present (per-head RMSNorm) */
     if (layer->q_norm) {
@@ -1022,6 +1065,7 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
     }
 
     /* Multi-head attention */
+    TQ_PROF_START(_tp);
     int seq_len = pos + 1;
     /* Use integer attention when enough cached keys to amortize overhead */
     int int_attn_threshold = 128; /* only use integer attention for long contexts */
@@ -1338,6 +1382,8 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
         }
     }
 
+    TQ_PROF_STOP(_tp, attn_ns);
+
     /* Apply output gate if enabled: attn_out *= sigmoid(gate_q) */
     if (c->attn_output_gate && gate_q) {
         int total = n_heads * head_dim;
@@ -1371,6 +1417,7 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
     }
 
     /* Output projection */
+    TQ_PROF_START(_tp);
     if (layer->wo_q2)
         tq_matmul_q2(s->xb2, s->xb, layer->wo_q2, layer->wo_q2s, dim, n_heads * head_dim);
     else if (layer->wo_q4)
@@ -1381,6 +1428,7 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
         tq_matmul_gguf(s->xb2, s->xb, layer->gguf_wo, layer->gguf_wo_type, dim, n_heads * head_dim);
     else
         tq_matmul(s->xb2, s->xb, layer->wo, dim, n_heads * head_dim);
+    TQ_PROF_STOP(_tp, matmul_ns);
 
     /* Residual */
     tq_add(s->x, s->x, s->xb2, dim);
@@ -1397,6 +1445,8 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
  *   3. RMSNorm -> SwiGLU FFN -> residual
  * ============================================================ */
 float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
+    double _fwd_t0 = g_tq_profile_enabled ? tq_now_ns() : 0;
+    double _tp = 0;  /* profiling timestamp */
     tq_model_config_t* c = &model->config;
     int dim = c->hidden_dim;
 
@@ -1489,10 +1539,12 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
                 ffn_norm_w = layer->pre_ffn_norm;
             tq_rmsnorm(s->xb, s->x, ffn_norm_w, dim, c->rms_norm_eps);
 
+            TQ_PROF_START(_tp);
             tq_moe_forward((const tq_moe_layer_t*)layer->moe,
                            (const tq_moe_config_t*)model->moe_config,
                            (tq_moe_state_t*)s->moe_state,
                            s->xb, s->xb2, dim, l);
+            TQ_PROF_STOP(_tp, moe_ns);
 
             if (is_gemma3 && layer->post_ffn_norm)
                 tq_rmsnorm(s->xb2, s->xb2, layer->post_ffn_norm, dim, c->rms_norm_eps);
@@ -1515,6 +1567,7 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
             tq_rmsnorm(s->xb, s->x, ffn_norm_w, dim, c->rms_norm_eps);
 
             /* Pre-quantize xb for gate+up Q2/Q4 projections (same input, 2 matmuls) */
+            TQ_PROF_START(_tp);
             if (layer->w_gate_q2) {
                 tq_quantize_row_q8(s->xb, s->xb_q8, s->xb_q8s, dim);
 
@@ -1548,6 +1601,8 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
                 }
             }
 
+            TQ_PROF_STOP(_tp, matmul_ns);
+
             /* Activation: GeGLU for Gemma3, SwiGLU for others */
             if (is_gemma3) {
                 tq_gelu_tanh(s->hb, c->intermediate_dim);
@@ -1556,6 +1611,7 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
             }
             tq_mul(s->hb, s->hb, s->hb2, c->intermediate_dim);
 
+            TQ_PROF_START(_tp);
             if (layer->w_down_q2) {
                 tq_matmul_q2(s->xb2, s->hb, layer->w_down_q2, layer->w_down_q2s, dim, c->intermediate_dim);
             } else if (layer->w_down_q4) {
@@ -1567,6 +1623,7 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
             } else {
                 tq_matmul(s->xb2, s->hb, layer->w_down, dim, c->intermediate_dim);
             }
+            TQ_PROF_STOP(_tp, matmul_ns);
 
             /* Gemma3: apply post_feedforward_layernorm to FFN output before residual */
             if (is_gemma3 && layer->post_ffn_norm) {
@@ -1598,6 +1655,7 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
     }
 
     /* Step 4: Output projection to vocab logits */
+    TQ_PROF_START(_tp);
     if (model->output_qs) {
         tq_matmul_q4(s->logits, s->x, model->output_qs, model->output_scales,
                       c->vocab_size, dim);
@@ -1606,10 +1664,40 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
     } else {
         tq_matmul(s->logits, s->x, model->output_weight, c->vocab_size, dim);
     }
+    TQ_PROF_STOP(_tp, matmul_ns);
 
     /* Increment profile token count if profiling is active */
     if (s->profile_kv) {
         s->profile_kv_count++;
+    }
+
+    /* Timing profile: accumulate total fwd time and print every 10 tokens */
+    if (g_tq_profile_enabled) {
+        g_profile.total_fwd_ns += tq_now_ns() - _fwd_t0;
+        g_profile.n_tokens++;
+        if (g_profile.n_tokens % 10 == 0) {
+            double mat  = g_profile.matmul_ns;
+            double rec  = g_profile.recurrent_ns;
+            double moe  = g_profile.moe_ns;
+            double conv = g_profile.conv1d_ns;
+            double attn = g_profile.attn_ns;
+            double total = g_profile.total_fwd_ns;
+            double other = total - mat - rec - moe - conv - attn;
+            if (other < 0) other = 0;
+            if (total > 0) {
+                fprintf(stderr, "[Profile %d tok] matmul=%.1f%% recurrent=%.1f%% moe=%.1f%% conv=%.1f%% attn=%.1f%% other=%.1f%% | per-tok: %.1fms (mat=%.1f rec=%.1f moe=%.1f conv=%.1f attn=%.1f other=%.1f)\n",
+                    g_profile.n_tokens,
+                    mat/total*100, rec/total*100, moe/total*100,
+                    conv/total*100, attn/total*100, other/total*100,
+                    total / g_profile.n_tokens / 1e6,
+                    mat / g_profile.n_tokens / 1e6,
+                    rec / g_profile.n_tokens / 1e6,
+                    moe / g_profile.n_tokens / 1e6,
+                    conv / g_profile.n_tokens / 1e6,
+                    attn / g_profile.n_tokens / 1e6,
+                    other / g_profile.n_tokens / 1e6);
+            }
+        }
     }
 
     return s->logits;

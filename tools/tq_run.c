@@ -37,6 +37,9 @@
 #include <time.h>
 #include <math.h>
 
+/* Forward-pass profiling flag (defined in tq_transformer.c) */
+extern int g_tq_profile_enabled;
+
 /* Streaming token callback */
 static void print_token(const char* text, void* user_data) {
     (void)user_data;
@@ -81,6 +84,7 @@ static void print_usage(const char* prog) {
     fprintf(stderr, "                   q8 (int8, ~3.5x reduction), or none (FP32)\n");
     fprintf(stderr, "  --info           Print model info and exit\n");
     fprintf(stderr, "  -M, --memory     Print KV cache memory stats after generation\n");
+    fprintf(stderr, "  --profile        Profile forward pass timing (matmul/recurrent/moe/conv/attn)\n");
     fprintf(stderr, "  --profile-kv     Profile KV activation distributions (pre/post RHT)\n");
     fprintf(stderr, "  --recommend      Per-layer bit allocation recommendation (kurtosis-based)\n");
     fprintf(stderr, "  --attn-entropy   Compute per-layer, per-head attention entropy\n");
@@ -172,6 +176,8 @@ int main(int argc, char** argv) {
             info_only = 1;
         } else if (strcmp(argv[i], "-M") == 0 || strcmp(argv[i], "--memory") == 0) {
             show_memory = 1;
+        } else if (strcmp(argv[i], "--profile") == 0) {
+            g_tq_profile_enabled = 1;
         } else if (strcmp(argv[i], "--profile-kv") == 0) {
             profile_kv = 1;
         } else if (strcmp(argv[i], "--recommend") == 0) {
