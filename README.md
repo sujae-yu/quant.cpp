@@ -142,18 +142,71 @@ The engine and KV compression are architecture-independent. Verified from 270M t
 
 ---
 
+## GPU Backends
+
+TurboQuant runs on all major GPU platforms — including AMD.
+
+| Backend | Target | Status | Files |
+|---------|--------|--------|-------|
+| **CUDA** | NVIDIA GPU | Production (1,919 LOC) | `src/backend/cuda/` |
+| **Metal** | Apple Silicon | Production (1,494 LOC) | `src/backend/metal/` |
+| **Vulkan** | **AMD + cross-platform** | New (2,317 LOC) | `src/backend/vulkan/` |
+| **ROCm/HIP** | **AMD ROCm** | New (2,174 LOC) | `src/backend/rocm/` |
+| **NEON** | ARM CPU | Production (980 LOC) | `src/backend/cpu/tq_neon.c` |
+| **AVX2** | x86 CPU | Expanded (638 LOC) | `src/backend/cpu/tq_avx2.c` |
+
+```bash
+# Build with GPU backends
+cmake -B build -DTQ_BUILD_CUDA=ON    # NVIDIA
+cmake -B build -DTQ_BUILD_METAL=ON   # Apple Silicon
+cmake -B build -DTQ_BUILD_VULKAN=ON  # AMD / cross-platform
+cmake -B build -DTQ_BUILD_ROCM=ON    # AMD ROCm
+```
+
+Each backend implements 3 core GPU kernels:
+1. **`quantize_key`** — RHT + codebook + bit-pack (PolarQuant/QJL)
+2. **`attention_quant`** — quantized K x Q dot product + softmax
+3. **`quantize_value`** — min-max Q4/Q2 pack + fused dequant-matmul
+
+> AMD users: Vulkan (cross-platform, Vulkan 1.1) or ROCm/HIP (native, CUDA-compatible API).
+
+---
+
+## GGUF Model Loading
+
+Load community GGUF models directly — no conversion needed.
+
+```bash
+# Download from Hugging Face (Unsloth, bartowski, etc.)
+./build/tq_run model.gguf -p "Hello" -k turbo_kv_1b
+
+# Supported: Q8_0, Q4_K, Q5_K, Q6_K, IQ2_XXS, IQ2_S, BF16, F16, F32
+# MoE models: top-K expert routing + shared expert + SwiGLU
+```
+
+| Feature | Status |
+|---------|--------|
+| GGUF v3 parser (mmap) | 24 quant types supported |
+| IQ2_XXS (E8 lattice) | Full codebook dequant |
+| IQ2_S (10-bit grid) | Full codebook dequant |
+| MoE routing | 256 experts, top-8, shared expert |
+| DeltaNet hybrid | Qwen3.5 DeltaNet + self_attn |
+| GGUF tokenizer | BPE from metadata |
+| On-the-fly weight dequant | No FP32 bulk conversion — saves ~5GB |
+
+---
+
 ## Under the Hood
 
 **Self-built inference engine** — not a fork, not a wrapper. Every component written from scratch.
 
-- **15,000+ lines of C** — transformer, tokenizer, matmul, attention, sampling — zero external dependencies
+- **20,000+ lines of C/C++** — transformer, tokenizer, matmul, attention, sampling, GPU kernels — zero external dependencies
 - **12 KV quantization types** — the core differentiator: RHT + Lloyd-Max + QJL for unbiased inner products
+- **6 compute backends** — CUDA, Metal, Vulkan, ROCm/HIP, NEON, AVX2
 - **Fused Q4 attention** — weighted sum directly from packed nibbles, no dequant buffer
 - **Adaptive compression** — per-layer bit recommendation, online codebook calibration (49.7% MSE gain)
-- **NEON vectorized** — matmul, attention, RHT butterfly, Hamming distance, Q4 dequant
+- **GGUF v3 loader** — 24 quant types, IQ2 E8 lattice, MoE expert dispatch, on-the-fly dequant
 - **31 test suites** — perplexity, unbiasedness, attention distribution, codebook theory, NEON consistency, edge cases, rate-distortion, cumulative error
-- - **GGUF v3 loading** — Q8_0, Q4_K_M, IQ2_XXS verified; 35B MoE coherent output
-- **MoE routing** — top-K expert selection, shared expert, SwiGLU (verified on 35B)
 
 ---
 

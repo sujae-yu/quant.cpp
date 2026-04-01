@@ -135,6 +135,24 @@ int tq_get_threads(void) {
     return g_n_threads;
 }
 
+/* Public thread pool dispatch — allows other translation units to use the pool */
+void tq_tp_run(void* (*fn)(void*), void** args, int n_tasks) {
+    if (g_tp.active && n_tasks == g_tp.n_workers) {
+        tp_run(fn, args, n_tasks);
+    } else {
+        /* Fallback: create/join pthreads */
+        if (n_tasks <= 1) {
+            if (n_tasks == 1 && args[0]) fn(args[0]);
+            return;
+        }
+        pthread_t threads[TP_MAX];
+        for (int t = 0; t < n_tasks; t++)
+            pthread_create(&threads[t], NULL, fn, args[t]);
+        for (int t = 0; t < n_tasks; t++)
+            pthread_join(threads[t], NULL);
+    }
+}
+
 /* ============================================================
  * Multi-threaded matmul worker
  * ============================================================ */

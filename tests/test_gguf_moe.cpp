@@ -127,6 +127,146 @@ TEST(GGUFMatmul, F32_SimpleWeight) {
 }
 
 /* ============================================================
+ * Test: Fused dequant-dot matmul correctness
+ *
+ * Verifies that the fused fast paths produce identical results
+ * to the generic dequant+dot fallback for quantized types.
+ * ============================================================ */
+
+TEST(GGUFMatmul, Q8_0_FusedDot) {
+    /* Build a 2-row Q8_0 weight matrix (2 x 32), verify matmul */
+    const int in_dim = 32;
+    const int out_dim = 2;
+    const int block_bytes = 34;  /* Q8_0: 2 + 32 bytes */
+
+    std::vector<uint8_t> weight(out_dim * block_bytes, 0);
+
+    /* Row 0: d=1.0 (fp16=0x3C00), qs = [1, 2, 3, ..., 32] */
+    weight[0] = 0x00; weight[1] = 0x3C;  /* d = 1.0 */
+    for (int i = 0; i < 32; i++) weight[2 + i] = (uint8_t)(i + 1);
+
+    /* Row 1: d=0.5 (fp16=0x3800), qs = [-1, -2, ..., -32] */
+    weight[block_bytes + 0] = 0x00; weight[block_bytes + 1] = 0x38;  /* d = 0.5 */
+    for (int i = 0; i < 32; i++) weight[block_bytes + 2 + i] = (uint8_t)(int8_t)(-(i + 1));
+
+    /* Input: all 1.0 */
+    std::vector<float> x(in_dim, 1.0f);
+    std::vector<float> out(out_dim, 0.0f);
+
+    tq_matmul_gguf(out.data(), x.data(), weight.data(),
+                   TQ_GGML_TYPE_Q8_0, out_dim, in_dim);
+
+    /* Row 0: 1.0 * sum(1..32) = 1.0 * 528 = 528.0 */
+    EXPECT_NEAR(out[0], 528.0f, 1e-3f);
+    /* Row 1: 0.5 * sum(-1..-32) = 0.5 * (-528) = -264.0 */
+    EXPECT_NEAR(out[1], -264.0f, 1e-3f);
+}
+
+TEST(GGUFMatmul, IQ2_XXS_FusedDot) {
+    /* Verify IQ2_XXS fused matmul produces same output as dequant+dot.
+     * Create a single-row IQ2_XXS weight (256 elements, 66 bytes),
+     * dequantize it manually, compute expected dot product, then
+     * compare with tq_matmul_gguf output. */
+    const int in_dim = 256;
+    const int out_dim = 1;
+    const int block_bytes = 66;
+
+    std::vector<uint8_t> weight(block_bytes, 0);
+
+    /* d = 1.0 (fp16 = 0x3C00) */
+    weight[0] = 0x00; weight[1] = 0x3C;
+
+    /* Fill qs: 8 groups of 8 bytes.
+     * For each group, aux32[0] = 4 grid indices, aux32[1] = signs + sub-scale.
+     * Use grid index 0 (iq2xxs_grid[0] = 0x0808080808080808, all values = 8)
+     * and sign=0 (no negation), sub-scale nibble=0 (db = d * 0.5 * 0.25 = 0.125) */
+    for (int ib32 = 0; ib32 < 8; ib32++) {
+        uint8_t* group = weight.data() + 2 + ib32 * 8;
+        /* aux32[0]: all 4 grid indices = 0 */
+        group[0] = 0; group[1] = 0; group[2] = 0; group[3] = 0;
+        /* aux32[1]: all sign fields = 0 (no negation), scale nibble = 0 */
+        group[4] = 0; group[5] = 0; group[6] = 0; group[7] = 0;
+    }
+
+    /* Input: all 1.0 */
+    std::vector<float> x(in_dim, 1.0f);
+
+    /* Expected: dequant then dot manually */
+    std::vector<float> dequant_buf(in_dim, 0.0f);
+    tq_dequant_row_gguf(TQ_GGML_TYPE_IQ2_XXS, weight.data(), dequant_buf.data(), in_dim);
+    float expected = 0.0f;
+    for (int i = 0; i < in_dim; i++) expected += dequant_buf[i] * x[i];
+
+    /* Fused matmul */
+    float out = 0.0f;
+    tq_matmul_gguf(&out, x.data(), weight.data(),
+                   TQ_GGML_TYPE_IQ2_XXS, out_dim, in_dim);
+
+    EXPECT_NEAR(out, expected, 1e-3f) << "Fused IQ2_XXS matmul mismatch";
+}
+
+TEST(GGUFMatmul, IQ2_XXS_FusedDot_RandomInput) {
+    /* Verify with non-trivial input values */
+    const int in_dim = 256;
+    const int out_dim = 2;
+    const int block_bytes = 66;
+
+    std::vector<uint8_t> weight(out_dim * block_bytes, 0);
+
+    /* Fill both rows with different patterns */
+    for (int row = 0; row < out_dim; row++) {
+        uint8_t* blk = weight.data() + row * block_bytes;
+        /* d = 2.0 for row 0, d = 0.25 for row 1 */
+        if (row == 0) { blk[0] = 0x00; blk[1] = 0x40; }  /* fp16 2.0 */
+        else          { blk[0] = 0x00; blk[1] = 0x34; }  /* fp16 0.25 */
+
+        for (int ib32 = 0; ib32 < 8; ib32++) {
+            uint8_t* group = blk + 2 + ib32 * 8;
+            /* Use different grid indices per group */
+            group[0] = (uint8_t)((row * 8 + ib32) % 256);
+            group[1] = (uint8_t)((row * 8 + ib32 + 1) % 256);
+            group[2] = (uint8_t)((row * 8 + ib32 + 2) % 256);
+            group[3] = (uint8_t)((row * 8 + ib32 + 3) % 256);
+            /* Signs: some bits set, scale nibble varies */
+            uint32_t signs_and_scale = ((uint32_t)(ib32 % 4) << 28)  /* scale nibble */
+                | (uint32_t)(ib32 * 17)        /* sign field 0 */
+                | ((uint32_t)(ib32 * 23) << 7) /* sign field 1 */
+                | ((uint32_t)(ib32 * 31) << 14) /* sign field 2 */
+                | ((uint32_t)(ib32 * 37) << 21); /* sign field 3 */
+            memcpy(group + 4, &signs_and_scale, 4);
+        }
+    }
+
+    /* Pseudo-random input */
+    std::vector<float> x(in_dim);
+    for (int i = 0; i < in_dim; i++) {
+        x[i] = sinf((float)i * 0.1f) * 2.0f;
+    }
+
+    /* Reference: dequant then dot */
+    std::vector<float> expected(out_dim);
+    size_t row_bytes = block_bytes;
+    for (int d = 0; d < out_dim; d++) {
+        std::vector<float> tmp(in_dim);
+        tq_dequant_row_gguf(TQ_GGML_TYPE_IQ2_XXS,
+                            weight.data() + d * row_bytes, tmp.data(), in_dim);
+        float sum = 0.0f;
+        for (int i = 0; i < in_dim; i++) sum += tmp[i] * x[i];
+        expected[d] = sum;
+    }
+
+    /* Fused matmul */
+    std::vector<float> out(out_dim, 0.0f);
+    tq_matmul_gguf(out.data(), x.data(), weight.data(),
+                   TQ_GGML_TYPE_IQ2_XXS, out_dim, in_dim);
+
+    for (int d = 0; d < out_dim; d++) {
+        EXPECT_NEAR(out[d], expected[d], fabsf(expected[d]) * 1e-5f + 1e-5f)
+            << "Fused IQ2_XXS mismatch at row " << d;
+    }
+}
+
+/* ============================================================
  * Test: MoE routing
  * ============================================================ */
 

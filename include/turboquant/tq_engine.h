@@ -530,6 +530,16 @@ float tq_calibrate_codebook(const float* data, int n_samples,
 void tq_set_threads(int n_threads);
 int tq_get_threads(void);
 
+/* Thread pool dispatch — splits work across the global thread pool.
+ * fn: worker function (takes void* arg, returns void*)
+ * args: array of n_tasks argument pointers, one per thread
+ * n_tasks: number of tasks (should match tq_get_threads())
+ * Falls back to serial execution if pool not active or n_tasks <= 1. */
+void tq_tp_run(void* (*fn)(void*), void** args, int n_tasks);
+
+/* Max threads supported by thread pool */
+#define TQ_TP_MAX 16
+
 #ifdef __cplusplus
 }
 #endif

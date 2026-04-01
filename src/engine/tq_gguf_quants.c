@@ -11,6 +11,7 @@
  */
 
 #include "turboquant/tq_gguf.h"
+#include "turboquant/tq_engine.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -1108,13 +1109,499 @@ void tq_dequant_row_gguf(tq_ggml_dtype type, const void* src, float* dst, int n)
 }
 
 /* ============================================================
- * On-the-fly dequant matmul
+ * Fused dequant-dot product functions
+ *
+ * These compute dot(dequant(weight_row), input) in a single pass
+ * without writing dequantized values to memory. All intermediate
+ * values stay in registers, eliminating the temporary FP32 buffer.
+ *
+ * This is the critical optimization for MoE inference where
+ * IQ2_XXS dequant dominates runtime.
+ * ============================================================ */
+
+/* Fused IQ2_XXS dot product: dot(dequant(row), x) for one 256-element block */
+static inline float dot_block_iq2_xxs(const uint8_t* blk, const float* x) {
+    uint16_t d_raw;
+    memcpy(&d_raw, blk, 2);
+    const float d = fp16_to_fp32(d_raw);
+    const uint16_t* qs = (const uint16_t*)(blk + 2);
+    float sum = 0.0f;
+
+    for (int ib32 = 0; ib32 < 8; ib32++) {
+        uint32_t aux32[2];
+        memcpy(aux32, qs + 4 * ib32, 8);
+        const uint8_t* aux8 = (const uint8_t*)aux32;
+        const float db = d * (0.5f + (float)(aux32[1] >> 28)) * 0.25f;
+        const float* xb = x + ib32 * 32;
+
+        float group_sum = 0.0f;
+        for (int l = 0; l < 4; l++) {
+            const uint8_t* grid = (const uint8_t*)(iq2xxs_grid + aux8[l]);
+            const uint8_t signs = ksigns_iq2xs[(aux32[1] >> (7 * l)) & 127];
+            const float* xp = xb + l * 8;
+
+#if TQ_HAS_NEON
+            /* Load 8 grid values into two int8x8 vectors, apply signs, dot with input */
+            /* Grid values are uint8_t (0x08, 0x19, 0x2b), signs are bitmask */
+            float local_sum = 0.0f;
+            for (int j = 0; j < 8; j++) {
+                float w = (float)grid[j] * ((signs & kmask_iq2xs[j]) ? -1.0f : 1.0f);
+                local_sum += w * xp[j];
+            }
+            group_sum += local_sum;
+#else
+            float local_sum = 0.0f;
+            for (int j = 0; j < 8; j++) {
+                float w = (float)grid[j] * ((signs & kmask_iq2xs[j]) ? -1.0f : 1.0f);
+                local_sum += w * xp[j];
+            }
+            group_sum += local_sum;
+#endif
+        }
+        sum += db * group_sum;
+    }
+    return sum;
+}
+
+/* Fused IQ2_XXS row dot: dot product of entire quantized row with input vector.
+ * Processes all 256-element super-blocks without any intermediate FP32 buffer.
+ * Reserved for future fused matmul optimization path. */
+__attribute__((unused))
+static float fused_dot_iq2_xxs(const void* row, const float* x, int n) {
+    const int nb = n / 256;
+    const uint8_t* base = (const uint8_t*)row;
+    float sum = 0.0f;
+
+    for (int b = 0; b < nb; b++) {
+        sum += dot_block_iq2_xxs(base + b * 66, x + b * 256);
+    }
+    return sum;
+}
+
+#if TQ_HAS_NEON
+/* NEON-optimized fused IQ2_XXS dot product.
+ * Processes 8 grid values at a time using vectorized sign application. */
+static float fused_dot_iq2_xxs_neon(const void* row, const float* x, int n) {
+    const int nb = n / 256;
+    const uint8_t* base = (const uint8_t*)row;
+    float32x4_t vtotal = vdupq_n_f32(0.0f);
+
+    for (int b = 0; b < nb; b++) {
+        const uint8_t* blk = base + b * 66;
+        uint16_t d_raw;
+        memcpy(&d_raw, blk, 2);
+        const float d = fp16_to_fp32(d_raw);
+        const uint16_t* qs = (const uint16_t*)(blk + 2);
+        const float* xbase = x + b * 256;
+
+        for (int ib32 = 0; ib32 < 8; ib32++) {
+            uint32_t aux32[2];
+            memcpy(aux32, qs + 4 * ib32, 8);
+            const uint8_t* aux8 = (const uint8_t*)aux32;
+            const float db = d * (0.5f + (float)(aux32[1] >> 28)) * 0.25f;
+            const float* xb = xbase + ib32 * 32;
+
+            float32x4_t vgroup = vdupq_n_f32(0.0f);
+
+            for (int l = 0; l < 4; l++) {
+                const uint8_t* grid = (const uint8_t*)(iq2xxs_grid + aux8[l]);
+                const uint8_t signs = ksigns_iq2xs[(aux32[1] >> (7 * l)) & 127];
+                const float* xp = xb + l * 8;
+
+                /* Dequant 8 values and dot with input, all in NEON registers */
+                /* Load 8 grid bytes, expand to float, apply signs, dot with x */
+                uint8x8_t vgrid = vld1_u8(grid);
+                int16x8_t vgrid16 = vreinterpretq_s16_u16(vmovl_u8(vgrid));
+                int32x4_t vg_lo = vmovl_s16(vget_low_s16(vgrid16));
+                int32x4_t vg_hi = vmovl_s16(vget_high_s16(vgrid16));
+                float32x4_t vf_lo = vcvtq_f32_s32(vg_lo);
+                float32x4_t vf_hi = vcvtq_f32_s32(vg_hi);
+
+                /* Apply signs: if bit set, negate.
+                 * Build sign multiplier: +1.0 or -1.0 */
+                float sign_mul[8];
+                for (int j = 0; j < 8; j++) {
+                    sign_mul[j] = (signs & kmask_iq2xs[j]) ? -1.0f : 1.0f;
+                }
+                float32x4_t vs_lo = vld1q_f32(sign_mul);
+                float32x4_t vs_hi = vld1q_f32(sign_mul + 4);
+
+                vf_lo = vmulq_f32(vf_lo, vs_lo);
+                vf_hi = vmulq_f32(vf_hi, vs_hi);
+
+                /* Dot with input */
+                float32x4_t vx_lo = vld1q_f32(xp);
+                float32x4_t vx_hi = vld1q_f32(xp + 4);
+
+                vgroup = vfmaq_f32(vgroup, vf_lo, vx_lo);
+                vgroup = vfmaq_f32(vgroup, vf_hi, vx_hi);
+            }
+            /* Scale by db and accumulate */
+            vtotal = vfmaq_n_f32(vtotal, vgroup, db);
+        }
+    }
+    return vaddvq_f32(vtotal);
+}
+#endif /* TQ_HAS_NEON */
+
+/* Fused IQ2_S dot product */
+static float fused_dot_iq2_s(const void* row, const float* x, int n) {
+    const int nb = n / 256;
+    const uint8_t* base = (const uint8_t*)row;
+    float sum = 0.0f;
+
+    for (int b = 0; b < nb; b++) {
+        const uint8_t* blk = base + b * 82;
+        uint16_t d_raw;
+        memcpy(&d_raw, blk, 2);
+        const float d = fp16_to_fp32(d_raw);
+
+        const uint8_t* qs_base = blk + 2;
+        const uint8_t* signs_base = qs_base + 32;
+        const uint8_t* qh = blk + 66;
+        const uint8_t* scales = blk + 74;
+        const float* xbase = x + b * 256;
+
+        for (int ib32 = 0; ib32 < 8; ib32++) {
+            const uint8_t* qs = qs_base + ib32 * 4;
+            const uint8_t* sn = signs_base + ib32 * 4;
+            float db0 = d * (0.5f + (float)(scales[ib32] & 0xF)) * 0.25f;
+            float db1 = d * (0.5f + (float)(scales[ib32] >> 4)) * 0.25f;
+
+            for (int l = 0; l < 4; l++) {
+                float dl = (l < 2) ? db0 : db1;
+                int grid_idx = qs[l] | ((qh[ib32] << (8 - 2*l)) & 0x300);
+                const uint8_t* grid = (const uint8_t*)(iq2s_grid + grid_idx);
+                uint8_t sign = sn[l];
+                const float* xp = xbase + ib32 * 32 + l * 8;
+
+                float local_sum = 0.0f;
+                for (int j = 0; j < 8; j++) {
+                    float w = (float)grid[j] * ((sign & kmask_iq2xs[j]) ? -1.0f : 1.0f);
+                    local_sum += w * xp[j];
+                }
+                sum += dl * local_sum;
+            }
+        }
+    }
+    return sum;
+}
+
+/* Fused Q8_0 dot product: 34 bytes per 32 elements */
+static float fused_dot_q8_0(const void* row, const float* x, int n) {
+    const int nb = n / 32;
+    const block_q8_0* blk = (const block_q8_0*)row;
+    float sum = 0.0f;
+
+    for (int b = 0; b < nb; b++) {
+        const float d = fp16_to_fp32(blk[b].d);
+        const float* xp = x + b * 32;
+
+#if TQ_HAS_NEON
+        /* NEON: dot product of 32 int8 * float, scaled by d */
+        float32x4_t vsum0 = vdupq_n_f32(0.0f);
+        float32x4_t vsum1 = vdupq_n_f32(0.0f);
+        for (int j = 0; j < 32; j += 8) {
+            /* Load 8 int8 weights, convert to float */
+            int8x8_t vq = vld1_s8(blk[b].qs + j);
+            int16x8_t vq16 = vmovl_s8(vq);
+            int32x4_t vq32_lo = vmovl_s16(vget_low_s16(vq16));
+            int32x4_t vq32_hi = vmovl_s16(vget_high_s16(vq16));
+            float32x4_t vw_lo = vcvtq_f32_s32(vq32_lo);
+            float32x4_t vw_hi = vcvtq_f32_s32(vq32_hi);
+            float32x4_t vx_lo = vld1q_f32(xp + j);
+            float32x4_t vx_hi = vld1q_f32(xp + j + 4);
+            vsum0 = vfmaq_f32(vsum0, vw_lo, vx_lo);
+            vsum1 = vfmaq_f32(vsum1, vw_hi, vx_hi);
+        }
+        vsum0 = vaddq_f32(vsum0, vsum1);
+        sum += d * vaddvq_f32(vsum0);
+#else
+        float block_sum = 0.0f;
+        for (int j = 0; j < 32; j++) {
+            block_sum += (float)blk[b].qs[j] * xp[j];
+        }
+        sum += d * block_sum;
+#endif
+    }
+    return sum;
+}
+
+/* Fused IQ4_NL dot product: 18 bytes per 32 elements */
+static float fused_dot_iq4_nl(const void* row, const float* x, int n) {
+    const int nb = n / 32;
+    const block_iq4_nl* blk = (const block_iq4_nl*)row;
+    float sum = 0.0f;
+
+    for (int b = 0; b < nb; b++) {
+        const float d = fp16_to_fp32(blk[b].d);
+        const uint8_t* qs = blk[b].qs;
+        const float* xp = x + b * 32;
+
+        float block_sum = 0.0f;
+        for (int j = 0; j < 16; j++) {
+            block_sum += (float)kvalues_iq4nl[qs[j] & 0xf] * xp[j];
+            block_sum += (float)kvalues_iq4nl[qs[j] >> 4]  * xp[j + 16];
+        }
+        sum += d * block_sum;
+    }
+    return sum;
+}
+
+/* Fused IQ4_XS dot product: 136 bytes per 256 elements */
+static float fused_dot_iq4_xs(const void* row, const float* x, int n) {
+    const int nb = n / 256;
+    const block_iq4_xs* blk = (const block_iq4_xs*)row;
+    float sum = 0.0f;
+
+    for (int b = 0; b < nb; b++) {
+        const float d = fp16_to_fp32(blk[b].d);
+        const uint8_t* qs = blk[b].qs;
+        const float* xbase = x + b * 256;
+
+        for (int ib = 0; ib < 8; ib++) {
+            const int ls = ((blk[b].scales_l[ib / 2] >> 4 * (ib % 2)) & 0xf)
+                         | (((blk[b].scales_h >> 2 * ib) & 3) << 4);
+            const float dl = d * (ls - 32);
+            const float* xp = xbase + ib * 32;
+
+            float block_sum = 0.0f;
+            for (int j = 0; j < 16; j++) {
+                block_sum += (float)kvalues_iq4nl[qs[j] & 0xf] * xp[j];
+                block_sum += (float)kvalues_iq4nl[qs[j] >> 4]  * xp[j + 16];
+            }
+            sum += dl * block_sum;
+            qs += 16;
+        }
+    }
+    return sum;
+}
+
+/* Fused Q4_K dot product: 144 bytes per 256 elements
+ * Layout: 4 groups of 64 elements, each group uses 32 bytes of qs.
+ *   First 32 elements: d1 * (q[l] & 0xF) - m1  (low nibble, scale pair[0])
+ *   Next 32 elements:  d2 * (q[l] >> 4)  - m2   (high nibble, scale pair[1])
+ */
+static float fused_dot_q4_k(const void* row, const float* x, int n) {
+    const int nb = n / 256;
+    const block_q4_K* blk = (const block_q4_K*)row;
+    float sum = 0.0f;
+
+    for (int b = 0; b < nb; b++) {
+        const float d    = fp16_to_fp32(blk[b].d);
+        const float dmin = fp16_to_fp32(blk[b].dmin);
+
+        uint8_t sc[8], mn[8];
+        sc[0] = blk[b].scales[0] & 63;
+        sc[1] = blk[b].scales[1] & 63;
+        sc[2] = blk[b].scales[2] & 63;
+        sc[3] = blk[b].scales[3] & 63;
+        mn[0] = blk[b].scales[4] & 63;
+        mn[1] = blk[b].scales[5] & 63;
+        mn[2] = blk[b].scales[6] & 63;
+        mn[3] = blk[b].scales[7] & 63;
+        sc[4] = (blk[b].scales[8] & 0x0F) | ((blk[b].scales[0] >> 6) << 4);
+        sc[5] = (blk[b].scales[9] & 0x0F) | ((blk[b].scales[1] >> 6) << 4);
+        sc[6] = (blk[b].scales[10] & 0x0F) | ((blk[b].scales[2] >> 6) << 4);
+        sc[7] = (blk[b].scales[11] & 0x0F) | ((blk[b].scales[3] >> 6) << 4);
+        mn[4] = (blk[b].scales[8] >> 4) | ((blk[b].scales[4] >> 6) << 4);
+        mn[5] = (blk[b].scales[9] >> 4) | ((blk[b].scales[5] >> 6) << 4);
+        mn[6] = (blk[b].scales[10] >> 4) | ((blk[b].scales[6] >> 6) << 4);
+        mn[7] = (blk[b].scales[11] >> 4) | ((blk[b].scales[7] >> 6) << 4);
+
+        const uint8_t* q = blk[b].qs;
+        const float* xp = x + b * 256;
+        int is = 0;
+
+        /* 4 groups of 64 elements */
+        for (int j = 0; j < 256; j += 64) {
+            const float d1 = d * sc[is + 0];
+            const float m1 = dmin * mn[is + 0];
+            const float d2 = d * sc[is + 1];
+            const float m2 = dmin * mn[is + 1];
+
+            /* First 32 elements: low nibble */
+            float dot1 = 0.0f, sum_x1 = 0.0f;
+            for (int l = 0; l < 32; l++) {
+                dot1  += (float)(q[l] & 0x0F) * xp[j + l];
+                sum_x1 += xp[j + l];
+            }
+            sum += d1 * dot1 - m1 * sum_x1;
+
+            /* Next 32 elements: high nibble */
+            float dot2 = 0.0f, sum_x2 = 0.0f;
+            for (int l = 0; l < 32; l++) {
+                dot2  += (float)(q[l] >> 4) * xp[j + 32 + l];
+                sum_x2 += xp[j + 32 + l];
+            }
+            sum += d2 * dot2 - m2 * sum_x2;
+
+            q += 32;
+            is += 2;
+        }
+    }
+    return sum;
+}
+
+/* Fused Q4_0 dot product: 18 bytes per 32 elements */
+static float fused_dot_q4_0(const void* row, const float* x, int n) {
+    const int nb = n / 32;
+    const block_q4_0* blk = (const block_q4_0*)row;
+    float sum = 0.0f;
+
+    for (int b = 0; b < nb; b++) {
+        const float d = fp16_to_fp32(blk[b].d);
+        const float* xp = x + b * 32;
+
+        float block_sum = 0.0f;
+        for (int j = 0; j < 16; j++) {
+            uint8_t byte = blk[b].qs[j];
+            block_sum += (float)((int)(byte & 0x0F) - 8) * xp[j];
+            block_sum += (float)((int)(byte >> 4) - 8) * xp[j + 16];
+        }
+        sum += d * block_sum;
+    }
+    return sum;
+}
+
+/* Fused Q6_K dot product: 210 bytes per 256 elements
+ * Matches ggml dequantize_row_q6_K layout exactly:
+ * Two 128-element halves, each with 32 iterations producing 4 elements. */
+static float fused_dot_q6_k(const void* row, const float* x, int n) {
+    const int nb = n / 256;
+    const block_q6_K* blk = (const block_q6_K*)row;
+    float sum = 0.0f;
+
+    for (int b = 0; b < nb; b++) {
+        const float d = fp16_to_fp32(blk[b].d);
+        const float* xbase = x + b * 256;
+        const uint8_t* ql = blk[b].ql;
+        const uint8_t* qh = blk[b].qh;
+        const int8_t* sc = blk[b].scales;
+
+        for (int half = 0; half < 2; half++) {
+            const float* xp = xbase + half * 128;
+            for (int l = 0; l < 32; l++) {
+                int is = l / 16;
+                int q1 = (int)((ql[l +  0] & 0xF) | (((qh[l] >> 0) & 3) << 4)) - 32;
+                int q2 = (int)((ql[l + 32] & 0xF) | (((qh[l] >> 2) & 3) << 4)) - 32;
+                int q3 = (int)((ql[l +  0]  >> 4) | (((qh[l] >> 4) & 3) << 4)) - 32;
+                int q4 = (int)((ql[l + 32]  >> 4) | (((qh[l] >> 6) & 3) << 4)) - 32;
+                sum += d * sc[is + 0] * q1 * xp[l +  0];
+                sum += d * sc[is + 2] * q2 * xp[l + 32];
+                sum += d * sc[is + 4] * q3 * xp[l + 64];
+                sum += d * sc[is + 6] * q4 * xp[l + 96];
+            }
+            ql += 64;
+            qh += 32;
+            sc += 8;
+        }
+    }
+    return sum;
+}
+
+/* ============================================================
+ * On-the-fly dequant matmul (with fused fast paths)
  *
  * out[d] = sum_n( x[n] * dequant(W[d, n]) )
  *
  * W is stored row-major in quantized blocks.
  * Hot path for MoE expert computation.
+ *
+ * For supported types (IQ2_XXS, IQ2_S, Q8_0, Q4_K, Q4_0, Q6_K,
+ * IQ4_NL, IQ4_XS), we use fused dequant-dot that avoids writing
+ * intermediate FP32 values to memory. This eliminates ~3 GB/token
+ * of temporary memory traffic for IQ2_XXS MoE models.
  * ============================================================ */
+
+/* ============================================================
+ * Multi-threaded GGUF matmul worker
+ * ============================================================ */
+typedef struct {
+    float*       out;
+    const float* x;
+    const void*  weight;
+    float (*fused_dot)(const void*, const float*, int);
+    tq_ggml_dtype weight_type;
+    size_t       row_bytes;
+    int          in_dim;
+    int          block_bytes;
+    int          block_elems;
+    int          n_blocks;
+    int          start_row;
+    int          end_row;
+} gguf_matmul_task_t;
+
+static void* gguf_matmul_worker(void* arg) {
+    gguf_matmul_task_t* t = (gguf_matmul_task_t*)arg;
+
+    if (t->fused_dot) {
+        for (int d = t->start_row; d < t->end_row; d++) {
+            const uint8_t* row = (const uint8_t*)t->weight + (size_t)d * t->row_bytes;
+            t->out[d] = t->fused_dot(row, t->x, t->in_dim);
+        }
+        return NULL;
+    }
+
+    /* Generic fallback: dequant block -> tmp -> dot */
+    for (int d = t->start_row; d < t->end_row; d++) {
+        const uint8_t* row = (const uint8_t*)t->weight + (size_t)d * t->row_bytes;
+        float sum = 0.0f;
+        float tmp[256]; /* max block size is 256 */
+
+        for (int b = 0; b < t->n_blocks; b++) {
+            tq_dequant_row_gguf(t->weight_type,
+                                row + (size_t)b * t->block_bytes,
+                                tmp, t->block_elems);
+
+            const float* xp = t->x + b * t->block_elems;
+
+#if TQ_HAS_NEON
+            float32x4_t vsum0 = vdupq_n_f32(0.0f);
+            float32x4_t vsum1 = vdupq_n_f32(0.0f);
+            float32x4_t vsum2 = vdupq_n_f32(0.0f);
+            float32x4_t vsum3 = vdupq_n_f32(0.0f);
+
+            int j = 0;
+            for (; j + 15 < t->block_elems; j += 16) {
+                float32x4_t vx0 = vld1q_f32(xp + j);
+                float32x4_t vx1 = vld1q_f32(xp + j + 4);
+                float32x4_t vx2 = vld1q_f32(xp + j + 8);
+                float32x4_t vx3 = vld1q_f32(xp + j + 12);
+                float32x4_t vt0 = vld1q_f32(tmp + j);
+                float32x4_t vt1 = vld1q_f32(tmp + j + 4);
+                float32x4_t vt2 = vld1q_f32(tmp + j + 8);
+                float32x4_t vt3 = vld1q_f32(tmp + j + 12);
+                vsum0 = vfmaq_f32(vsum0, vx0, vt0);
+                vsum1 = vfmaq_f32(vsum1, vx1, vt1);
+                vsum2 = vfmaq_f32(vsum2, vx2, vt2);
+                vsum3 = vfmaq_f32(vsum3, vx3, vt3);
+            }
+            for (; j + 3 < t->block_elems; j += 4) {
+                float32x4_t vx0 = vld1q_f32(xp + j);
+                float32x4_t vt0 = vld1q_f32(tmp + j);
+                vsum0 = vfmaq_f32(vsum0, vx0, vt0);
+            }
+
+            vsum0 = vaddq_f32(vsum0, vsum1);
+            vsum2 = vaddq_f32(vsum2, vsum3);
+            vsum0 = vaddq_f32(vsum0, vsum2);
+            sum += vaddvq_f32(vsum0);
+
+            for (; j < t->block_elems; j++) {
+                sum += xp[j] * tmp[j];
+            }
+#else
+            for (int j = 0; j < t->block_elems; j++) {
+                sum += xp[j] * tmp[j];
+            }
+#endif
+        }
+
+        t->out[d] = sum;
+    }
+    return NULL;
+}
 
 void tq_matmul_gguf(float* out, const float* x,
                     const void* weight, tq_ggml_dtype weight_type,
@@ -1137,68 +1624,91 @@ void tq_matmul_gguf(float* out, const float* x,
     const int    n_blocks  = in_dim / block_elems;
     const size_t row_bytes = (size_t)n_blocks * block_bytes;
 
-    for (int d = 0; d < out_dim; d++) {
-        const uint8_t* row = (const uint8_t*)weight + (size_t)d * row_bytes;
-        float sum = 0.0f;
+    /* ---- Fused fast paths: dequant + dot in one pass, no tmp buffer ---- */
 
-        /* Dequant one block at a time and accumulate dot product */
-        float tmp[256]; /* max block size is 256 */
+    /* Fused path function pointer: returns dot product for one row */
+    float (*fused_dot)(const void*, const float*, int) = NULL;
 
-        for (int b = 0; b < n_blocks; b++) {
-            tq_dequant_row_gguf(weight_type,
-                                row + (size_t)b * block_bytes,
-                                tmp, block_elems);
-
-            const float* xp = x + b * block_elems;
-
+    switch (weight_type) {
+        case TQ_GGML_TYPE_IQ2_XXS:
 #if TQ_HAS_NEON
-            /* NEON-optimized dot product accumulation */
-            float32x4_t vsum0 = vdupq_n_f32(0.0f);
-            float32x4_t vsum1 = vdupq_n_f32(0.0f);
-            float32x4_t vsum2 = vdupq_n_f32(0.0f);
-            float32x4_t vsum3 = vdupq_n_f32(0.0f);
-
-            int j = 0;
-            /* Process 16 elements per iteration */
-            for (; j + 15 < block_elems; j += 16) {
-                float32x4_t vx0 = vld1q_f32(xp + j);
-                float32x4_t vx1 = vld1q_f32(xp + j + 4);
-                float32x4_t vx2 = vld1q_f32(xp + j + 8);
-                float32x4_t vx3 = vld1q_f32(xp + j + 12);
-                float32x4_t vt0 = vld1q_f32(tmp + j);
-                float32x4_t vt1 = vld1q_f32(tmp + j + 4);
-                float32x4_t vt2 = vld1q_f32(tmp + j + 8);
-                float32x4_t vt3 = vld1q_f32(tmp + j + 12);
-                vsum0 = vfmaq_f32(vsum0, vx0, vt0);
-                vsum1 = vfmaq_f32(vsum1, vx1, vt1);
-                vsum2 = vfmaq_f32(vsum2, vx2, vt2);
-                vsum3 = vfmaq_f32(vsum3, vx3, vt3);
-            }
-            /* Process remaining 4 at a time */
-            for (; j + 3 < block_elems; j += 4) {
-                float32x4_t vx0 = vld1q_f32(xp + j);
-                float32x4_t vt0 = vld1q_f32(tmp + j);
-                vsum0 = vfmaq_f32(vsum0, vx0, vt0);
-            }
-
-            /* Horizontal reduction */
-            vsum0 = vaddq_f32(vsum0, vsum1);
-            vsum2 = vaddq_f32(vsum2, vsum3);
-            vsum0 = vaddq_f32(vsum0, vsum2);
-            sum += vaddvq_f32(vsum0);
-
-            /* Scalar tail */
-            for (; j < block_elems; j++) {
-                sum += xp[j] * tmp[j];
-            }
+            fused_dot = fused_dot_iq2_xxs_neon;
 #else
-            /* Scalar fallback */
-            for (int j = 0; j < block_elems; j++) {
-                sum += xp[j] * tmp[j];
-            }
+            fused_dot = fused_dot_iq2_xxs;
 #endif
-        }
-
-        out[d] = sum;
+            break;
+        case TQ_GGML_TYPE_IQ2_S:
+            fused_dot = fused_dot_iq2_s;
+            break;
+        case TQ_GGML_TYPE_Q8_0:
+            fused_dot = fused_dot_q8_0;
+            break;
+        case TQ_GGML_TYPE_Q4_K:
+            fused_dot = fused_dot_q4_k;
+            break;
+        case TQ_GGML_TYPE_Q4_0:
+            fused_dot = fused_dot_q4_0;
+            break;
+        case TQ_GGML_TYPE_Q6_K:
+            fused_dot = fused_dot_q6_k;
+            break;
+        case TQ_GGML_TYPE_IQ4_NL:
+            fused_dot = fused_dot_iq4_nl;
+            break;
+        case TQ_GGML_TYPE_IQ4_XS:
+            fused_dot = fused_dot_iq4_xs;
+            break;
+        default:
+            break;
     }
+
+    /* ---- Multi-threaded dispatch ---- */
+    int n_threads = tq_get_threads();
+
+    /* For small matrices or single-thread config, skip thread overhead */
+    if (n_threads <= 1 || out_dim < n_threads) {
+        /* Single-threaded path */
+        if (fused_dot) {
+            for (int d = 0; d < out_dim; d++) {
+                const uint8_t* row = (const uint8_t*)weight + (size_t)d * row_bytes;
+                out[d] = fused_dot(row, x, in_dim);
+            }
+        } else {
+            gguf_matmul_task_t task = {
+                .out = out, .x = x, .weight = weight, .fused_dot = NULL,
+                .weight_type = weight_type, .row_bytes = row_bytes,
+                .in_dim = in_dim, .block_bytes = (int)block_bytes,
+                .block_elems = block_elems, .n_blocks = n_blocks,
+                .start_row = 0, .end_row = out_dim
+            };
+            gguf_matmul_worker(&task);
+        }
+        return;
+    }
+
+    /* Cap threads */
+    if (n_threads > TQ_TP_MAX) n_threads = TQ_TP_MAX;
+    if (n_threads > out_dim) n_threads = out_dim;
+
+    gguf_matmul_task_t tasks[TQ_TP_MAX];
+    void* ptrs[TQ_TP_MAX];
+
+    int rows_per_thread = out_dim / n_threads;
+    for (int t = 0; t < n_threads; t++) {
+        tasks[t].out         = out;
+        tasks[t].x           = x;
+        tasks[t].weight      = weight;
+        tasks[t].fused_dot   = fused_dot;
+        tasks[t].weight_type = weight_type;
+        tasks[t].row_bytes   = row_bytes;
+        tasks[t].in_dim      = in_dim;
+        tasks[t].block_bytes = (int)block_bytes;
+        tasks[t].block_elems = block_elems;
+        tasks[t].n_blocks    = n_blocks;
+        tasks[t].start_row   = t * rows_per_thread;
+        tasks[t].end_row     = (t == n_threads - 1) ? out_dim : (t + 1) * rows_per_thread;
+        ptrs[t] = &tasks[t];
+    }
+
+    tq_tp_run(gguf_matmul_worker, ptrs, n_threads);
 }

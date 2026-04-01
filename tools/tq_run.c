@@ -89,6 +89,7 @@ static void print_usage(const char* prog) {
     fprintf(stderr, "  --ppl <file>     Compute perplexity on text file (teacher-forced)\n");
     fprintf(stderr, "  --bench-memory   Benchmark memory bandwidth at varying context lengths\n");
     fprintf(stderr, "  --bench-prefill  Benchmark prefill speed with/without KV quantization\n");
+    fprintf(stderr, "  --ctx <N>        Override max context length (default: 4096)\n");
 }
 
 int main(int argc, char** argv) {
@@ -118,6 +119,7 @@ int main(int argc, char** argv) {
     const char* ppl_file = NULL;
     int bench_memory = 0;
     int bench_prefill = 0;
+    int override_ctx = 0;  /* 0 = use model default (capped at 4096) */
 
     for (int i = 1; i < argc; i++) {
         if (argv[i][0] != '-') {
@@ -188,6 +190,8 @@ int main(int argc, char** argv) {
             bench_memory = 1;
         } else if (strcmp(argv[i], "--bench-prefill") == 0) {
             bench_prefill = 1;
+        } else if (strcmp(argv[i], "--ctx") == 0 && i + 1 < argc) {
+            override_ctx = atoi(argv[++i]);
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             return 0;
@@ -208,8 +212,14 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    /* Print model info */
+    /* Override context length if requested */
     tq_model_config_t* c = &model->config;
+    if (override_ctx > 0) {
+        fprintf(stderr, "Context length override: %d → %d\n", c->max_seq_len, override_ctx);
+        c->max_seq_len = override_ctx;
+    }
+
+    /* Print model info */
     fprintf(stderr, "Model: %d layers, dim=%d, heads=%d/%d, head_dim=%d, vocab=%d, inter=%d\n",
             c->n_layers, c->hidden_dim, c->n_heads, c->n_kv_heads,
             c->head_dim, c->vocab_size, c->intermediate_dim);
