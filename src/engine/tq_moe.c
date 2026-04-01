@@ -171,6 +171,11 @@ void tq_moe_forward(const tq_moe_layer_t* layer,
         if (eid < 0 || eid >= config->num_experts) continue; /* safety check */
         const tq_expert_weights_t* exp = &layer->experts[eid];
 
+        /* Batch gate+up matmuls into one GPU command buffer.
+         * These are independent (same input, different weights/outputs)
+         * so they can execute as a single GPU dispatch. */
+        tq_metal_batch_begin_if_available();
+
         /* gate = input @ w_gate^T   -> [expert_dim] */
         tq_matmul_gguf(state->expert_hb, input,
                        exp->w_gate, exp->gate_type,
@@ -180,6 +185,9 @@ void tq_moe_forward(const tq_moe_layer_t* layer,
         tq_matmul_gguf(state->expert_hb2, input,
                        exp->w_up, exp->up_type,
                        expert_dim, hidden_dim);
+
+        /* Flush: commit + wait + copy results before CPU-side SwiGLU */
+        tq_metal_batch_flush_if_available();
 
         /* SwiGLU activation: hb = silu(gate) * up */
         for (int i = 0; i < expert_dim; i++) {
@@ -211,6 +219,9 @@ void tq_moe_forward(const tq_moe_layer_t* layer,
             shared_gate_val = 1.0f / (1.0f + expf(-dot)); /* sigmoid */
         }
 
+        /* Batch shared expert gate+up into one GPU command buffer */
+        tq_metal_batch_begin_if_available();
+
         /* SwiGLU for shared expert */
         tq_matmul_gguf(state->expert_hb, input,
                        layer->shared_expert.w_gate, layer->shared_expert.gate_type,
@@ -219,6 +230,9 @@ void tq_moe_forward(const tq_moe_layer_t* layer,
         tq_matmul_gguf(state->expert_hb2, input,
                        layer->shared_expert.w_up, layer->shared_expert.up_type,
                        shared_dim, hidden_dim);
+
+        /* Flush before CPU-side SwiGLU activation */
+        tq_metal_batch_flush_if_available();
 
         for (int i = 0; i < shared_dim; i++) {
             float g = state->expert_hb[i];

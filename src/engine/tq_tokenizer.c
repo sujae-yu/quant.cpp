@@ -1084,7 +1084,7 @@ static int encode_byte_to_bpe_char(unsigned char byte, char* out) {
     int direct = 0;
     if (byte >= 33 && byte <= 126) direct = 1;
     if (byte >= 161 && byte <= 172) direct = 1;
-    if (byte >= 174 && byte <= 255) direct = 1;
+    if (byte >= 174) direct = 1; /* upper range always fits in uint8 */
 
     if (direct) {
         out[0] = (char)byte;

@@ -188,6 +188,28 @@ void tq_matmul_gguf(float* out, const float* x,
                     int out_dim, int in_dim);
 
 /* ============================================================
+ * Metal GPU batch mode
+ *
+ * Batch consecutive matmul dispatches into a single GPU command
+ * buffer to reduce per-dispatch overhead. Critical for MoE models
+ * with hundreds of small matmuls per token.
+ *
+ * Usage pattern:
+ *   tq_metal_batch_begin_if_available();
+ *   tq_matmul_gguf(gate_out, ...);  // encoded, not dispatched
+ *   tq_matmul_gguf(up_out, ...);    // encoded, not dispatched
+ *   tq_metal_batch_flush_if_available();  // dispatch + wait + copy
+ *   // gate_out and up_out are now valid
+ * ============================================================ */
+
+/* Begin batching Metal matmul encodes (no-op if Metal unavailable) */
+void tq_metal_batch_begin_if_available(void);
+/* Flush: commit command buffer, wait, copy all results (no-op if not batching) */
+void tq_metal_batch_flush_if_available(void);
+/* End batch mode and flush (no-op if not batching) */
+void tq_metal_batch_end_if_available(void);
+
+/* ============================================================
  * MoE (Mixture of Experts) support
  * ============================================================ */
 

@@ -11,6 +11,7 @@
 #include <gtest/gtest.h>
 #include <cmath>
 #include <cstdlib>
+#include <climits>
 #include <vector>
 #include <numeric>
 #include <algorithm>

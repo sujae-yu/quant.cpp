@@ -810,7 +810,12 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
 
     /* QKV projections.
      * When attn_output_gate is enabled, wq has shape [2*n_heads*head_dim, dim]
-     * and outputs [Q, gate_q] concatenated. We project into xb2 as temp. */
+     * and outputs [Q, gate_q] concatenated. We project into xb2 as temp.
+     *
+     * Batch Q+K+V GPU dispatches into one command buffer when using GGUF path.
+     * This reduces Metal dispatch overhead from 3 commits to 1. */
+    if (has_gguf) tq_metal_batch_begin_if_available();
+
     float* gate_q = NULL;
     if (c->attn_output_gate) {
         int qg_dim = n_heads * head_dim * 2;
@@ -872,6 +877,9 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
     } else {
         tq_matmul(s->v, s->xb, layer->wv, kv_dim, dim);
     }
+
+    /* Flush batched Q+K+V GPU dispatches before using results */
+    if (has_gguf) tq_metal_batch_flush_if_available();
 
     /* Apply QK-norm if present (per-head RMSNorm) */
     if (layer->q_norm) {
@@ -1522,8 +1530,11 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
                 tq_matmul_q4_preq(s->hb2, layer->w_up_q4, layer->w_up_q4s,
                                    s->xb_q8, s->xb_q8s, c->intermediate_dim, dim);
             } else if (layer->gguf_w_gate) {
+                /* Batch gate+up into one GPU command buffer (2 matmuls, 1 dispatch) */
+                tq_metal_batch_begin_if_available();
                 tq_matmul_gguf(s->hb, s->xb, layer->gguf_w_gate, layer->gguf_w_gate_type, c->intermediate_dim, dim);
                 tq_matmul_gguf(s->hb2, s->xb, layer->gguf_w_up, layer->gguf_w_up_type, c->intermediate_dim, dim);
+                tq_metal_batch_flush_if_available();
             } else {
                 if (layer->w_gate_q8) {
                     tq_matmul_q8(s->hb, s->xb, layer->w_gate_q8, layer->w_gate_q8s, c->intermediate_dim, dim);

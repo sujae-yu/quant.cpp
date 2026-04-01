@@ -153,7 +153,7 @@ static void compute_qjl_signs(const float* residual, uint8_t* signs,
 static void dequant_mse_rotated_2bit(const block_tq_turbo_kv_3b* block,
                                       float* rotated, int dim) {
     float inv_std = sqrtf((float)dim);
-    uint8_t indices[TQ_BK];
+    uint8_t indices[TQ_BK] = {0};
     unpack_2bit(block->mse_indices, indices, dim);
     tq_codebook_dequantize(indices, rotated, dim, 2, inv_std);
 }
@@ -161,7 +161,7 @@ static void dequant_mse_rotated_2bit(const block_tq_turbo_kv_3b* block,
 static void dequant_mse_rotated_3bit(const block_tq_turbo_kv_4b* block,
                                       float* rotated, int dim) {
     float inv_std = sqrtf((float)dim);
-    uint8_t indices[TQ_BK];
+    uint8_t indices[TQ_BK] = {0};
     unpack_3bit(block->mse_indices, indices, dim);
     tq_codebook_dequantize(indices, rotated, dim, 3, inv_std);
 }
@@ -728,7 +728,7 @@ void tq_turbo_kv_1b_attention_ref(const float* query, const void* kv_cache,
     /* Step 3: Extract query sign bits */
     int sign_bytes = dim / 8;
     uint8_t q_signs[TQ_BK / 8];
-    memset(q_signs, 0, (size_t)sign_bytes);
+    if (sign_bytes > 0) memset(q_signs, 0, (size_t)sign_bytes);
     for (int i = 0; i < dim; i++) {
         if (q_rot[i] > 0.0f) {
             q_signs[i / 8] |= (uint8_t)(1 << (i % 8));

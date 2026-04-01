@@ -1723,3 +1723,41 @@ void tq_matmul_gguf(float* out, const float* x,
 
     tq_tp_run(gguf_matmul_worker, ptrs, n_threads);
 }
+
+/* ============================================================
+ * Metal batch mode wrappers
+ *
+ * These forward to Metal batch API when available, otherwise no-op.
+ * The transformer/MoE code calls these to batch consecutive matmuls
+ * into a single GPU command buffer, reducing dispatch overhead.
+ * ============================================================ */
+
+void tq_metal_batch_begin_if_available(void) {
+#ifdef TQ_HAS_METAL
+    extern int tq_metal_available(void);
+    extern void tq_metal_batch_begin(void);
+    if (tq_metal_available()) {
+        tq_metal_batch_begin();
+    }
+#endif
+}
+
+void tq_metal_batch_flush_if_available(void) {
+#ifdef TQ_HAS_METAL
+    extern void tq_metal_batch_flush(void);
+    extern int tq_metal_batch_active(void);
+    if (tq_metal_batch_active()) {
+        tq_metal_batch_flush();
+    }
+#endif
+}
+
+void tq_metal_batch_end_if_available(void) {
+#ifdef TQ_HAS_METAL
+    extern void tq_metal_batch_end(void);
+    extern int tq_metal_batch_active(void);
+    if (tq_metal_batch_active()) {
+        tq_metal_batch_end();
+    }
+#endif
+}

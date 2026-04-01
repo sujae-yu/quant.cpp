@@ -60,8 +60,8 @@ int main(int argc, char** argv) {
     if (!model_path) {
         const char* home = getenv("HOME");
         if (home) {
-            static char auto_model[1024];
-            static char auto_tok[1024];
+            static char auto_model[4096];
+            static char auto_tok[4096];
             /* Try common Qwen3.5-0.8B cache locations */
             const char* base = "/.cache/huggingface/hub/models--Qwen--Qwen3.5-0.8B/snapshots";
             snprintf(auto_model, sizeof(auto_model), "%s%s", home, base);
@@ -117,8 +117,8 @@ int main(int argc, char** argv) {
     if (!model_path) {
         const char* home = getenv("HOME");
         if (home) {
-            static char auto_model_g[1024];
-            static char auto_tok_g[1024];
+            static char auto_model_g[4096];
+            static char auto_tok_g[4096];
             /* Try Gemma3 270M cache locations */
             const char* gemma_bases[] = {
                 "/.cache/huggingface/hub/models--unsloth--gemma-3-270m-it/snapshots",
