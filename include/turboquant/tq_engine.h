@@ -245,6 +245,15 @@ typedef struct {
     void* quant_key_buf;    /* workspace for quantized keys */
     float* quant_score_buf; /* workspace for quantized attention scores */
 
+    /* KV profile statistics (opt-in via profile_kv flag) */
+    int profile_kv;             /* 1 = collect KV statistics per layer */
+    int profile_kv_count;       /* number of tokens accumulated */
+    /* Per-layer stats: [n_layers * 8] = mean/std/skew/kurt before RHT, then after RHT */
+    float* profile_stats;       /* allocated when profile_kv=1 */
+    /* Running accumulators for incremental computation:
+     * [n_layers * 8] = sum, sum_sq, sum_cube, sum_quad (pre/post RHT) */
+    double* profile_accum;
+
     /* Quantized KV cache for integer attention */
     void* quant_key_cache;   /* [n_layers, max_seq_len, n_kv_heads, blocks_per_head * type_size] */
     size_t quant_kv_stride;  /* bytes per layer in quant_key_cache */

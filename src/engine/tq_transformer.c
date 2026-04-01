@@ -890,6 +890,32 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
     float* key_cache_layer = s->key_cache + l * kv_layer_stride;
     memcpy(key_cache_layer + (size_t)pos * kv_dim, s->k, kv_dim * sizeof(float));
 
+    /* KV profiling: accumulate pre/post-RHT statistics for this layer's keys */
+    if (s->profile_kv && s->profile_accum) {
+        /* Accumulate pre-RHT stats from s->k (first KV head only for efficiency) */
+        double* acc = s->profile_accum + (size_t)l * 8;
+        for (int i = 0; i < head_dim; i++) {
+            double v = (double)s->k[i];
+            acc[0] += v;       /* sum (pre-RHT) */
+            acc[1] += v * v;   /* sum_sq */
+            acc[2] += v * v * v; /* sum_cube */
+            acc[3] += v * v * v * v; /* sum_quad */
+        }
+        /* Compute post-RHT: apply RHT to a copy */
+        float k_rht[TQ_BK];
+        int rd = head_dim;
+        if (rd > TQ_BK) rd = TQ_BK;
+        memcpy(k_rht, s->k, (size_t)rd * sizeof(float));
+        tq_rht_transform(k_rht, rd, 0x12345678u);
+        for (int i = 0; i < rd; i++) {
+            double v = (double)k_rht[i];
+            acc[4] += v;       /* sum (post-RHT) */
+            acc[5] += v * v;   /* sum_sq */
+            acc[6] += v * v * v; /* sum_cube */
+            acc[7] += v * v * v * v; /* sum_quad */
+        }
+    }
+
     /* Store V: Q4/Q2 if enabled, FP16 if KV quant enabled, otherwise FP32 */
     int max_seq = c->max_seq_len;
     if (s->value_quant_bits == 4) {
@@ -1333,6 +1359,11 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
         tq_matmul_bf16(s->logits, s->x, model->output_weight_bf16, c->vocab_size, dim);
     } else {
         tq_matmul(s->logits, s->x, model->output_weight, c->vocab_size, dim);
+    }
+
+    /* Increment profile token count if profiling is active */
+    if (s->profile_kv) {
+        s->profile_kv_count++;
     }
 
     return s->logits;
