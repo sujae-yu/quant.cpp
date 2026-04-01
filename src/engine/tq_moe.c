@@ -476,6 +476,112 @@ void tq_moe_forward(const tq_moe_layer_t* layer,
     /* Advance the global token counter for LRU tracking */
     g_token_counter++;
 
+    /* Step 2.5: Try fused MoE Metal dispatch (3 dispatches for all experts).
+     * This replaces the entire per-expert loop below when available.
+     * Requires: all expert weights are same IQ2_XXS type and contiguous in mmap. */
+#ifdef TQ_HAS_METAL
+    extern int tq_metal_moe_available(void);
+    extern int tq_metal_moe_forward(
+        const float* input, float* output,
+        const void* weight_base, size_t weight_size,
+        const uint64_t* gate_offsets, const uint64_t* up_offsets, const uint64_t* down_offsets,
+        const int* active_expert_ids, const float* expert_routing_weights,
+        int num_active, int expert_dim, int hidden_dim, int num_experts_total, int weight_type,
+        const int* gate_types, const int* up_types, const int* down_types);
+
+    /* Fused Metal MoE DISABLED: GPU kernel hangs on IQ2_S expert weights.
+     * Keep code for future fix — re-enable by removing the 'if (0 && ...)'. */
+    if (0 && tq_metal_moe_available() && num_active > 0) {
+        /* Check that all active experts use IQ2_XXS and have valid weights */
+        int can_fuse = 1;
+        const void* base_ptr = NULL;
+        size_t base_size = 0;
+
+        /* Find the lowest and highest addressed weight to determine the
+         * weight region span for the zero-copy Metal buffer. */
+        uintptr_t min_addr = ~(uintptr_t)0;
+        uintptr_t max_addr = 0;
+
+        for (int k = 0; k < num_active; k++) {
+            int eid = state->top_experts[k];
+            if (eid < 0 || eid >= config->num_experts) { can_fuse = 0; break; }
+            const tq_expert_weights_t* exp = &layer->experts[eid];
+            if (exp->q4_converted) {
+                can_fuse = 0; break;
+            }
+            /* Accept IQ2_XXS (16) and IQ2_S (22) — UD models use mixed types */
+            int gt = exp->gate_type, ut = exp->up_type, dt = exp->down_type;
+            int is_iq2 = (gt == TQ_GGML_TYPE_IQ2_XXS || gt == TQ_GGML_TYPE_IQ2_S) &&
+                         (ut == TQ_GGML_TYPE_IQ2_XXS || ut == TQ_GGML_TYPE_IQ2_S) &&
+                         (dt == TQ_GGML_TYPE_IQ2_XXS || dt == TQ_GGML_TYPE_IQ2_S);
+            if (!is_iq2) {
+                can_fuse = 0; break;
+            }
+            if (!exp->w_gate || !exp->w_up || !exp->w_down) { can_fuse = 0; break; }
+
+            /* Track min/max addresses to compute base and size */
+            uintptr_t addrs[3] = {
+                (uintptr_t)exp->w_gate, (uintptr_t)exp->w_up, (uintptr_t)exp->w_down
+            };
+            /* gate/up: [expert_dim, hidden_dim], down: [hidden_dim, expert_dim]
+             * Byte sizes depend on quant type: IQ2_XXS=66, IQ2_S=82 per 256 elements */
+            int gate_blk = (gt == TQ_GGML_TYPE_IQ2_S) ? 82 : 66;
+            int up_blk   = (ut == TQ_GGML_TYPE_IQ2_S) ? 82 : 66;
+            int down_blk = (dt == TQ_GGML_TYPE_IQ2_S) ? 82 : 66;
+            size_t gate_bytes = (size_t)(expert_dim * (hidden_dim / 256)) * gate_blk;
+            size_t up_bytes   = (size_t)(expert_dim * (hidden_dim / 256)) * up_blk;
+            size_t down_bytes = (size_t)(hidden_dim * (expert_dim / 256)) * down_blk;
+            size_t sizes[3] = { gate_bytes, up_bytes, down_bytes };
+
+            for (int i = 0; i < 3; i++) {
+                if (addrs[i] < min_addr) min_addr = addrs[i];
+                uintptr_t end = addrs[i] + sizes[i];
+                if (end > max_addr) max_addr = end;
+            }
+        }
+
+        if (can_fuse && min_addr < max_addr) {
+            base_ptr = (const void*)min_addr;
+            base_size = (size_t)(max_addr - min_addr);
+
+            /* Compute byte offsets from base for each active expert */
+            uint64_t gate_offs[8], up_offs[8], down_offs[8];
+            int expert_ids[8];
+            float routing_w[8];
+            int per_gate_types[8], per_up_types[8], per_down_types[8];
+
+            for (int k = 0; k < num_active; k++) {
+                int eid = state->top_experts[k];
+                const tq_expert_weights_t* exp = &layer->experts[eid];
+                expert_ids[k] = eid;
+                routing_w[k] = state->expert_weights[k];
+                gate_offs[k] = (uint64_t)((uintptr_t)exp->w_gate - min_addr);
+                up_offs[k]   = (uint64_t)((uintptr_t)exp->w_up   - min_addr);
+                down_offs[k] = (uint64_t)((uintptr_t)exp->w_down - min_addr);
+                per_gate_types[k] = (int)exp->gate_type;
+                per_up_types[k]   = (int)exp->up_type;
+                per_down_types[k] = (int)exp->down_type;
+            }
+
+            int rc = tq_metal_moe_forward(
+                input, output,
+                base_ptr, base_size,
+                gate_offs, up_offs, down_offs,
+                expert_ids, routing_w,
+                num_active, expert_dim, hidden_dim,
+                config->num_experts,
+                0, /* weight_type=0 means use per-expert types */
+                per_gate_types, per_up_types, per_down_types);
+
+            if (rc == 0) {
+                /* Fused MoE succeeded — skip to shared expert */
+                goto moe_shared_expert;
+            }
+            /* else: fall through to per-expert CPU path */
+        }
+    }
+#endif /* TQ_HAS_METAL */
+
     /* Step 3: For each selected expert, compute SwiGLU FFN and accumulate */
     for (int k = 0; k < num_active; k++) {
         int eid = state->top_experts[k];
@@ -559,6 +665,9 @@ void tq_moe_forward(const tq_moe_layer_t* layer,
             output[i] += w * state->expert_out[i];
     }
 
+#ifdef TQ_HAS_METAL
+moe_shared_expert:
+#endif
     /* Step 4: Shared expert (always-active, if present) */
     if (config->has_shared_expert) {
         int shared_dim = config->shared_expert_intermediate_dim;

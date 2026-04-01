@@ -41,6 +41,11 @@ static id<MTLComputePipelineState> tq_pipe_matmul_iq2_xxs  = nil;
 static id<MTLComputePipelineState> tq_pipe_matmul_q8_0     = nil;
 static id<MTLComputePipelineState> tq_pipe_matmul_q4_k     = nil;
 
+/* Cached pipelines — fused MoE kernels */
+static id<MTLComputePipelineState> tq_pipe_moe_gate_up     = nil;
+static id<MTLComputePipelineState> tq_pipe_moe_swiglu      = nil;
+static id<MTLComputePipelineState> tq_pipe_moe_down_accum  = nil;
+
 /* ============================================================
  * Zero-copy weight buffer cache
  *
@@ -235,7 +240,14 @@ int tq_init_metal_backend(void) {
 
             if (sourceCode) {
                 MTLCompileOptions *opts = [[MTLCompileOptions alloc] init];
-                opts.fastMathEnabled = YES;
+                if (@available(macOS 15.0, *)) {
+                    opts.mathMode = MTLMathModeFast;
+                } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+                    opts.fastMathEnabled = YES;
+#pragma clang diagnostic pop
+                }
                 tq_mtl_library = [tq_mtl_device newLibraryWithSource:sourceCode
                                                              options:opts
                                                                error:&error];
@@ -274,6 +286,68 @@ int tq_init_metal_backend(void) {
         tq_pipe_matmul_iq2_xxs = makePipe(@"matmul_iq2_xxs");
         tq_pipe_matmul_q8_0 = makePipe(@"matmul_q8_0");
         tq_pipe_matmul_q4_k = makePipe(@"matmul_q4_k");
+
+        /* Create compute pipelines — fused MoE.
+         * If the MoE kernel functions aren't in the main library
+         * (i.e., compiled from tq_matmul.metal only), load and compile
+         * the MoE shader source separately, then extract pipelines. */
+        tq_pipe_moe_gate_up    = makePipe(@"moe_gate_up_fused");
+        tq_pipe_moe_swiglu     = makePipe(@"moe_swiglu");
+        tq_pipe_moe_down_accum = makePipe(@"moe_down_accum");
+
+        if (!tq_pipe_moe_gate_up) {
+            /* MoE kernels not in main library — try separate compile */
+            NSString *exePath2 = [[NSProcessInfo processInfo] arguments][0];
+            NSString *exeDir2 = [exePath2 stringByDeletingLastPathComponent];
+            NSArray *moePaths = @[
+                [exeDir2 stringByAppendingPathComponent:@"../src/backend/metal/tq_moe_kernel.metal"],
+                @"src/backend/metal/tq_moe_kernel.metal",
+                @"../src/backend/metal/tq_moe_kernel.metal",
+            ];
+            for (NSString *moePath in moePaths) {
+                NSString *moeSrc = [NSString stringWithContentsOfFile:moePath
+                                                            encoding:NSUTF8StringEncoding
+                                                               error:nil];
+                if (moeSrc) {
+                    MTLCompileOptions *moeOpts = [[MTLCompileOptions alloc] init];
+                    if (@available(macOS 15.0, *)) {
+                        moeOpts.mathMode = MTLMathModeFast;
+                    } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+                        moeOpts.fastMathEnabled = YES;
+#pragma clang diagnostic pop
+                    }
+                    NSError *moeErr = nil;
+                    id<MTLLibrary> moeLib = [tq_mtl_device newLibraryWithSource:moeSrc
+                                                                        options:moeOpts
+                                                                          error:&moeErr];
+                    if (moeLib) {
+                        id<MTLComputePipelineState> (^moePipe)(NSString *) = ^(NSString *name) {
+                            id<MTLFunction> func = [moeLib newFunctionWithName:name];
+                            if (!func) return (id<MTLComputePipelineState>)nil;
+                            NSError *pErr = nil;
+                            return [tq_mtl_device newComputePipelineStateWithFunction:func error:&pErr];
+                        };
+                        tq_pipe_moe_gate_up    = moePipe(@"moe_gate_up_fused");
+                        tq_pipe_moe_swiglu     = moePipe(@"moe_swiglu");
+                        tq_pipe_moe_down_accum = moePipe(@"moe_down_accum");
+                        if (tq_pipe_moe_gate_up) {
+                            NSLog(@"TurboQuant: MoE fused kernels compiled from %@", moePath);
+                        }
+                    } else {
+                        NSLog(@"TurboQuant: MoE shader compile failed: %@", moeErr);
+                    }
+                    break;
+                }
+            }
+        }
+
+        if (tq_pipe_moe_gate_up) {
+            NSLog(@"TurboQuant: Fused MoE kernels ready (3 dispatches per layer)");
+        } else {
+            NSLog(@"TurboQuant: Fused MoE kernels NOT available — using batched matmul fallback");
+        }
 
         /* Create shared dimension uniform buffers */
         tq_shared_indim_buf = [tq_mtl_device
@@ -314,6 +388,11 @@ void tq_free_metal_backend(void) {
     tq_pipe_matmul_iq2_xxs = nil;
     tq_pipe_matmul_q8_0 = nil;
     tq_pipe_matmul_q4_k = nil;
+
+    /* MoE pipelines */
+    tq_pipe_moe_gate_up = nil;
+    tq_pipe_moe_swiglu = nil;
+    tq_pipe_moe_down_accum = nil;
 
     /* Weight cache */
     for (int i = 0; i < tq_weight_cache_count; i++) {
@@ -625,6 +704,249 @@ int tq_metal_matmul_gguf(float* out, const float* x, const void* weight,
         pc->gpu_buf = output_buf;
         pc->size    = (size_t)out_dim * sizeof(float);
 
+        return 0;
+    }
+}
+
+/* ============================================================
+ * Fused MoE forward pass — single-dispatch per phase
+ *
+ * Processes ALL active experts for one MoE layer using 3 GPU
+ * dispatches instead of 810 per-matmul dispatches:
+ *   Phase 1: gate + up projections for all experts
+ *   Phase 2: SwiGLU activation
+ *   Phase 3: down projection + weighted accumulation
+ *
+ * Returns 0 on success, -1 if fused MoE is not available.
+ * On failure, caller should fall back to per-expert dispatch.
+ * ============================================================ */
+
+/* MoeGpuParams — must match the Metal shader struct exactly */
+typedef struct {
+    int      active_experts[8];
+    float    expert_weights[8];
+    int      num_active;
+    int      expert_dim;
+    int      hidden_dim;
+    int      num_experts_total;
+    uint64_t gate_offsets[8];
+    uint64_t up_offsets[8];
+    uint64_t down_offsets[8];
+    uint32_t gate_type;
+    int      blocks_per_row_gate;
+    int      row_bytes_gate;
+    int      blocks_per_row_down;
+    int      row_bytes_down;
+    /* Per-expert quant types: 16 = IQ2_XXS, 22 = IQ2_S */
+    int      gate_types[8];
+    int      up_types[8];
+    int      down_types[8];
+    int      gate_row_bytes;
+    int      down_row_bytes;
+} MoeGpuParams;
+
+/**
+ * Check if fused MoE Metal dispatch is available.
+ */
+int tq_metal_moe_available(void) {
+    if (!tq_mtl_device || !tq_mtl_queue) return 0;
+    return (tq_pipe_moe_gate_up != nil &&
+            tq_pipe_moe_swiglu != nil &&
+            tq_pipe_moe_down_accum != nil) ? 1 : 0;
+}
+
+/**
+ * Fused MoE forward: 3 dispatches for all active experts.
+ *
+ * @param input        Input hidden state [hidden_dim] (CPU pointer, will be uploaded)
+ * @param output       Output hidden state [hidden_dim] (CPU pointer, will be downloaded)
+ * @param weight_base  Base pointer for all expert weights (mmap'd GGUF data)
+ * @param weight_size  Total size of weight region (for zero-copy buffer)
+ * @param gate_offsets Byte offsets from weight_base to each active expert's gate weights [num_active]
+ * @param up_offsets   Byte offsets from weight_base to each active expert's up weights [num_active]
+ * @param down_offsets Byte offsets from weight_base to each active expert's down weights [num_active]
+ * @param active_expert_ids  Expert indices [num_active]
+ * @param expert_routing_weights  Routing weights [num_active]
+ * @param num_active   Number of active experts
+ * @param expert_dim   Expert intermediate dimension
+ * @param hidden_dim   Model hidden dimension
+ * @param num_experts_total  Total number of experts
+ * @param weight_type  GGUF weight type (16=IQ2_XXS, 22=IQ2_S, or 0 for per-expert types)
+ * @param gate_types_in  Per-expert gate quant types [num_active] (NULL = use weight_type for all)
+ * @param up_types_in    Per-expert up quant types [num_active] (NULL = use weight_type for all)
+ * @param down_types_in  Per-expert down quant types [num_active] (NULL = use weight_type for all)
+ * @return 0 on success, -1 on failure
+ */
+int tq_metal_moe_forward(
+    const float*    input,
+    float*          output,
+    const void*     weight_base,
+    size_t          weight_size,
+    const uint64_t* gate_offsets,
+    const uint64_t* up_offsets,
+    const uint64_t* down_offsets,
+    const int*      active_expert_ids,
+    const float*    expert_routing_weights,
+    int             num_active,
+    int             expert_dim,
+    int             hidden_dim,
+    int             num_experts_total,
+    int             weight_type,
+    const int*      gate_types_in,
+    const int*      up_types_in,
+    const int*      down_types_in)
+{
+    if (!tq_metal_moe_available()) return -1;
+    if (num_active <= 0 || num_active > 8) return -1;
+
+    /* Accept IQ2_XXS (16) and IQ2_S (22) — UD models use mixed types */
+    if (weight_type != 0 && weight_type != 16 && weight_type != 22) return -1;
+
+    @autoreleasepool {
+        /* --- Build params struct --- */
+        MoeGpuParams params;
+        memset(&params, 0, sizeof(params));
+        params.num_active = num_active;
+        params.expert_dim = expert_dim;
+        params.hidden_dim = hidden_dim;
+        params.num_experts_total = num_experts_total;
+        params.gate_type = (uint32_t)weight_type;
+
+        /* Default block geometry uses IQ2_XXS (66 bytes per 256 elements) */
+        params.blocks_per_row_gate = hidden_dim / 256;
+        params.row_bytes_gate = params.blocks_per_row_gate * 66;
+        params.blocks_per_row_down = expert_dim / 256;
+        params.row_bytes_down = params.blocks_per_row_down * 66;
+
+        for (int k = 0; k < num_active; k++) {
+            params.active_experts[k] = active_expert_ids[k];
+            params.expert_weights[k] = expert_routing_weights[k];
+            params.gate_offsets[k] = gate_offsets[k];
+            params.up_offsets[k] = up_offsets[k];
+            params.down_offsets[k] = down_offsets[k];
+
+            /* Per-expert quant types */
+            params.gate_types[k] = gate_types_in ? gate_types_in[k] : weight_type;
+            params.up_types[k]   = up_types_in   ? up_types_in[k]   : weight_type;
+            params.down_types[k] = down_types_in ? down_types_in[k] : weight_type;
+        }
+
+        /* --- Get or create zero-copy weight buffer --- */
+        id<MTLBuffer> weight_buf = tq_get_weight_buffer(weight_base, weight_size);
+        if (!weight_buf) return -1;
+
+        /* --- Create input buffer --- */
+        size_t input_bytes = (size_t)hidden_dim * sizeof(float);
+        id<MTLBuffer> input_buf = [tq_mtl_device newBufferWithBytes:input
+                                                              length:input_bytes
+                                                             options:MTLResourceStorageModeShared];
+        if (!input_buf) return -1;
+
+        /* --- Create intermediate buffers --- */
+        size_t inter_bytes = (size_t)num_active * (size_t)expert_dim * sizeof(float);
+        id<MTLBuffer> gate_buf = [tq_mtl_device newBufferWithLength:inter_bytes
+                                                             options:MTLResourceStorageModeShared];
+        id<MTLBuffer> up_buf = [tq_mtl_device newBufferWithLength:inter_bytes
+                                                            options:MTLResourceStorageModeShared];
+        if (!gate_buf || !up_buf) return -1;
+
+        /* --- Create output buffer --- */
+        size_t output_bytes = (size_t)hidden_dim * sizeof(float);
+        id<MTLBuffer> output_buf = [tq_mtl_device newBufferWithLength:output_bytes
+                                                               options:MTLResourceStorageModeShared];
+        if (!output_buf) return -1;
+
+        /* --- Create params buffer --- */
+        id<MTLBuffer> params_buf = [tq_mtl_device newBufferWithBytes:&params
+                                                               length:sizeof(MoeGpuParams)
+                                                              options:MTLResourceStorageModeShared];
+        if (!params_buf) return -1;
+
+        /* --- Create command buffer and encoder --- */
+        id<MTLCommandBuffer> cmdBuf = [tq_mtl_queue commandBuffer];
+        if (!cmdBuf) return -1;
+
+        /* Shared memory sizes:
+         * Phase 1 (gate_up): hidden_dim floats for input + 8 floats for SIMD sums
+         * Phase 3 (down):    expert_dim floats for hb + 8 floats for SIMD sums */
+        NSUInteger shared_phase1 = ((NSUInteger)hidden_dim + 8) * sizeof(float);
+        NSUInteger shared_phase3 = ((NSUInteger)expert_dim + 8) * sizeof(float);
+        NSUInteger max_shared = [tq_mtl_device maxThreadgroupMemoryLength];
+
+        /* Cap shared memory to device limit */
+        if (shared_phase1 > max_shared) shared_phase1 = max_shared;
+        if (shared_phase3 > max_shared) shared_phase3 = max_shared;
+
+        /* ======== Phase 1: gate + up (fused) ======== */
+        {
+            id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+            if (!enc) return -1;
+
+            [enc setComputePipelineState:tq_pipe_moe_gate_up];
+            [enc setBuffer:weight_buf  offset:0 atIndex:0];
+            [enc setBuffer:input_buf   offset:0 atIndex:1];
+            [enc setBuffer:gate_buf    offset:0 atIndex:2];
+            [enc setBuffer:up_buf      offset:0 atIndex:3];
+            [enc setBuffer:params_buf  offset:0 atIndex:4];
+            [enc setThreadgroupMemoryLength:shared_phase1 atIndex:0];
+
+            /* One threadgroup per (expert, row): num_active * expert_dim total */
+            NSUInteger n_tgs = (NSUInteger)num_active * (NSUInteger)expert_dim;
+            MTLSize gridSize = MTLSizeMake(n_tgs, 1, 1);
+            MTLSize tgSize   = MTLSizeMake(TQ_MATMUL_TG_SIZE, 1, 1);
+            [enc dispatchThreadgroups:gridSize threadsPerThreadgroup:tgSize];
+            [enc endEncoding];
+        }
+
+        /* ======== Phase 2: SwiGLU ======== */
+        {
+            id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+            if (!enc) return -1;
+
+            [enc setComputePipelineState:tq_pipe_moe_swiglu];
+            [enc setBuffer:gate_buf    offset:0 atIndex:0];
+            [enc setBuffer:up_buf      offset:0 atIndex:1];
+            [enc setBuffer:params_buf  offset:0 atIndex:2];
+
+            NSUInteger n_threads = (NSUInteger)num_active * (NSUInteger)expert_dim;
+            NSUInteger tg = 256;
+            NSUInteger n_tgs = (n_threads + tg - 1) / tg;
+            MTLSize gridSize = MTLSizeMake(n_tgs, 1, 1);
+            MTLSize tgSize   = MTLSizeMake(tg, 1, 1);
+            [enc dispatchThreadgroups:gridSize threadsPerThreadgroup:tgSize];
+            [enc endEncoding];
+        }
+
+        /* ======== Phase 3: down projection + weighted accumulation ======== */
+        {
+            id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+            if (!enc) return -1;
+
+            [enc setComputePipelineState:tq_pipe_moe_down_accum];
+            [enc setBuffer:weight_buf  offset:0 atIndex:0];
+            [enc setBuffer:gate_buf    offset:0 atIndex:1];  /* hb_all (post-SwiGLU) */
+            [enc setBuffer:output_buf  offset:0 atIndex:2];
+            [enc setBuffer:params_buf  offset:0 atIndex:3];
+            [enc setThreadgroupMemoryLength:shared_phase3 atIndex:0];
+
+            /* One threadgroup per output row */
+            NSUInteger n_tgs = (NSUInteger)hidden_dim;
+            MTLSize gridSize = MTLSizeMake(n_tgs, 1, 1);
+            MTLSize tgSize   = MTLSizeMake(TQ_MATMUL_TG_SIZE, 1, 1);
+            [enc dispatchThreadgroups:gridSize threadsPerThreadgroup:tgSize];
+            [enc endEncoding];
+        }
+
+        /* --- Commit, wait, copy result --- */
+        [cmdBuf commit];
+        [cmdBuf waitUntilCompleted];
+
+        if (cmdBuf.status == MTLCommandBufferStatusError) {
+            NSLog(@"TurboQuant: MoE fused dispatch error: %@", cmdBuf.error);
+            return -1;
+        }
+
+        memcpy(output, [output_buf contents], output_bytes);
         return 0;
     }
 }

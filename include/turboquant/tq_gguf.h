@@ -286,6 +286,42 @@ void tq_moe_advise(const tq_moe_layer_t* layer,
                    const int* active_ids, int n_active,
                    int num_experts);
 
+/* ============================================================
+ * Fused MoE Metal GPU dispatch
+ *
+ * Processes ALL active experts for one MoE layer in 3 GPU
+ * dispatches instead of per-expert per-matmul dispatch:
+ *   Phase 1: gate + up projections (all experts, parallel)
+ *   Phase 2: SwiGLU activation (all experts, parallel)
+ *   Phase 3: down projection + weighted accumulate
+ *
+ * Requires Apple Silicon with Metal. Returns -1 if unavailable.
+ * ============================================================ */
+
+/* Check if fused MoE Metal dispatch is available */
+int tq_metal_moe_available(void);
+
+/* Fused MoE forward: 3 Metal dispatches for all active experts.
+ * Returns 0 on success, -1 on failure (caller falls back to CPU). */
+int tq_metal_moe_forward(
+    const float*    input,
+    float*          output,
+    const void*     weight_base,
+    size_t          weight_size,
+    const uint64_t* gate_offsets,
+    const uint64_t* up_offsets,
+    const uint64_t* down_offsets,
+    const int*      active_expert_ids,
+    const float*    expert_routing_weights,
+    int             num_active,
+    int             expert_dim,
+    int             hidden_dim,
+    int             num_experts_total,
+    int             weight_type,
+    const int*      gate_types,     /* per-expert gate quant types, NULL = use weight_type */
+    const int*      up_types,       /* per-expert up quant types, NULL = use weight_type */
+    const int*      down_types);    /* per-expert down quant types, NULL = use weight_type */
+
 #ifdef __cplusplus
 }
 #endif
