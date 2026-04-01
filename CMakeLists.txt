@@ -27,6 +27,16 @@ add_library(turboquant STATIC
 target_include_directories(turboquant PUBLIC include)
 target_link_libraries(turboquant PRIVATE m Threads::Threads)
 
+# Apple Accelerate framework (cblas_sgemv via AMX coprocessor)
+if(APPLE)
+    find_library(ACCELERATE_LIB Accelerate)
+    if(ACCELERATE_LIB)
+        target_link_libraries(turboquant PRIVATE ${ACCELERATE_LIB})
+        target_compile_definitions(turboquant PRIVATE TQ_HAS_ACCELERATE=1 ACCELERATE_NEW_LAPACK=1)
+        message(STATUS "TurboQuant: Accelerate framework enabled (cblas/AMX)")
+    endif()
+endif()
+
 # Shared library for Python bindings
 add_library(turboquant_shared SHARED
     ${TQ_CORE_SOURCES}
@@ -36,6 +46,12 @@ add_library(turboquant_shared SHARED
 )
 target_include_directories(turboquant_shared PUBLIC include)
 target_link_libraries(turboquant_shared PRIVATE m Threads::Threads)
+
+# Accelerate for shared library too
+if(APPLE AND ACCELERATE_LIB)
+    target_link_libraries(turboquant_shared PRIVATE ${ACCELERATE_LIB})
+    target_compile_definitions(turboquant_shared PRIVATE TQ_HAS_ACCELERATE=1 ACCELERATE_NEW_LAPACK=1)
+endif()
 set_target_properties(turboquant_shared PROPERTIES
     OUTPUT_NAME turboquant
     POSITION_INDEPENDENT_CODE ON)
@@ -139,6 +155,11 @@ if(TQ_BUILD_TESTS)
         add_executable(${test_name} ${test_src})
         target_link_libraries(${test_name} turboquant GTest::gtest_main)
         add_test(NAME ${test_name} COMMAND ${test_name})
+
+        # Pass Metal availability to test targets
+        if(TQ_BUILD_METAL AND APPLE)
+            target_compile_definitions(${test_name} PRIVATE TQ_HAS_METAL=1)
+        endif()
     endforeach()
 
     # llama.cpp integration test

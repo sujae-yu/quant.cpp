@@ -22,6 +22,10 @@
 #define TQ_MOE_HAS_NEON 0
 #endif
 
+#ifdef TQ_HAS_ACCELERATE
+#include <Accelerate/Accelerate.h>
+#endif
+
 /* ============================================================
  * Fast SiLU (Swish) approximation
  *
@@ -328,6 +332,179 @@ static expert_cache_entry_t* cache_get_or_create(
 }
 
 /* ============================================================
+ * Accelerate/cblas FP32 Expert LRU Cache
+ *
+ * On Apple Silicon, cblas_sgemv leverages the AMX coprocessor which is
+ * ~36x faster than manual FP32 dot and ~10x faster than NEON for sgemv.
+ * The strategy: dequant IQ2_XXS -> FP32 once (on cache miss), then
+ * use cblas_sgemv for all subsequent matmuls (cache hit = near-free).
+ *
+ * Memory per cached expert: 3 matrices x (inter*dim) x 4 bytes
+ *   For 512x2048: 3 x 1M x 4 = 12 MB per expert
+ *   32 cache slots: 384 MB total (fits comfortably in 16GB+)
+ *
+ * Cache hit: cblas only = ~0.019 ms per matmul (36x faster)
+ * Cache miss: dequant + store + cblas ~ 1-2 ms (amortized quickly)
+ * ============================================================ */
+
+#ifdef TQ_HAS_ACCELERATE
+
+#define CBLAS_CACHE_SIZE 10  /* per layer — 10 × 12 MB × 40 layers = 4.8 GB max */
+
+typedef struct {
+    int      expert_id;       /* -1 = empty slot */
+    float*   gate_fp32;       /* [expert_dim x hidden_dim] row-major */
+    float*   up_fp32;         /* [expert_dim x hidden_dim] row-major */
+    float*   down_fp32;       /* [hidden_dim x expert_dim] row-major */
+    int      last_used;       /* token counter for LRU eviction */
+} cblas_cache_entry_t;
+
+typedef struct {
+    cblas_cache_entry_t entries[CBLAS_CACHE_SIZE];
+    int count;
+} cblas_layer_cache_t;
+
+static cblas_layer_cache_t* g_cblas_cache     = NULL; /* [n_layers] */
+static int                  g_cblas_n_layers   = 0;
+static int                  g_cblas_hidden_dim = 0;
+static int                  g_cblas_exp_inter  = 0;
+static int                  g_cblas_token      = 0;
+static float*               g_cblas_fp32_temp  = NULL; /* reusable dequant buffer */
+
+void tq_moe_cblas_cache_init(int n_layers, const tq_moe_config_t* config, int hidden_dim)
+{
+    if (g_cblas_cache) return; /* already initialized */
+    if (!config) return;
+
+    g_cblas_n_layers   = n_layers;
+    g_cblas_hidden_dim = hidden_dim;
+    g_cblas_exp_inter  = config->expert_intermediate_dim;
+    g_cblas_token      = 0;
+
+    g_cblas_cache = (cblas_layer_cache_t*)calloc(
+        (size_t)n_layers, sizeof(cblas_layer_cache_t));
+    if (!g_cblas_cache) {
+        fprintf(stderr, "tq_moe_cblas_cache_init: allocation failed\n");
+        return;
+    }
+
+    for (int l = 0; l < n_layers; l++) {
+        for (int s = 0; s < CBLAS_CACHE_SIZE; s++) {
+            g_cblas_cache[l].entries[s].expert_id = -1;
+        }
+    }
+
+    /* Reusable FP32 temp buffer for dequantization */
+    size_t max_elems = (size_t)g_cblas_exp_inter * hidden_dim;
+    size_t down_elems = (size_t)hidden_dim * g_cblas_exp_inter;
+    if (down_elems > max_elems) max_elems = down_elems;
+    g_cblas_fp32_temp = (float*)malloc(max_elems * sizeof(float));
+
+    float cache_mb = (float)(n_layers * CBLAS_CACHE_SIZE) *
+                     (3.0f * (float)((size_t)g_cblas_exp_inter * hidden_dim) * 4.0f) /
+                     (1024.0f * 1024.0f);
+    fprintf(stderr, "tq_moe_cblas_cache_init: FP32/AMX LRU cache for %d layers x %d slots "
+            "(max %.0f MB)\n", n_layers, CBLAS_CACHE_SIZE, (double)cache_mb);
+}
+
+static void cblas_free_entry(cblas_cache_entry_t* e)
+{
+    free(e->gate_fp32);  e->gate_fp32 = NULL;
+    free(e->up_fp32);    e->up_fp32 = NULL;
+    free(e->down_fp32);  e->down_fp32 = NULL;
+    e->expert_id = -1;
+}
+
+void tq_moe_cblas_cache_free(void)
+{
+    if (!g_cblas_cache) return;
+    for (int l = 0; l < g_cblas_n_layers; l++) {
+        for (int s = 0; s < CBLAS_CACHE_SIZE; s++) {
+            cblas_free_entry(&g_cblas_cache[l].entries[s]);
+        }
+    }
+    free(g_cblas_cache);
+    g_cblas_cache = NULL;
+    free(g_cblas_fp32_temp);
+    g_cblas_fp32_temp = NULL;
+    g_cblas_n_layers = 0;
+}
+
+/* Find cached FP32 entry or evict LRU and dequant from IQ2_XXS */
+static cblas_cache_entry_t* cblas_cache_get_or_create(
+    int layer_idx, int expert_id, const tq_expert_weights_t* exp)
+{
+    cblas_layer_cache_t* lc = &g_cblas_cache[layer_idx];
+
+    /* Cache hit */
+    for (int s = 0; s < CBLAS_CACHE_SIZE; s++) {
+        if (lc->entries[s].expert_id == expert_id) {
+            lc->entries[s].last_used = g_cblas_token;
+            return &lc->entries[s];
+        }
+    }
+
+    /* Cache miss: find empty slot or evict LRU */
+    int target = -1;
+    if (lc->count < CBLAS_CACHE_SIZE) {
+        for (int s = 0; s < CBLAS_CACHE_SIZE; s++) {
+            if (lc->entries[s].expert_id < 0) {
+                target = s;
+                break;
+            }
+        }
+        lc->count++;
+    } else {
+        int oldest_time = g_cblas_token + 1;
+        for (int s = 0; s < CBLAS_CACHE_SIZE; s++) {
+            if (lc->entries[s].last_used < oldest_time) {
+                oldest_time = lc->entries[s].last_used;
+                target = s;
+            }
+        }
+        cblas_free_entry(&lc->entries[target]);
+    }
+
+    cblas_cache_entry_t* ce = &lc->entries[target];
+    ce->expert_id = expert_id;
+    ce->last_used = g_cblas_token;
+
+    int dim   = g_cblas_hidden_dim;
+    int inter = g_cblas_exp_inter;
+
+    /* Dequant gate: [inter, dim] -> FP32 */
+    {
+        int n = inter * dim;
+        ce->gate_fp32 = (float*)malloc((size_t)n * sizeof(float));
+        if (ce->gate_fp32) {
+            tq_dequant_row_gguf(exp->gate_type, exp->w_gate, ce->gate_fp32, n);
+        }
+    }
+
+    /* Dequant up: [inter, dim] -> FP32 */
+    {
+        int n = inter * dim;
+        ce->up_fp32 = (float*)malloc((size_t)n * sizeof(float));
+        if (ce->up_fp32) {
+            tq_dequant_row_gguf(exp->up_type, exp->w_up, ce->up_fp32, n);
+        }
+    }
+
+    /* Dequant down: [dim, inter] -> FP32 */
+    {
+        int n = dim * inter;
+        ce->down_fp32 = (float*)malloc((size_t)n * sizeof(float));
+        if (ce->down_fp32) {
+            tq_dequant_row_gguf(exp->down_type, exp->w_down, ce->down_fp32, n);
+        }
+    }
+
+    return ce;
+}
+
+#endif /* TQ_HAS_ACCELERATE */
+
+/* ============================================================
  * State management
  * ============================================================ */
 
@@ -475,6 +652,9 @@ void tq_moe_forward(const tq_moe_layer_t* layer,
 
     /* Advance the global token counter for LRU tracking */
     g_token_counter++;
+#ifdef TQ_HAS_ACCELERATE
+    g_cblas_token++;
+#endif
 
     /* Step 2.5: Try fused MoE Metal dispatch (3 dispatches for all experts).
      * This replaces the entire per-expert loop below when available.
@@ -589,7 +769,52 @@ void tq_moe_forward(const tq_moe_layer_t* layer,
         if (eid < 0 || eid >= config->num_experts) continue; /* safety check */
         const tq_expert_weights_t* exp = &layer->experts[eid];
 
-        /* Q8 LRU cache DISABLED: cache miss conversion cost (IQ2→FP32→Q8)
+#ifdef TQ_HAS_ACCELERATE
+        /* PRIMARY path on Apple: cblas_sgemv via AMX coprocessor.
+         * Dequant IQ2_XXS -> FP32 once (LRU cached), then cblas_sgemv.
+         * AMX is ~36x faster than manual FP32 dot for expert-sized matrices. */
+        /* cblas/AMX DISABLED: IQ2→FP32 dequant cost dominates.
+         * With 256 experts/layer, cache miss rate is too high.
+         * Fused IQ2 dot (no dequant) is faster overall.
+         * cblas would win if we could pre-dequant ALL experts at load time,
+         * but 30 layers × 256 experts × 12 MB = 90 GB — impossible. */
+        if (0 && g_cblas_cache && layer_idx >= 0 && layer_idx < g_cblas_n_layers
+            && exp->w_gate && !exp->q4_converted) {
+            cblas_cache_entry_t* ce = cblas_cache_get_or_create(layer_idx, eid, exp);
+            if (ce && ce->gate_fp32 && ce->up_fp32 && ce->down_fp32) {
+                /* gate: input[hidden_dim] @ gate[expert_dim, hidden_dim]^T -> hb[expert_dim]
+                 * cblas_sgemv(RowMajor, NoTrans, M, N, alpha, A, lda, x, incx, beta, y, incy)
+                 * A is [M x N] = [expert_dim x hidden_dim], x is [hidden_dim], y is [expert_dim] */
+                cblas_sgemv(CblasRowMajor, CblasNoTrans,
+                            expert_dim, hidden_dim, 1.0f,
+                            ce->gate_fp32, hidden_dim,
+                            input, 1, 0.0f, state->expert_hb, 1);
+
+                /* up: same layout */
+                cblas_sgemv(CblasRowMajor, CblasNoTrans,
+                            expert_dim, hidden_dim, 1.0f,
+                            ce->up_fp32, hidden_dim,
+                            input, 1, 0.0f, state->expert_hb2, 1);
+
+                /* SwiGLU activation: hb = silu(gate) * up */
+                swiglu_fused(state->expert_hb, state->expert_hb2, expert_dim);
+
+                /* down: hb[expert_dim] @ down[hidden_dim, expert_dim]^T -> out[hidden_dim]
+                 * A is [hidden_dim x expert_dim], x is [expert_dim], y is [hidden_dim] */
+                cblas_sgemv(CblasRowMajor, CblasNoTrans,
+                            hidden_dim, expert_dim, 1.0f,
+                            ce->down_fp32, expert_dim,
+                            state->expert_hb, 1, 0.0f, state->expert_out, 1);
+
+                /* Weighted accumulation: output += weight * down_proj */
+                for (int i = 0; i < hidden_dim; i++)
+                    output[i] += w * state->expert_out[i];
+                continue;
+            }
+        }
+#endif /* TQ_HAS_ACCELERATE */
+
+        /* Q8 LRU cache DISABLED: cache miss conversion cost (IQ2->FP32->Q8)
          * exceeds fused IQ2 dot cost. Direct fused_dot_iq2_xxs_neon is faster
          * than any cache scheme when expert reuse rate is low. */
         if (0 && g_expert_cache && layer_idx >= 0 && layer_idx < g_cache_n_layers

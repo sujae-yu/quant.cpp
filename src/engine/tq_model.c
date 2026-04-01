@@ -3232,6 +3232,13 @@ tq_model_t* tq_load_gguf(const char* path) {
             tq_moe_cache_init(c->n_layers,
                               (const tq_moe_config_t*)model->moe_config, dim);
 
+            /* Initialize cblas/AMX FP32 LRU cache (Apple only) */
+#ifdef TQ_HAS_ACCELERATE
+            extern void tq_moe_cblas_cache_init(int, const tq_moe_config_t*, int);
+            tq_moe_cblas_cache_init(c->n_layers,
+                                    (const tq_moe_config_t*)model->moe_config, dim);
+#endif
+
             fprintf(stderr, "tq_load_gguf: MoE — %d shared experts Q4-converted "
                     "(%.1f MB), routed experts use runtime LRU cache\n",
                     n_shared_converted, (double)total_q4_shared / (1024.0 * 1024.0));
@@ -3534,8 +3541,12 @@ void tq_free_model(tq_model_t* model) {
     free(model->attn_layer_indices);
     free(model->layer_is_sliding);
 
-    /* Free MoE LRU cache (must happen before freeing layers) */
+    /* Free MoE LRU caches (must happen before freeing layers) */
     tq_moe_cache_free();
+#ifdef TQ_HAS_ACCELERATE
+    extern void tq_moe_cblas_cache_free(void);
+    tq_moe_cblas_cache_free();
+#endif
 
     /* Free MoE resources */
     if (model->config.is_moe && model->layers) {
