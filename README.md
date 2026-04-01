@@ -1,19 +1,20 @@
 # TurboQuant.cpp
 
-**Pure C inference engine with [TurboQuant](https://arxiv.org/abs/2504.19874) (ICLR 2026) KV cache compression.**
+**Standalone C inference engine with [TurboQuant](https://arxiv.org/abs/2504.19874) (ICLR 2026) KV cache compression. Not a wrapper — built from scratch, zero dependencies.**
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)]()
 [![Tests](https://img.shields.io/badge/tests-31%20pass-brightgreen)]()
 [![ASan](https://img.shields.io/badge/ASan%2BUBSan-clean-brightgreen)]()
 
 ```
-Qwen3.5-35B-A3B MoE on 16GB Mac:
-  FP32 KV → max 32K context
-  TurboQuant 1b K + Q2 V → 131K context  (18.6x KV compression)
-
 Gemma 3 4B perplexity (101 tokens, teacher-forced):
   FP16 KV:         PPL = 35.99
-  1-bit K + Q4 V:  PPL = 36.00  (+0.03%)
+  1-bit K + Q4 V:  PPL = 36.00  (+0.03%)   ← 4.9x compression, near-zero quality loss
+
+32K context memory (Gemma 3 4B):
+  FP16 K+V:          4,352 MB
+  1-bit K + Q4 V:      885 MB   (4.9x, 3.4 GB saved)
+  1-bit K + Q2 V:      613 MB   (7.1x, 3.7 GB saved)
 ```
 
 ---
@@ -25,25 +26,28 @@ git clone https://github.com/quantumaikr/TurboQuant.cpp && cd TurboQuant.cpp
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DTQ_BUILD_TESTS=ON
 cmake --build build -j$(nproc)
 
-# TQM format (pre-converted)
+# TQM format (recommended — fully verified)
 ./build/tq_run model.tqm -p "Hello" -k turbo_kv_1b -v q4
 
-# GGUF format (llama.cpp models directly)
-./build/tq_run model.gguf -p "Hello" -k turbo_kv_1b -v q4
+# GGUF Q8_0 format (verified)
+./build/tq_run model-Q8_0.gguf -p "Hello" -k turbo_kv_1b -v q4
 ```
 
 ---
 
 ## Supported Models
 
-| Model | Params | Format | Speed | KV Compression |
-|-------|--------|--------|-------|----------------|
-| **Qwen3.5-35B-A3B** | 35B (3B active) | GGUF | 0.5 tok/s | 18.6x (1b K + Q2 V) |
-| **Gemma 3 4B** | 4B | TQM | 20.2 tok/s | 4.9x–7.1x |
-| **Qwen3.5-0.8B** | 752M | TQM/GGUF | 80.1 tok/s | 4.9x–7.1x |
-| **Gemma 3 270M** | 270M | TQM | 176 tok/s | 4.9x–7.1x |
+| Model | Params | Format | Speed (6T) | KV Verified |
+|-------|--------|--------|------------|-------------|
+| **Gemma 3 4B** | 4B | TQM | 20.2 tok/s | PPL +0.03%, all KV types ✓ |
+| **Qwen3.5-0.8B** | 752M | TQM | 80.1 tok/s | all KV types ✓ |
+| **Qwen3.5-0.8B** | 752M | GGUF Q8_0 | 3.7 tok/s | 1b K + Q4 V ✓ |
+| **Gemma 3 270M** | 270M | TQM | 176 tok/s | all KV types ✓ |
 
-Architectures: Gemma 3 (sliding window, GeGLU), Qwen3.5 (DeltaNet hybrid), Qwen2-MoE (top-K routing, shared expert).
+Architectures: Gemma 3 (sliding window, GeGLU), Qwen3.5 (DeltaNet hybrid).
+
+GGUF support: Q8_0 verified. K-quant (Q4_K, Q6_K) and IQ2 dequantization are implemented but not yet quality-verified — contributions welcome.
+MoE architecture (Qwen3.5-35B-A3B): loading and routing implemented, quality verification in progress.
 
 ---
 
@@ -134,15 +138,15 @@ Every NEON path verified against scalar reference (`test_neon_scalar`). A Q4 deq
 147 ns per 128-dim vector (NEON-vectorized). 1-bit attention: 1.2 ns/key. Compared to matmul (~1ms/layer), negligible. See `bench/bench_kv_overhead.cpp`.
 
 **Q: "Only small models?"**
-Qwen3.5-35B-A3B MoE runs on a 16GB Mac Air (RSS 4.7GB). GGUF direct loading supports Q2_K through Q6_K and IQ2 formats.
+GGUF Q8_0 loading is verified for Qwen3.5 0.8B. MoE architecture (35B-A3B) loads and routes correctly; K-quant/IQ2 dequantization quality is being stabilized. The engine and KV compression are architecture-independent — verified on models from 270M to 4B.
 
 ---
 
 ## Under the Hood
 
 - **15,000+ lines of C** — zero external dependencies
-- **GGUF v3 direct loading** — use llama.cpp models without conversion
-- **MoE support** — top-K expert routing, shared expert, SwiGLU
+- **GGUF v3 loading** — Q8_0 verified; K-quant/IQ2 dequant implemented (quality WIP)
+- **MoE routing** — top-K expert selection, shared expert, SwiGLU (quality WIP)
 - **12 KV quantization types** — Uniform, PolarQuant, QJL, TurboQuant, TurboQuant KV (1/3/4-bit)
 - **Fused Q4 attention** — weighted sum directly from packed nibbles
 - **Adaptive compression** — per-layer bit recommendation, codebook calibration
