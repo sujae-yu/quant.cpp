@@ -1,2 +1,5 @@
-date,model,label,kv_type,v_quant,tokens,nll,ppl,tok_s
-2026-04-03_024158,SmolLM2-1.7B-Instruct-Q8_0.gguf,FP16_baseline,none,fp16,998,2.490645,12.0691,7.7
+Config,Tokens,AvgNLL,PPL
+uniform_4b,998,2.490645,12.0691
+turbo_kv_1b,998,2.490645,12.0691
+turbo_kv_3b,998,2.490645,12.0691
+turbo_kv_1b+q4v,998,2.516130,12.3806
