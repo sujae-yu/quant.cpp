@@ -32,3 +32,14 @@ The KEY metric is the DELTA from each engine's own baseline.
 
 TurboQuant achieves 4x more compression on keys with zero PPL increase,
 while llama.cpp's Q4 KV shows measurable quality degradation.
+
+## llama.cpp Full KV Type Comparison (SmolLM2 1.7B, 2K tokens)
+
+| KV Type | PPL | Delta vs F16 | Bits/element |
+|---------|-----|-------------|--------------|
+| f16 (baseline) | 2.83 | — | 16 |
+| q8_0 | 2.82 | -0.4% | 8 |
+| q5_1 | 2.86 | +0.9% | 5 |
+| q5_0 | 2.85 | +0.6% | 5 |
+| q4_1 | 2.92 | +3.2% | 4 |
+| q4_0 | 3.13 | +10.6% | 4 |
