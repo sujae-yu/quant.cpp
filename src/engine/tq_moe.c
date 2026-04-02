@@ -662,16 +662,17 @@ void tq_moe_forward(const tq_moe_layer_t* layer,
 #ifdef TQ_HAS_METAL
     extern int tq_metal_moe_available(void);
     extern int tq_metal_moe_forward(
-        const float* input, float* output,
+        const float* input, float* output, float* hb_output,
         const void* weight_base, size_t weight_size,
         const uint64_t* gate_offsets, const uint64_t* up_offsets, const uint64_t* down_offsets,
         const int* active_expert_ids, const float* expert_routing_weights,
         int num_active, int expert_dim, int hidden_dim, int num_experts_total, int weight_type,
         const int* gate_types, const int* up_types, const int* down_types);
 
-    /* Fused Metal MoE — re-enabled for per-phase hang isolation debugging.
-     * Each phase runs with waitUntilCompleted + NSLog to identify which phase hangs. */
-    if (tq_metal_moe_available() && num_active > 0) {
+    /* Metal MoE disabled: IQ2_S Phase 3 hangs, hybrid too slow.
+     * CPU fused IQ2 dot at 3.7 tok/s is the current fastest path.
+     * GPU acceleration needs IQ2_S shader fix or Q4_K model format. */
+    if (0 && tq_metal_moe_available() && num_active > 0) {
         /* Check that all active experts use IQ2_XXS and have valid weights */
         int can_fuse = 1;
         const void* base_ptr = NULL;
@@ -743,8 +744,12 @@ void tq_moe_forward(const tq_moe_layer_t* layer,
                 per_down_types[k] = (int)exp->down_type;
             }
 
+            /* Allocate buffer for GPU SwiGLU results [num_active * expert_dim] */
+            float* hb_gpu = (float*)malloc((size_t)num_active * (size_t)expert_dim * sizeof(float));
+            if (!hb_gpu) goto moe_cpu_fallback;
+
             int rc = tq_metal_moe_forward(
-                input, output,
+                input, output, hb_gpu,
                 base_ptr, base_size,
                 gate_offs, up_offs, down_offs,
                 expert_ids, routing_w,
@@ -753,15 +758,39 @@ void tq_moe_forward(const tq_moe_layer_t* layer,
                 0, /* weight_type=0 means use per-expert types */
                 per_gate_types, per_up_types, per_down_types);
 
-            if (rc == 0) {
-                /* Fused MoE succeeded — skip to shared expert */
+            if (rc == 1) {
+                /* Hybrid: GPU did gate+up+SwiGLU, we do down+accum on CPU */
+                for (int k = 0; k < num_active; k++) {
+                    int eid = state->top_experts[k];
+                    float w = state->expert_weights[k];
+                    const tq_expert_weights_t* exp = &layer->experts[eid];
+                    float* hb_k = hb_gpu + k * expert_dim;
+
+                    /* down = hb_k @ w_down^T -> [hidden_dim] */
+                    tq_matmul_gguf(state->expert_out, hb_k,
+                                   exp->w_down, exp->down_type,
+                                   hidden_dim, expert_dim);
+
+                    /* Weighted accumulation: output += weight * down_proj */
+                    for (int i = 0; i < hidden_dim; i++)
+                        output[i] += w * state->expert_out[i];
+                }
+                free(hb_gpu);
                 goto moe_shared_expert;
             }
-            /* else: fall through to per-expert CPU path */
+            free(hb_gpu);
+            if (rc == 0) {
+                /* Full GPU success (unlikely in hybrid mode, but handle it) */
+                goto moe_shared_expert;
+            }
+            /* else: rc == -1, fall through to per-expert CPU path */
         }
     }
 #endif /* TQ_HAS_METAL */
 
+#ifdef TQ_HAS_METAL
+moe_cpu_fallback: ;
+#endif
     /* Step 3: For each selected expert, compute SwiGLU FFN and accumulate */
     for (int k = 0; k < num_active; k++) {
         int eid = state->top_experts[k];

@@ -756,10 +756,12 @@ int tq_metal_moe_available(void) {
 }
 
 /**
- * Fused MoE forward: 3 dispatches for all active experts.
+ * Hybrid GPU/CPU MoE forward: GPU does gate+up+SwiGLU (Phases 1+2),
+ * CPU handles down projection (Phase 3 IQ2_S shader hangs on Metal).
  *
  * @param input        Input hidden state [hidden_dim] (CPU pointer, will be uploaded)
- * @param output       Output hidden state [hidden_dim] (CPU pointer, will be downloaded)
+ * @param output       Output hidden state [hidden_dim] (unused in hybrid mode)
+ * @param hb_output    SwiGLU'd activations [num_active * expert_dim] (filled by GPU)
  * @param weight_base  Base pointer for all expert weights (mmap'd GGUF data)
  * @param weight_size  Total size of weight region (for zero-copy buffer)
  * @param gate_offsets Byte offsets from weight_base to each active expert's gate weights [num_active]
@@ -775,11 +777,13 @@ int tq_metal_moe_available(void) {
  * @param gate_types_in  Per-expert gate quant types [num_active] (NULL = use weight_type for all)
  * @param up_types_in    Per-expert up quant types [num_active] (NULL = use weight_type for all)
  * @param down_types_in  Per-expert down quant types [num_active] (NULL = use weight_type for all)
- * @return 0 on success, -1 on failure
+ * @return 1 on partial success (hb_output filled, caller does down+accum on CPU),
+ *        -1 on failure
  */
 int tq_metal_moe_forward(
     const float*    input,
     float*          output,
+    float*          hb_output,
     const void*     weight_base,
     size_t          weight_size,
     const uint64_t* gate_offsets,
@@ -812,11 +816,21 @@ int tq_metal_moe_forward(
         params.num_experts_total = num_experts_total;
         params.gate_type = (uint32_t)weight_type;
 
-        /* Default block geometry uses IQ2_XXS (66 bytes per 256 elements) */
+        /* Block geometry: blocks_per_row is type-independent (always 256 elements/block).
+         * row_bytes_gate/down use IQ2_XXS (66) as default; shader overrides per-expert
+         * for IQ2_S (82) via the gate_types/down_types arrays. */
         params.blocks_per_row_gate = hidden_dim / 256;
-        params.row_bytes_gate = params.blocks_per_row_gate * 66;
         params.blocks_per_row_down = expert_dim / 256;
-        params.row_bytes_down = params.blocks_per_row_down * 66;
+
+        /* Determine default row bytes from first expert's type */
+        int first_gate_type = gate_types_in ? gate_types_in[0] : weight_type;
+        int first_down_type = down_types_in ? down_types_in[0] : weight_type;
+        int gate_blk_bytes = (first_gate_type == 22) ? 82 : 66; /* IQ2_S=82, IQ2_XXS=66 */
+        int down_blk_bytes = (first_down_type == 22) ? 82 : 66;
+        params.row_bytes_gate = params.blocks_per_row_gate * gate_blk_bytes;
+        params.row_bytes_down = params.blocks_per_row_down * down_blk_bytes;
+        params.gate_row_bytes = params.row_bytes_gate;
+        params.down_row_bytes = params.row_bytes_down;
 
         for (int k = 0; k < num_active; k++) {
             params.active_experts[k] = active_expert_ids[k];
@@ -850,11 +864,8 @@ int tq_metal_moe_forward(
                                                             options:MTLResourceStorageModeShared];
         if (!gate_buf || !up_buf) return -1;
 
-        /* --- Create output buffer --- */
-        size_t output_bytes = (size_t)hidden_dim * sizeof(float);
-        id<MTLBuffer> output_buf = [tq_mtl_device newBufferWithLength:output_bytes
-                                                               options:MTLResourceStorageModeShared];
-        if (!output_buf) return -1;
+        /* output_buf removed: hybrid mode returns SwiGLU results via hb_output,
+         * down projection + accumulate happens on CPU in tq_moe.c */
 
         /* --- Create params buffer --- */
         id<MTLBuffer> params_buf = [tq_mtl_device newBufferWithBytes:&params
@@ -866,16 +877,10 @@ int tq_metal_moe_forward(
         id<MTLCommandBuffer> cmdBuf = [tq_mtl_queue commandBuffer];
         if (!cmdBuf) return -1;
 
-        /* Shared memory sizes:
-         * Phase 1 (gate_up): hidden_dim floats for input + 8 floats for SIMD sums
-         * Phase 3 (down):    expert_dim floats for hb + 8 floats for SIMD sums */
+        /* Shared memory for Phase 1 (gate_up): hidden_dim floats for input + 8 for SIMD sums */
         NSUInteger shared_phase1 = ((NSUInteger)hidden_dim + 8) * sizeof(float);
-        NSUInteger shared_phase3 = ((NSUInteger)expert_dim + 8) * sizeof(float);
         NSUInteger max_shared = [tq_mtl_device maxThreadgroupMemoryLength];
-
-        /* Cap shared memory to device limit */
         if (shared_phase1 > max_shared) shared_phase1 = max_shared;
-        if (shared_phase3 > max_shared) shared_phase3 = max_shared;
 
         /* ======== Phase 1: gate + up (fused) ======== */
         {
@@ -907,6 +912,38 @@ int tq_metal_moe_forward(
             return -1;
         }
         NSLog(@"TurboQuant MoE: Phase 1 (gate+up) completed OK");
+
+#ifdef TQ_MOE_DEBUG_VALIDATE
+        /* === Debug: compare GPU gate output for expert 0 vs CPU tq_matmul_gguf === */
+        {
+            /* tq_matmul_gguf declared in tq_gguf.h (already included) */
+            float* gpu_gate = (float*)[gate_buf contents];
+            float* cpu_gate = (float*)malloc((size_t)expert_dim * sizeof(float));
+            if (cpu_gate) {
+                /* CPU matmul for expert 0's gate weights */
+                const uint8_t* gate_w = (const uint8_t*)weight_base + gate_offsets[0];
+                tq_ggml_dtype gt0 = gate_types_in ? (tq_ggml_dtype)gate_types_in[0]
+                                                  : (tq_ggml_dtype)weight_type;
+                tq_matmul_gguf(cpu_gate, input, gate_w, gt0, expert_dim, hidden_dim);
+
+                /* Compare first 8 and last 8 values */
+                NSLog(@"TurboQuant MoE DEBUG: gate expert 0 comparison (first 8):");
+                float max_err = 0.0f;
+                for (int i = 0; i < expert_dim; i++) {
+                    float err = fabsf(gpu_gate[i] - cpu_gate[i]);
+                    if (err > max_err) max_err = err;
+                    if (i < 8 || i >= expert_dim - 4) {
+                        NSLog(@"  [%d] GPU=%.6f CPU=%.6f err=%.6f", i, gpu_gate[i], cpu_gate[i], err);
+                    }
+                }
+                NSLog(@"TurboQuant MoE DEBUG: gate max_err=%.6f across %d elements", max_err, expert_dim);
+                if (max_err > 0.01f) {
+                    NSLog(@"TurboQuant MoE DEBUG: *** MISMATCH DETECTED *** — weight offset or decoding bug");
+                }
+                free(cpu_gate);
+            }
+        }
+#endif /* TQ_MOE_DEBUG_VALIDATE */
 
         /* --- New command buffer for Phase 2 --- */
         cmdBuf = [tq_mtl_queue commandBuffer];
@@ -941,42 +978,13 @@ int tq_metal_moe_forward(
         }
         NSLog(@"TurboQuant MoE: Phase 2 (SwiGLU) completed OK");
 
-        /* --- New command buffer for Phase 3 --- */
-        cmdBuf = [tq_mtl_queue commandBuffer];
-        if (!cmdBuf) return -1;
-
-        /* ======== Phase 3: down projection + weighted accumulation ======== */
-        {
-            id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
-            if (!enc) return -1;
-
-            [enc setComputePipelineState:tq_pipe_moe_down_accum];
-            [enc setBuffer:weight_buf  offset:0 atIndex:0];
-            [enc setBuffer:gate_buf    offset:0 atIndex:1];  /* hb_all (post-SwiGLU) */
-            [enc setBuffer:output_buf  offset:0 atIndex:2];
-            [enc setBuffer:params_buf  offset:0 atIndex:3];
-            [enc setThreadgroupMemoryLength:shared_phase3 atIndex:0];
-
-            /* One threadgroup per output row */
-            NSUInteger n_tgs = (NSUInteger)hidden_dim;
-            MTLSize gridSize = MTLSizeMake(n_tgs, 1, 1);
-            MTLSize tgSize   = MTLSizeMake(TQ_MATMUL_TG_SIZE, 1, 1);
-            [enc dispatchThreadgroups:gridSize threadsPerThreadgroup:tgSize];
-            [enc endEncoding];
-        }
-
-        /* --- Phase 3: commit and wait --- */
-        [cmdBuf commit];
-        [cmdBuf waitUntilCompleted];
-
-        if (cmdBuf.status == MTLCommandBufferStatusError) {
-            NSLog(@"TurboQuant MoE: Phase 3 (down+accum) FAILED: %@", cmdBuf.error);
-            return -1;
-        }
-        NSLog(@"TurboQuant MoE: Phase 3 (down+accum) completed OK");
-
-        memcpy(output, [output_buf contents], output_bytes);
-        return 0;
+        /* ======== Phase 3: SKIP GPU down projection (IQ2_S shader hangs) ========
+         * Instead, copy the SwiGLU'd activations from gate_buf back to CPU.
+         * The caller (tq_moe.c) will do down projection + accumulate on CPU. */
+        memcpy(hb_output, [gate_buf contents], inter_bytes);
+        NSLog(@"TurboQuant MoE: Hybrid — Phase 1+2 on GPU done, returning hb for CPU down proj");
+        (void)output; /* unused in hybrid mode */
+        return 1; /* partial success: hb_output filled, caller does down+accum */
     }
 }
 

@@ -289,23 +289,31 @@ void tq_moe_advise(const tq_moe_layer_t* layer,
 /* ============================================================
  * Fused MoE Metal GPU dispatch
  *
- * Processes ALL active experts for one MoE layer in 3 GPU
- * dispatches instead of per-expert per-matmul dispatch:
- *   Phase 1: gate + up projections (all experts, parallel)
- *   Phase 2: SwiGLU activation (all experts, parallel)
- *   Phase 3: down projection + weighted accumulate
+ * Hybrid GPU/CPU MoE dispatch:
+ *   Phase 1: gate + up projections on GPU (all experts, parallel)
+ *   Phase 2: SwiGLU activation on GPU (all experts, parallel)
+ *   Phase 3: down projection + weighted accumulate on CPU
+ *            (IQ2_S shader hangs on Metal; CPU fallback is reliable)
  *
- * Requires Apple Silicon with Metal. Returns -1 if unavailable.
+ * GPU handles the larger gate+up matmuls (~2/3 of compute).
+ * Returns 1 = partial (hb_output filled, caller does down+accum on CPU).
+ * Returns -1 if unavailable.
  * ============================================================ */
 
 /* Check if fused MoE Metal dispatch is available */
 int tq_metal_moe_available(void);
 
-/* Fused MoE forward: 3 Metal dispatches for all active experts.
- * Returns 0 on success, -1 on failure (caller falls back to CPU). */
+/* Fused MoE forward: GPU handles gate+up+SwiGLU (Phases 1+2).
+ * Returns:
+ *   0  = full success (all phases on GPU, output[] filled)
+ *   1  = partial success: gate+up+SwiGLU done on GPU,
+ *         hb_output[] filled with [num_active * expert_dim] SwiGLU'd activations,
+ *         caller must do down projection + accumulate on CPU.
+ *  -1  = failure (caller falls back to full CPU path). */
 int tq_metal_moe_forward(
     const float*    input,
     float*          output,
+    float*          hb_output,      /* [num_active * expert_dim] — GPU writes SwiGLU results here */
     const void*     weight_base,
     size_t          weight_size,
     const uint64_t* gate_offsets,
