@@ -26,13 +26,13 @@
                     └─────────────────────────────────────────────────┘
 ```
 
-**Result: 1-bit KV cache with zero quality loss, verified from 270M to 35B.**
+**Result: 1-bit KV cache with almost no quality loss (PPL +0.03%), verified from 270M to 4B.**
 
 ---
 
 ## Key Results
 
-### KV Compression — Byte-Identical at 1-bit
+### KV Compression — Almost Lossless at 1-bit
 
 ```
 ┌──────────────────┬──────────────────────────────────────────────────┐
@@ -46,15 +46,18 @@
 └──────────────────┴──────────────────────────────────────────────────┘
 ```
 
-### Perplexity — Near-Zero Degradation
+### Perplexity — PPL +0.03% (Almost Zero Degradation)
 
 ```
 Gemma 3 4B, 101 tokens, teacher-forced:
 
-  FP16 KV          ████████████████████████████████████ 35.99 PPL
+  FP16 KV          ████████████████████████████████████ 35.99 PPL  (baseline)
   1-bit K + FP16 V  ████████████████████████████████████ 35.99 PPL  (+0.00%)
-  1-bit K + Q4 V    ████████████████████████████████████ 36.00 PPL  (+0.03%)
+  1-bit K + Q4 V    ████████████████████████████████████ 36.00 PPL  (+0.03%)  ← almost no loss
   1-bit K + Q2 V    █████████████████████████████████████████ 42.23 PPL  (+17.3%)
+
+  K-only quantization (V as FP16) is perplexity-identical.
+  K + Q4 V adds just +0.03% PPL — statistically negligible.
 ```
 
 ### Memory Savings — 32K Context
@@ -79,14 +82,16 @@ Gemma 3 4B, 32K tokens:
 | 1-bit K + Q2 V | 1 | 2 | 7.1x | +17.3% | coherent |
 | 3-bit K + FP16 V | 3 | 16 | 1.6x | +0.00% | byte-identical |
 
-### Weight Quantization — 1-bit Weights, Zero Loss
+### Weight Quantization — 1-bit Weights, Same Output on Tested Sequences
 
-| Method | Compression vs Q8 | Quality (4B Qwen3.5) |
-|--------|-------------------|----------------------|
+| Method | Compression vs Q8 | Quality (4B Qwen3.5, 30 tokens) |
+|--------|-------------------|----------------------------------|
 | Q8 (int8) | 1.0x | reference |
-| Q4 (4-bit) | 2.0x | byte-identical |
-| **1-bit sign hash** | **8.4x** | **byte-identical** |
-| Q4+Q2 progressive | 1.3x (6-bit) | cosine 0.999 |
+| Q4 (4-bit) | 2.0x | output-identical on tested prompts |
+| **1-bit sign hash** | **8.4x** | **output-identical on tested prompts** |
+| Q4+Q2 progressive | 1.3x (6-bit) | cosine 0.999 (per-matrix) |
+
+> Note: "output-identical" verified on greedy decoding up to 30 tokens across multiple prompts. Longer sequences may diverge due to accumulated numerical differences.
 
 ---
 
@@ -232,7 +237,7 @@ cmake -B build -DTQ_BUILD_ROCM=ON    # AMD ROCm
 **30,000+ lines of C/C++/Metal** — every component from scratch, zero external dependencies.
 
 - **12 KV quantization types** — RHT + Lloyd-Max + QJL (the core differentiator)
-- **1-bit weight quantization** — sign hash + L2 norm, 8.4x compression, zero quality loss
+- **1-bit weight quantization** — sign hash + L2 norm, 8.4x compression, output-identical on tested sequences
 - **Fused Q4 attention** — weighted sum directly from packed nibbles
 - **Adaptive compression** — per-layer bit recommendation, online codebook calibration
 - **GGUF v3 loader** — 24 quant types, IQ2 E8 lattice, MoE dispatch
@@ -256,6 +261,12 @@ Verified from 270M to 35B. Qwen3.5-35B-A3B MoE runs on 16GB Mac (RSS 4.7GB).
 
 **Q: "RHT overhead?"**
 147 ns per vector. 1-bit attention: 1.2 ns/key. < 0.1% of inference time.
+
+---
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=quantumaikr/TurboQuant.cpp&type=Date)](https://star-history.com/#quantumaikr/TurboQuant.cpp&Date)
 
 ---
 

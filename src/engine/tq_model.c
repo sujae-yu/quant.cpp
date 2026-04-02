@@ -3302,10 +3302,11 @@ tq_model_t* tq_load_gguf(const char* path) {
                 est_fp32 += (size_t)dim * delta_z_dim * sizeof(float);
         }
 
-        const size_t MAX_FP32_BYTES = (size_t)8 * 1024 * 1024 * 1024ULL; /* 8 GB */
+        const size_t MAX_FP32_BYTES = (size_t)16 * 1024 * 1024 * 1024ULL; /* 16 GB */
         int has_gguf_weights = 0;
         for (int l = 0; l < c->n_layers && !has_gguf_weights; l++) {
             if (model->layers[l].gguf_wq || model->layers[l].gguf_w_gate
+                || model->layers[l].gguf_delta_qkv || model->layers[l].gguf_delta_z
                 || model->layers[l].moe)
                 has_gguf_weights = 1;
         }
