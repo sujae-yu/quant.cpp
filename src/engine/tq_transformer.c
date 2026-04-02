@@ -27,9 +27,6 @@
 #include <stdio.h>
 #include <time.h>
 
-#ifdef __ARM_NEON
-#include <arm_neon.h>
-
 /* Unified Q2/1-bit matmul dispatch.
  * When model->use_1bit_weights, Q2 fields contain sign bits + norms,
  * dispatched to tq_matmul_1bit (FP32 input required).
@@ -49,6 +46,9 @@
         else \
             tq_matmul_q2((out), (x_fp32), (qs), (scales), (rows), (cols)); \
     } while(0)
+
+#ifdef __ARM_NEON
+#include <arm_neon.h>
 #endif
 
 /* ============================================================
