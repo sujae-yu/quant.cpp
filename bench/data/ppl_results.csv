@@ -1,1 +1,2 @@
 date,model,label,kv_type,v_quant,tokens,nll,ppl,tok_s
+2026-04-03_024158,SmolLM2-1.7B-Instruct-Q8_0.gguf,FP16_baseline,none,fp16,998,2.490645,12.0691,7.7
