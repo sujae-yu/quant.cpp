@@ -251,11 +251,24 @@ int main(int argc, char** argv) {
             c->n_layers, c->hidden_dim, c->n_heads, c->n_kv_heads, c->vocab_size);
     fprintf(stderr, "  Load time: %.2f s\n", load_time);
 
-    /* Step 2: Quantize to Q4 */
-    fprintf(stderr, "[2/3] Quantizing weights to Q4...\n");
+    /* Step 2: Quantize weights */
+    int use_q8 = 0;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-q8") == 0 || strcmp(argv[i], "--q8") == 0) use_q8 = 1;
+    }
+
+    if (use_q8) {
+        fprintf(stderr, "[2/3] Quantizing weights to Q8 (higher quality)...\n");
+    } else {
+        fprintf(stderr, "[2/3] Quantizing weights to Q4...\n");
+    }
     clock_gettime(CLOCK_MONOTONIC, &ts0);
 
-    tq_quantize_weights_q4(model);
+    if (use_q8) {
+        tq_quantize_weights(model); /* Q8 */
+    } else {
+        tq_quantize_weights_q4(model); /* Q4 */
+    }
 
     clock_gettime(CLOCK_MONOTONIC, &ts1);
     double quant_time = (double)(ts1.tv_sec - ts0.tv_sec)

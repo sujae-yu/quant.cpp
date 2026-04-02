@@ -208,6 +208,7 @@ typedef struct {
 
     /* Q2 weight quantization */
     int use_q2_weights;       /* 1 if layer weights are Q2-quantized */
+    int use_1bit_weights;     /* 1 if Q2 fields contain 1-bit sign data (not Lloyd-Max Q2) */
     void* _q2_data;           /* heap buffer for all Q2 quantized weights */
     size_t _q2_size;
 
@@ -377,6 +378,7 @@ typedef struct {
 
     /* DeltaNet config */
     int32_t delta_n_heads;
+    int32_t delta_n_kv_heads_tqm; /* K/Q heads (0 = same as delta_n_heads) */
     int32_t delta_key_head_dim;
     int32_t delta_value_head_dim;
     int32_t delta_conv_width;
@@ -414,7 +416,7 @@ typedef struct {
     int32_t shared_expert_intermediate_dim;
 
     /* Padding to 512 bytes */
-    uint8_t _pad[92];
+    uint8_t _pad[88]; /* 92 - 4 for delta_n_kv_heads_tqm */
 } tqm_header_t;
 #pragma pack(pop)
 
@@ -467,6 +469,11 @@ void tq_quantize_row_q8(const float* src, int8_t* dst_qs, float* dst_scales, int
 void tq_quantize_weights(tq_model_t* model);
 void tq_matmul_q4(float* out, const float* x, const uint8_t* w_qs, const float* w_scales,
                    int n, int d);
+void tq_matmul_q4q2_preq(float* out,
+                          const uint8_t* w_q4, const float* w_q4s,
+                          const uint8_t* w_q2, const float* w_q2s,
+                          const int8_t* x_q8, const float* x_scales,
+                          int n, int d);
 void tq_matmul_q4_preq(float* out, const uint8_t* w_qs, const float* w_scales,
                         const int8_t* x_q8, const float* x_scales, int n, int d);
 void tq_quantize_row_q4(const float* src, uint8_t* dst_qs, float* dst_scales, int n);
@@ -474,11 +481,24 @@ void tq_dequantize_row_q4(const uint8_t* qs, const float* scales, float* dst, in
 void tq_quantize_weights_q4(tq_model_t* model);
 void tq_matmul_q2(float* out, const float* x, const uint8_t* w_qs, const float* w_scales,
                    int n, int d);
+void tq_matmul_1bit(float* out, const float* x, const uint8_t* sign_data, const float* norms,
+                     int n_rows, int dim);
 void tq_matmul_q2_preq(float* out, const uint8_t* w_qs, const float* w_scales,
                         const int8_t* x_q8, const float* x_scales, int n, int d);
 void tq_quantize_row_q2(const float* src, uint8_t* dst_qs, float* dst_scales, int n);
 void tq_dequantize_row_q2(const uint8_t* qs, const float* scales, float* dst, int n);
 void tq_quantize_weights_q2(tq_model_t* model);
+
+/* RHT + Q4 + Q2 Residual: TurboQuant novel weight quantization.
+ * Achieves Q8 quality at 6-bit effective size. */
+void tq_quantize_row_rht_q4q2(const float* src,
+                                uint8_t* qs4, float* sc4,
+                                uint8_t* qs2, float* sc2,
+                                float* rht_buf, int n);
+void tq_matmul_rht_q4q2(float* out, const float* x,
+                          const uint8_t* w_qs4, const float* w_sc4,
+                          const uint8_t* w_qs2, const float* w_sc2,
+                          float* x_rht, int n, int d);
 void tq_rmsnorm(float* out, const float* x, const float* weight, int n, float eps);
 void tq_rope(float* q, float* k, int pos, int head_dim,
              int n_heads, int n_kv_heads, float freq_base);

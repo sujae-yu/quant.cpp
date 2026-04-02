@@ -109,7 +109,7 @@ static void swiglu_fused(float* restrict hb, const float* restrict hb2, int n) {
  * 32 slots/layer × 3.2 MB ≈ 102 MB/layer. For 30 layers: ~3 GB.
  * ============================================================ */
 
-#define EXPERT_CACHE_SIZE 32  /* per layer */
+#define EXPERT_CACHE_SIZE 4   /* per layer — 4 × 3.2MB × 40 = 512 MB max */
 
 /* FP32 → FP16 conversion for Q8_0 block scale fields */
 static inline uint16_t fp32_to_fp16(float f) {
@@ -349,7 +349,7 @@ static expert_cache_entry_t* cache_get_or_create(
 
 #ifdef TQ_HAS_ACCELERATE
 
-#define CBLAS_CACHE_SIZE 10  /* per layer — 10 × 12 MB × 40 layers = 4.8 GB max */
+#define CBLAS_CACHE_SIZE 2   /* per layer — 2 × 12 MB × 40 layers = 0.96 GB max */
 
 typedef struct {
     int      expert_id;       /* -1 = empty slot */
@@ -888,8 +888,9 @@ moe_cpu_fallback: ;
                          exp->down_q4_qs, exp->down_q4_scales,
                          hidden_dim, expert_dim);
         } else {
-            /* Fallback: on-the-fly GGUF dequant path */
-            tq_metal_batch_begin_if_available();
+            /* On-the-fly GGUF dequant path (IQ2_XXS/IQ2_S).
+             * Metal batch DISABLED for MoE experts: GPU IQ2 dequant
+             * overhead exceeds CPU NEON fused dot speed for small 512×2048 matmuls. */
 
             /* gate = input @ w_gate^T   -> [expert_dim] */
             tq_matmul_gguf(state->expert_hb, input,
@@ -900,9 +901,6 @@ moe_cpu_fallback: ;
             tq_matmul_gguf(state->expert_hb2, input,
                            exp->w_up, exp->up_type,
                            expert_dim, hidden_dim);
-
-            /* Flush: commit + wait + copy results before CPU-side SwiGLU */
-            tq_metal_batch_flush_if_available();
 
             /* SwiGLU activation: hb = silu(gate) * up */
             swiglu_fused(state->expert_hb, state->expert_hb2, expert_dim);

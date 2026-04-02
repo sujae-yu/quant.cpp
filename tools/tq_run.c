@@ -157,10 +157,14 @@ int main(int argc, char** argv) {
         } else if (strcmp(argv[i], "-q") == 0) {
             if (i + 1 < argc && argv[i + 1][0] != '-') {
                 const char* qarg = argv[++i];
-                if (strcmp(qarg, "q2") == 0 || strcmp(qarg, "2") == 0) {
+                if (strcmp(qarg, "q1") == 0 || strcmp(qarg, "1") == 0 || strcmp(qarg, "1bit") == 0) {
+                    quant_mode = 1;
+                } else if (strcmp(qarg, "q2") == 0 || strcmp(qarg, "2") == 0) {
                     quant_mode = 2;
                 } else if (strcmp(qarg, "q4") == 0 || strcmp(qarg, "4") == 0) {
                     quant_mode = 4;
+                } else if (strcmp(qarg, "q6") == 0 || strcmp(qarg, "6") == 0 || strcmp(qarg, "q4q2") == 0) {
+                    quant_mode = 6;
                 } else if (strcmp(qarg, "q8") == 0 || strcmp(qarg, "8") == 0) {
                     quant_mode = 8;
                 } else if (strcmp(qarg, "none") == 0 || strcmp(qarg, "fp32") == 0) {
@@ -233,6 +237,16 @@ int main(int argc, char** argv) {
             kv_type < TQ_TYPE_COUNT ? tq_type_name(kv_type) : "fp32",
             value_quant_bits == 4 ? "Q4" : (value_quant_bits == 2 ? "Q2" : "FP16"));
 
+    if (quant_mode == 1) {
+        fprintf(stderr, "Quantizing weights to 1-bit (TurboQuant sign hash)...\n");
+        extern void tq_quantize_weights_1bit(tq_model_t*);
+        tq_quantize_weights_1bit(model);
+    }
+    if (quant_mode == 6) {
+        fprintf(stderr, "Quantizing weights to Q4+Q2 (TurboQuant Progressive Residual, 6-bit)...\n");
+        extern void tq_quantize_weights_q4q2(tq_model_t*);
+        tq_quantize_weights_q4q2(model);
+    } else
     if (quant_mode == 2) {
         fprintf(stderr, "Quantizing weights to Q2 (2-bit Lloyd-Max codebook)...\n");
         tq_quantize_weights_q2(model);
