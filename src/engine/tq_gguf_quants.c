@@ -1179,72 +1179,148 @@ static float fused_dot_iq2_xxs(const void* row, const float* x, int n) {
 }
 
 #if TQ_HAS_NEON
+
+/* Vectorized sign application helper: given 8 grid bytes and an 8-bit sign mask,
+ * produce signed int8x8 where negative signs are applied.
+ * Uses NEON bit test: broadcast sign byte, AND with bit masks, compare to produce
+ * negation mask, then apply via (grid ^ neg) - neg (conditional negate). */
+static const uint8_t iq2_sign_bit_masks[8] = {1, 2, 4, 8, 16, 32, 64, 128};
+
 /* NEON-optimized fused IQ2_XXS dot product.
- * Processes 8 grid values at a time using vectorized sign application. */
+ * Optimizations over baseline:
+ *   1. Vectorized sign expansion via NEON bit-test (replaces 8 scalar shifts)
+ *   2. Apply signs in int8 domain before float conversion (fewer instructions)
+ *   3. Fully unrolled inner loop (4 groups per ib32)
+ *   4. Prefetch next block's weight data
+ *   5. Two accumulator strategy to reduce FMA dependency chains */
 static float fused_dot_iq2_xxs_neon(const void* row, const float* x, int n) {
     const int nb = n / 256;
     const uint8_t* base = (const uint8_t*)row;
-    float32x4_t vtotal = vdupq_n_f32(0.0f);
+    float32x4_t vtotal0 = vdupq_n_f32(0.0f);
+
+    /* Preload sign bit masks into a NEON register */
+    const uint8x8_t vbit_masks = vld1_u8(iq2_sign_bit_masks);
 
     for (int b = 0; b < nb; b++) {
         const uint8_t* blk = base + b * 66;
+
+        /* Prefetch next block */
+        if (b + 1 < nb) {
+            __builtin_prefetch(blk + 66, 0, 3);
+            __builtin_prefetch(blk + 66 + 32, 0, 3);
+        }
+
         uint16_t d_raw;
         memcpy(&d_raw, blk, 2);
         const float d = fp16_to_fp32(d_raw);
-        const uint16_t* qs = (const uint16_t*)(blk + 2);
+        const uint8_t* qs_bytes = blk + 2;
         const float* xbase = x + b * 256;
 
         for (int ib32 = 0; ib32 < 8; ib32++) {
             uint32_t aux32[2];
-            memcpy(aux32, qs + 4 * ib32, 8);
+            memcpy(aux32, qs_bytes + 8 * ib32, 8);
             const uint8_t* aux8 = (const uint8_t*)aux32;
             const float db = d * (0.5f + (float)(aux32[1] >> 28)) * 0.25f;
             const float* xb = xbase + ib32 * 32;
 
-            float32x4_t vgroup = vdupq_n_f32(0.0f);
+            /* Accumulate across all 4 sub-groups before scaling by db.
+             * Use two accumulators to break FMA dependency chains. */
+            float32x4_t vacc0 = vdupq_n_f32(0.0f);
+            float32x4_t vacc1 = vdupq_n_f32(0.0f);
 
-            for (int l = 0; l < 4; l++) {
-                const uint8_t* grid = (const uint8_t*)(iq2xxs_grid + aux8[l]);
-                const uint8_t signs = ksigns_iq2xs[(aux32[1] >> (7 * l)) & 127];
-                const float* xp = xb + l * 8;
+            /* --- Group 0 --- */
+            {
+                const uint8_t* grid = (const uint8_t*)(iq2xxs_grid + aux8[0]);
+                const uint8_t signs = ksigns_iq2xs[aux32[1] & 127];
 
-                /* Load 8 grid bytes, expand to float */
                 uint8x8_t vgrid = vld1_u8(grid);
-                int16x8_t vgrid16 = vreinterpretq_s16_u16(vmovl_u8(vgrid));
-                int32x4_t vg_lo = vmovl_s16(vget_low_s16(vgrid16));
-                int32x4_t vg_hi = vmovl_s16(vget_high_s16(vgrid16));
-                float32x4_t vf_lo = vcvtq_f32_s32(vg_lo);
-                float32x4_t vf_hi = vcvtq_f32_s32(vg_hi);
+                /* Vectorized sign expansion:
+                 * Broadcast sign byte to all lanes, AND with bit masks,
+                 * compare != 0 produces 0xFF for negative lanes.
+                 * Then: signed = (grid ^ neg_mask) - neg_mask
+                 *       which is grid when neg_mask=0, -grid when neg_mask=0xFF */
+                uint8x8_t vsign_bcast = vdup_n_u8(signs);
+                uint8x8_t vsign_bits = vtst_u8(vsign_bcast, vbit_masks);
+                /* vsign_bits is 0xFF where negative, 0x00 where positive */
+                int8x8_t vgrid_s = vreinterpret_s8_u8(vgrid);
+                int8x8_t vneg_mask = vreinterpret_s8_u8(vsign_bits);
+                int8x8_t vsigned = vsub_s8(veor_s8(vgrid_s, vneg_mask), vneg_mask);
 
-                /* Apply signs via float bit XOR: set sign bit where signs bit is 1.
-                 * Expand each sign bit to a 32-bit mask with only the float sign bit set. */
-                uint32x4_t sign_lo = {
-                    (uint32_t)((signs >> 0) & 1) << 31,
-                    (uint32_t)((signs >> 1) & 1) << 31,
-                    (uint32_t)((signs >> 2) & 1) << 31,
-                    (uint32_t)((signs >> 3) & 1) << 31
-                };
-                uint32x4_t sign_hi = {
-                    (uint32_t)((signs >> 4) & 1) << 31,
-                    (uint32_t)((signs >> 5) & 1) << 31,
-                    (uint32_t)((signs >> 6) & 1) << 31,
-                    (uint32_t)((signs >> 7) & 1) << 31
-                };
-                vf_lo = vreinterpretq_f32_u32(veorq_u32(vreinterpretq_u32_f32(vf_lo), sign_lo));
-                vf_hi = vreinterpretq_f32_u32(veorq_u32(vreinterpretq_u32_f32(vf_hi), sign_hi));
+                /* Widen to int16, then int32, then float */
+                int16x8_t vs16 = vmovl_s8(vsigned);
+                float32x4_t vf_lo = vcvtq_f32_s32(vmovl_s16(vget_low_s16(vs16)));
+                float32x4_t vf_hi = vcvtq_f32_s32(vmovl_s16(vget_high_s16(vs16)));
 
-                /* Dot with input */
-                float32x4_t vx_lo = vld1q_f32(xp);
-                float32x4_t vx_hi = vld1q_f32(xp + 4);
-
-                vgroup = vfmaq_f32(vgroup, vf_lo, vx_lo);
-                vgroup = vfmaq_f32(vgroup, vf_hi, vx_hi);
+                vacc0 = vfmaq_f32(vacc0, vf_lo, vld1q_f32(xb));
+                vacc1 = vfmaq_f32(vacc1, vf_hi, vld1q_f32(xb + 4));
             }
-            /* Scale by db and accumulate */
-            vtotal = vfmaq_n_f32(vtotal, vgroup, db);
+
+            /* --- Group 1 --- */
+            {
+                const uint8_t* grid = (const uint8_t*)(iq2xxs_grid + aux8[1]);
+                const uint8_t signs = ksigns_iq2xs[(aux32[1] >> 7) & 127];
+
+                uint8x8_t vgrid = vld1_u8(grid);
+                uint8x8_t vsign_bcast = vdup_n_u8(signs);
+                uint8x8_t vsign_bits = vtst_u8(vsign_bcast, vbit_masks);
+                int8x8_t vgrid_s = vreinterpret_s8_u8(vgrid);
+                int8x8_t vneg_mask = vreinterpret_s8_u8(vsign_bits);
+                int8x8_t vsigned = vsub_s8(veor_s8(vgrid_s, vneg_mask), vneg_mask);
+
+                int16x8_t vs16 = vmovl_s8(vsigned);
+                float32x4_t vf_lo = vcvtq_f32_s32(vmovl_s16(vget_low_s16(vs16)));
+                float32x4_t vf_hi = vcvtq_f32_s32(vmovl_s16(vget_high_s16(vs16)));
+
+                vacc0 = vfmaq_f32(vacc0, vf_lo, vld1q_f32(xb + 8));
+                vacc1 = vfmaq_f32(vacc1, vf_hi, vld1q_f32(xb + 12));
+            }
+
+            /* --- Group 2 --- */
+            {
+                const uint8_t* grid = (const uint8_t*)(iq2xxs_grid + aux8[2]);
+                const uint8_t signs = ksigns_iq2xs[(aux32[1] >> 14) & 127];
+
+                uint8x8_t vgrid = vld1_u8(grid);
+                uint8x8_t vsign_bcast = vdup_n_u8(signs);
+                uint8x8_t vsign_bits = vtst_u8(vsign_bcast, vbit_masks);
+                int8x8_t vgrid_s = vreinterpret_s8_u8(vgrid);
+                int8x8_t vneg_mask = vreinterpret_s8_u8(vsign_bits);
+                int8x8_t vsigned = vsub_s8(veor_s8(vgrid_s, vneg_mask), vneg_mask);
+
+                int16x8_t vs16 = vmovl_s8(vsigned);
+                float32x4_t vf_lo = vcvtq_f32_s32(vmovl_s16(vget_low_s16(vs16)));
+                float32x4_t vf_hi = vcvtq_f32_s32(vmovl_s16(vget_high_s16(vs16)));
+
+                vacc0 = vfmaq_f32(vacc0, vf_lo, vld1q_f32(xb + 16));
+                vacc1 = vfmaq_f32(vacc1, vf_hi, vld1q_f32(xb + 20));
+            }
+
+            /* --- Group 3 --- */
+            {
+                const uint8_t* grid = (const uint8_t*)(iq2xxs_grid + aux8[3]);
+                const uint8_t signs = ksigns_iq2xs[(aux32[1] >> 21) & 127];
+
+                uint8x8_t vgrid = vld1_u8(grid);
+                uint8x8_t vsign_bcast = vdup_n_u8(signs);
+                uint8x8_t vsign_bits = vtst_u8(vsign_bcast, vbit_masks);
+                int8x8_t vgrid_s = vreinterpret_s8_u8(vgrid);
+                int8x8_t vneg_mask = vreinterpret_s8_u8(vsign_bits);
+                int8x8_t vsigned = vsub_s8(veor_s8(vgrid_s, vneg_mask), vneg_mask);
+
+                int16x8_t vs16 = vmovl_s8(vsigned);
+                float32x4_t vf_lo = vcvtq_f32_s32(vmovl_s16(vget_low_s16(vs16)));
+                float32x4_t vf_hi = vcvtq_f32_s32(vmovl_s16(vget_high_s16(vs16)));
+
+                vacc0 = vfmaq_f32(vacc0, vf_lo, vld1q_f32(xb + 24));
+                vacc1 = vfmaq_f32(vacc1, vf_hi, vld1q_f32(xb + 28));
+            }
+
+            /* Combine accumulators, scale by db, accumulate to total */
+            float32x4_t vgroup = vaddq_f32(vacc0, vacc1);
+            vtotal0 = vfmaq_n_f32(vtotal0, vgroup, db);
         }
     }
-    return vaddvq_f32(vtotal);
+    return vaddvq_f32(vtotal0);
 }
 #endif /* TQ_HAS_NEON */
 
