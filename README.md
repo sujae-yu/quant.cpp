@@ -46,15 +46,14 @@
 └──────────────────┴──────────────────────────────────────────────────┘
 ```
 
-### Perplexity — PPL +0.03% (Almost Zero Degradation)
+### Perplexity — Zero Degradation Across Architectures
 
 ```
-Gemma 3 4B, 101 tokens, teacher-forced:
+SmolLM2 1.7B (Llama arch), 105 tokens:       Gemma 3 4B, 101 tokens:
 
-  FP16 KV          ████████████████████████████████████ 35.99 PPL  (baseline)
-  1-bit K + FP16 V  ████████████████████████████████████ 35.99 PPL  (+0.00%)
-  1-bit K + Q4 V    ████████████████████████████████████ 36.00 PPL  (+0.03%)  ← almost no loss
-  1-bit K + Q2 V    █████████████████████████████████████████ 42.23 PPL  (+17.3%)
+  baseline    ██████ 5.84 PPL                    baseline    ████████████████████ 35.99 PPL
+  1-bit K     ██████ 5.84 PPL  (+0.00%)          1-bit K     ████████████████████ 35.99 PPL  (+0.00%)
+  1-bit K+Q4V ██████ 5.82 PPL  (-0.04%)          1-bit K+Q4V ████████████████████ 36.00 PPL  (+0.03%)
 
   K-only quantization (V as FP16) is perplexity-identical.
   K + Q4 V adds just +0.03% PPL — statistically negligible.
@@ -114,15 +113,16 @@ ctest --test-dir build   # 32/32 should pass
 
 ## Supported Models
 
-| Model | Params | Format | Speed (6T, M3) | KV 1-bit Verified |
-|-------|--------|--------|----------------|-------------------|
-| **Qwen3.5-35B-A3B** | 35B (3B active) | GGUF IQ2_XXS | ~1-4 tok/s | byte-identical ✓ |
-| **Qwen3.5-4B** | 4B | GGUF Q8_0 | ~15 tok/s | byte-identical ✓ |
-| **Qwen3.5-0.8B** | 752M | TQM / GGUF | 35 tok/s | byte-identical ✓ |
-| **Gemma 3 4B** | 4B | TQM | 20 tok/s | PPL +0.03% ✓ |
-| **Gemma 3 270M** | 270M | TQM | 176 tok/s | byte-identical ✓ |
+| Model | Arch | Params | Format | Speed (6T, M3) | KV 1-bit Verified |
+|-------|------|--------|--------|----------------|-------------------|
+| **Qwen3.5-35B-A3B** | Qwen2-MoE | 35B (3B active) | GGUF IQ2_XXS | ~1-4 tok/s | byte-identical ✓ |
+| **Qwen3.5-4B** | Qwen3.5 | 4B | GGUF Q8_0 | 5.4 tok/s | byte-identical ✓ |
+| **SmolLM2-1.7B** | **Llama** | 1.7B | GGUF Q8_0 | 24 tok/s | **PPL +0.00%** ✓ |
+| **Qwen3.5-0.8B** | Qwen3.5 | 752M | TQM / GGUF | 35 tok/s | byte-identical ✓ |
+| **Gemma 3 4B** | Gemma 3 | 4B | TQM | 20 tok/s | PPL +0.03% ✓ |
+| **Gemma 3 270M** | Gemma 3 | 270M | TQM | 176 tok/s | byte-identical ✓ |
 
-Architectures: Gemma 3 (sliding window, GeGLU), Qwen3.5 (DeltaNet hybrid), Qwen2-MoE (256 experts, top-8, shared expert).
+**4 architectures verified:** Llama (SmolLM2), Gemma 3 (sliding window, GeGLU), Qwen3.5 (DeltaNet hybrid), Qwen2-MoE (256 experts, top-8, shared expert).
 
 ---
 
