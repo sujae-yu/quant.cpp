@@ -42,3 +42,5 @@ refs/.venv/
 .venv/
 refs/
 models/.claude/worktrees/
+*.gguf
+models/
