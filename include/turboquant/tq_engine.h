@@ -46,6 +46,7 @@ typedef struct {
 
     /* Multi-architecture support */
     int model_type;          /* 0=qwen35, 1=gemma3, 2=qwen2moe */
+    int is_gemma4;           /* 1 if Gemma 4 (STEP35): uses SwiGLU, no post-norms */
     int sliding_window;      /* sliding window size (512 for gemma3, 0 for unlimited) */
     float rope_local_base_freq; /* RoPE base freq for local/sliding layers (10000.0 for gemma3) */
     int n_norms_per_block;   /* 2 for qwen35, 4 for gemma3 */
@@ -57,6 +58,8 @@ typedef struct {
     int full_head_dim;       /* head_dim for full attention layers (e.g., 512 vs sliding 256) */
     int full_n_heads;        /* n_heads for full layers (e.g., 8 vs sliding 16) */
     int full_n_kv_heads;     /* n_kv_heads for full layers (e.g., 2 vs sliding 8) */
+    int rope_n_dims;         /* RoPE dimension count for sliding/SWA layers (0 = use head_dim) */
+    int rope_n_dims_full;    /* RoPE dimension count for full/global layers (0 = use rope_n_dims) */
     float final_logit_softcap; /* logit soft-capping: logits = cap * tanh(logits/cap), 0=disabled */
     float attn_logit_softcap;  /* attention score soft-capping (Gemma): 0=disabled, typically 50.0 */
     int* per_layer_inter_dim;  /* [n_layers] per-layer intermediate_dim (NULL = use intermediate_dim) */

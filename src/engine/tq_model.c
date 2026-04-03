@@ -2874,6 +2874,19 @@ tq_model_t* tq_load_gguf(const char* path) {
     c->rope_freq_base   = tq_gguf_get_f32(gguf, GGUF_KEY("rope.freq_base"), 1000000.0f);
     c->rms_norm_eps     = tq_gguf_get_f32(gguf, GGUF_KEY("attention.layer_norm_rms_epsilon"), 1e-6f);
 
+    /* RoPE dimension count: number of dimensions to rotate per head.
+     * For models with rope_freqs (learned freq factors), this determines the
+     * frequency computation: freq[i] = pow(base, -2*i/n_dims).
+     * For STEP35/Gemma4: n_dims = head_dim/2 for full layers (partial rotation). */
+    c->rope_n_dims = tq_gguf_get_i32(gguf, GGUF_KEY("rope.dimension_count"), 0);
+    c->rope_n_dims_full = c->rope_n_dims;  /* default: same for both layer types */
+    {
+        int swa_dims = tq_gguf_get_i32(gguf, GGUF_KEY("rope.dimension_count_swa"), 0);
+        if (swa_dims > 0) {
+            c->rope_n_dims = swa_dims;  /* sliding layers use SWA dim count */
+        }
+    }
+
     /* Sliding window + local RoPE base */
     c->sliding_window = (int)tq_gguf_get_u32(gguf, GGUF_KEY("attention.sliding_window"), 0);
     /* Local/sliding RoPE base: try Gemma4 naming first, then generic */
@@ -2965,6 +2978,17 @@ tq_model_t* tq_load_gguf(const char* path) {
     if (strstr(gguf->arch, "gemma") != NULL) {
         c->model_type = 1; /* gemma family */
         c->n_norms_per_block = 4;
+        /* Gemma 4 (STEP35) detection: architecture string is "gemma4" */
+        if (strstr(gguf->arch, "gemma4") != NULL) {
+            c->is_gemma4 = 1;
+            /* STEP35: full attention layers use half the RoPE dimensions */
+            if (c->rope_n_dims_full > 0) {
+                c->rope_n_dims_full = c->rope_n_dims_full / 2;
+            }
+            fprintf(stderr, "tq_load_gguf: Gemma4 — RoPE dims swa=%d full=%d, "
+                    "GeGLU, rope_freqs for full layers only\n",
+                    c->rope_n_dims, c->rope_n_dims_full);
+        }
         fprintf(stderr, "tq_load_gguf: Gemma family detected (sliding_window=%d)\n", c->sliding_window);
     } else if (c->is_moe) {
         c->model_type = 2; /* qwen moe */

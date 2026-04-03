@@ -1005,7 +1005,6 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
     if (c->partial_rotary_factor > 0.0f && c->partial_rotary_factor < 1.0f) {
         /* Partial RoPE: only apply to first partial_rotary_factor * head_dim dims */
         int rope_dim = (int)(c->partial_rotary_factor * head_dim);
-        /* Apply RoPE only to the first rope_dim dimensions of each head */
         for (int h = 0; h < n_heads; h++) {
             float* qh = s->q + h * head_dim;
             for (int i = 0; i < rope_dim / 2; i++) {
@@ -1032,16 +1031,53 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
                 kh[2 * i + 1] = k0 * sin_t + k1 * cos_t;
             }
         }
-    } else if (model->rope_freqs && model->rope_freqs_len > 0) {
-        /* Learned RoPE frequencies (Gemma 4): use pre-computed inv_freq values.
-         * rope_freqs has full_head_dim/2 entries (e.g., 256 for head_dim=512).
-         * For sliding layers (head_dim=256), use the first 128 entries.
-         * For full layers (head_dim=512), use all 256 entries. */
-        int rope_pairs = head_dim / 2;
+    } else if (model->rope_freqs && model->rope_freqs_len > 0 &&
+               !(c->is_gemma4 && model->layer_is_sliding && model->layer_is_sliding[l])) {
+        /* Learned RoPE frequency factors (Gemma 4 / STEP35).
+         * Only used for FULL (global) attention layers. Sliding (SWA) layers
+         * use standard RoPE without freq_factors (matching llama.cpp STEP35).
+         *
+         * rope_freqs[i] is a frequency FACTOR (divisor) on the base frequency.
+         * theta[i] = pos * pow(base, -2*i/n_dims) / rope_freqs[i]
+         * where n_dims is the RoPE dimension count (NOT head_dim for full layers).
+         *
+         * For Gemma 4: n_dims = 256 for both sliding (head_dim=256) and full
+         * (head_dim=512) layers. This is because rope.dimension_count=512 gets
+         * halved for STEP35 (n_rot_full = 512/2 = 256), and
+         * rope.dimension_count_swa=256 for sliding layers.
+         *
+         * rope_freqs has up to full_head_dim/2 entries (256 for head_dim=512).
+         * For sliding layers (head_dim=256), use the first head_dim/2 entries.
+         * For full layers, n_dims < head_dim, so pairs beyond n_dims/2 are not
+         * rotated (left as-is). The freq_factors handle partial rotation within
+         * the rotated range (1.0 = rotate, 1e30 = effectively no rotation). */
+        float rope_base = c->rope_freq_base;
+        if (c->model_type == 1 && c->rope_local_base_freq > 0.0f &&
+            model->layer_is_sliding && model->layer_is_sliding[l]) {
+            rope_base = c->rope_local_base_freq;
+        }
+
+        /* Determine RoPE n_dims for this layer type */
+        int is_full_layer = (model->layer_is_sliding && !model->layer_is_sliding[l] &&
+                             c->full_head_dim > 0);
+        int rope_n_dims;
+        if (is_full_layer && c->rope_n_dims_full > 0) {
+            rope_n_dims = c->rope_n_dims_full;
+        } else if (c->rope_n_dims > 0) {
+            rope_n_dims = c->rope_n_dims;
+        } else {
+            rope_n_dims = head_dim; /* fallback */
+        }
+        int rope_pairs = rope_n_dims / 2;  /* pairs that get RoPE treatment */
+        if (rope_pairs > model->rope_freqs_len)
+            rope_pairs = model->rope_freqs_len;
+
         for (int h = 0; h < n_heads; h++) {
             float* qh = s->q + h * head_dim;
-            for (int i = 0; i < rope_pairs && i < model->rope_freqs_len; i++) {
-                float theta = pos * model->rope_freqs[i];
+            for (int i = 0; i < rope_pairs; i++) {
+                float base_freq = 1.0f / powf(rope_base, 2.0f * i / (float)rope_n_dims);
+                float freq = base_freq / model->rope_freqs[i];
+                float theta = pos * freq;
                 float cos_t = cosf(theta);
                 float sin_t = sinf(theta);
                 float q0 = qh[2 * i];
@@ -1049,11 +1085,14 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
                 qh[2 * i]     = q0 * cos_t - q1 * sin_t;
                 qh[2 * i + 1] = q0 * sin_t + q1 * cos_t;
             }
+            /* Pairs beyond rope_pairs are left unrotated (pass-through) */
         }
         for (int h = 0; h < n_kv_heads; h++) {
             float* kh = s->k + h * head_dim;
-            for (int i = 0; i < rope_pairs && i < model->rope_freqs_len; i++) {
-                float theta = pos * model->rope_freqs[i];
+            for (int i = 0; i < rope_pairs; i++) {
+                float base_freq = 1.0f / powf(rope_base, 2.0f * i / (float)rope_n_dims);
+                float freq = base_freq / model->rope_freqs[i];
+                float theta = pos * freq;
                 float cos_t = cosf(theta);
                 float sin_t = sinf(theta);
                 float k0 = kh[2 * i];
@@ -1481,12 +1520,23 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
             }
         }
 
-        /* Attention logit soft-capping (Gemma 2/3/4): cap * tanh(score / cap) */
+        /* Attention logit soft-capping (Gemma 2/3/4): cap * tanh(score / cap)
+         * Important: softcap applies to RAW (unscaled) scores. The 1/sqrt(d)
+         * scaling must be applied AFTER softcap, before softmax.
+         * This matches llama.cpp's approach: softcap(Q*K^T) * scale → softmax.
+         *
+         * When softcap is disabled, scores already have scale applied inline
+         * (score * inv_scale), so no extra work needed. */
         if (c->attn_logit_softcap > 0.0f) {
             float cap = c->attn_logit_softcap;
             float inv_cap = 1.0f / cap;
+            float inv_scale = 1.0f / sqrtf(attn_scale_dim);
             for (int t = attn_start; t < seq_len; t++) {
-                atth[t] = cap * tanhf(atth[t] * inv_cap);
+                /* atth[t] currently has score * inv_scale (scaled).
+                 * Undo the scale, apply softcap, then re-apply scale. */
+                float raw = atth[t] / inv_scale;  /* undo: raw score */
+                float capped = cap * tanhf(raw * inv_cap);
+                atth[t] = capped * inv_scale;
             }
         }
 
@@ -1774,6 +1824,17 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
         tq_matmul(s->xb2, s->xb, layer->wo, dim, n_heads * head_dim);
     TQ_PROF_STOP(_tp, matmul_ns);
 
+    /* Debug: print attention output before residual add */
+    if (pos == 0 && getenv("TQ_DEBUG") && l < 3) {
+        float maxv = 0, minv = 0;
+        for (int i = 0; i < dim; i++) {
+            if (s->xb2[i] > maxv) maxv = s->xb2[i];
+            if (s->xb2[i] < minv) minv = s->xb2[i];
+        }
+        fprintf(stderr, "[DEBUG] layer%d attn_out min=%.3f max=%.3f (hd=%d, nh=%d, nkv=%d)\n",
+                l, minv, maxv, head_dim, n_heads, n_kv_heads);
+    }
+
     /* Residual */
     tq_add(s->x, s->x, s->xb2, dim);
 }
@@ -1962,7 +2023,7 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
                            s->xb, s->xb2, dim, l);
             TQ_PROF_STOP(_tp, moe_ns);
 
-            /* Gemma 4: MoE output uses post_ffw_norm_1, else fallback to post_ffn_norm */
+            /* Gemma: MoE output uses post_ffw_norm if present. */
             if (is_gemma3) {
                 float* moe_post_norm = layer->post_ffn_norm_1 ? layer->post_ffn_norm_1 : layer->post_ffn_norm;
                 if (moe_post_norm)
@@ -1972,12 +2033,11 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
             tq_add(s->x, s->x, s->xb2, dim);
             did_moe = 1;
         }
-        /* Dense FFN path — SwiGLU (Qwen3.5) or GeGLU (Gemma3).
-         * For Gemma 4: runs BOTH MoE AND dense FFN (shared expert) per layer.
-         * Optimization: cache Q8 quantization of xb for gate+up projections,
-         * and cache Q8 of hb for down projection. */
-        /* Dense FFN: run for non-MoE layers, or for Gemma 4 MoE layers that also have dense FFN */
-        if ((!did_moe || (is_gemma3 && did_moe)) &&
+        /* Dense FFN path — SwiGLU (Qwen3.5, Gemma4/STEP35) or GeGLU (Gemma3).
+         * For Gemma 4 STEP35: layers are either MoE or dense, NOT both.
+         * For Gemma 3: runs both MoE and dense FFN (shared expert) per layer. */
+        /* Dense FFN: run for non-MoE layers, or for Gemma 3 MoE layers with dense FFN */
+        if ((!did_moe || (is_gemma3 && !c->is_gemma4 && did_moe)) &&
             (layer->w_gate || layer->w_gate_q8 || layer->w_gate_q4 || layer->w_gate_q2 || layer->gguf_w_gate) &&
             (layer->w_up || layer->w_up_q8 || layer->w_up_q4 || layer->w_up_q2 || layer->gguf_w_up) &&
             (layer->w_down || layer->w_down_q8 || layer->w_down_q4 || layer->w_down_q2 || layer->gguf_w_down)) {
@@ -2047,7 +2107,10 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
 
             TQ_PROF_STOP(_tp, matmul_ns);
 
-            /* Activation: GeGLU for Gemma3, SwiGLU for others */
+            /* Activation: GeGLU for Gemma3/4, SwiGLU for others.
+             * Note: Gemma 4 (STEP35) uses GeGLU (gated GELU), same as Gemma 3.
+             * The llama.cpp STEP35 code uses LLM_FFN_SILU which might be incorrect
+             * for the E2B model. The HuggingFace Gemma4 config uses gelu_pytorch_tanh. */
             if (is_gemma3) {
                 tq_gelu_tanh(s->hb, inter);
             } else {
@@ -2069,7 +2132,7 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
             }
             TQ_PROF_STOP(_tp, matmul_ns);
 
-            /* Gemma: apply post-FFN norm. For dual-FFN, use post_ffw_norm_2 for dense. */
+            /* Gemma: apply post-FFN norm if present. */
             if (is_gemma3) {
                 float* dense_post_norm = NULL;
                 if (did_moe && layer->post_ffn_norm_2)
@@ -2128,21 +2191,35 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
             tq_add(s->x, s->x, ple_proj_out, dim);
         }
 
-        /* Gemma 4: layer_output_scale scales the layer's CONTRIBUTIONS (attn + ffn + ple),
-         * not the entire hidden state. Formula:
-         *   x_new = x_old + scale * (x_current - x_old) */
+        /* Gemma 4: layer_output_scale scales the layer's CONTRIBUTIONS (attn + ffn).
+         * Essential for controlling gradient flow — model was trained with these scales. */
         if (layer->layer_output_scale != 0.0f) {
             float los = layer->layer_output_scale;
+            /* Debug: print pre-scale values */
+            if (pos == 0 && getenv("TQ_DEBUG") && l < 3) {
+                float maxv = 0, minv = 0;
+                for (int i = 0; i < dim; i++) {
+                    if (s->x[i] > maxv) maxv = s->x[i];
+                    if (s->x[i] < minv) minv = s->x[i];
+                }
+                fprintf(stderr, "[DEBUG] layer%d pre_scale min=%.3f max=%.3f (los=%.4f)\n", l, minv, maxv, los);
+            }
             for (int i = 0; i < dim; i++) {
                 s->x[i] = layer_residual_buf[i] + los * (s->x[i] - layer_residual_buf[i]);
             }
         }
 
         /* Debug: print layer output */
-        if (pos == 0 && getenv("TQ_DEBUG") && (l == 0 || l == 5 || l == c->n_layers - 1)) {
-            fprintf(stderr, "[DEBUG] layer%d out[0:8] = ", l);
-            for (int i = 0; i < 8 && i < dim; i++) fprintf(stderr, "%.4f ", s->x[i]);
-            fprintf(stderr, "\n");
+        if (pos == 0 && getenv("TQ_DEBUG")) {
+            if (l < 10 || l == c->n_layers - 1 || getenv("TQ_DEBUG_ALL")) {
+                float maxv = 0, minv = 0;
+                for (int i = 0; i < dim; i++) {
+                    if (s->x[i] > maxv) maxv = s->x[i];
+                    if (s->x[i] < minv) minv = s->x[i];
+                }
+                fprintf(stderr, "[DEBUG] layer%d out[0:4]=%.3f,%.3f,%.3f,%.3f min=%.3f max=%.3f los=%.4f\n",
+                        l, s->x[0], s->x[1], s->x[2], s->x[3], minv, maxv, layer->layer_output_scale);
+            }
         }
     }
 
