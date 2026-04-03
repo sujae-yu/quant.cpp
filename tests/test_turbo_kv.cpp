@@ -1,5 +1,5 @@
 /**
- * test_turbo_kv.cpp -- Tests for TurboQuant KV cache quantization
+ * test_turbo_kv.cpp -- Tests for quant.cpp KV cache quantization
  *
  * Tests the RHT + Lloyd-Max codebook + QJL residual pipeline for both
  * 3-bit (2-bit codebook + 1-bit QJL) and 4-bit (3-bit codebook + 1-bit QJL)

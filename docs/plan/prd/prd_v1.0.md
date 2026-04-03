@@ -1,10 +1,10 @@
-# TurboQuant.cpp — PRD v1.0: TQM Format + Instant Loading
+# quant.cpp — PRD v1.0: TQM Format + Instant Loading
 
 **목표**: 로딩 6초 → 0.1초, 메모리 2.7GB → 270MB, 추론 속도 동일 유지
 
 ## 핵심
 
-사전 양자화된 `.tqm` (TurboQuant Model) 포맷을 설계하여:
+사전 양자화된 `.tqm` (quant.cpp Model) 포맷을 설계하여:
 1. **mmap 즉시 로딩** — 변환 불필요, 포인터 설정만
 2. **메모리 10x 절약** — Q4 가중치가 디스크에 이미 양자화
 3. **정확도 동일** — 같은 Q4 데이터, bit-exact

@@ -1,5 +1,5 @@
 /**
- * test_tqm.cpp — Tests for the TQM (TurboQuant Model) file format
+ * test_tqm.cpp — Tests for the TQM (quant.cpp Model) file format
  *
  * Tests:
  *   1. Header size is exactly 512 bytes

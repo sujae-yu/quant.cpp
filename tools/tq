@@ -267,7 +267,7 @@ examples:
     p_demo = sub.add_parser("demo", help="Chat with Qwen3.5-0.8B (native C engine)")
     p_demo.add_argument("question", nargs="?", help="Question (interactive if omitted)")
     p_demo.add_argument("--engine", choices=["native", "pytorch"], default="native",
-                        help="Inference engine: native (tq_run, default) or pytorch")
+                        help="Inference engine: native (quant, default) or pytorch")
 
     args = parser.parse_args()
 

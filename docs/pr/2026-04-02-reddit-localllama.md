@@ -1,6 +1,6 @@
-# TurboQuant.cpp — 1-bit KV cache with zero quality loss, verified on 35B MoE
+# quant.cpp — 1-bit KV cache with zero quality loss, verified on 35B MoE
 
-Pure C inference engine implementing the TurboQuant paper (ICLR 2026). Built from scratch, not a llama.cpp fork.
+Pure C inference engine implementing the quant.cpp paper (ICLR 2026). Built from scratch, not a llama.cpp fork.
 
 **What it does:** Compresses KV cache keys to 1 bit using randomized Hadamard transform + sign hashing. The output is byte-identical to the uncompressed baseline.
 
@@ -44,7 +44,7 @@ Values: per-block Q4 or Q2 quantization
 
 The paper proves standard quantizers introduce systematic bias in inner product estimation. RHT + QJL correction makes it provably unbiased.
 
-https://github.com/quantumaikr/TurboQuant.cpp
+https://github.com/quantumaikr/quant.cpp
 
 Paper: https://arxiv.org/abs/2504.19874
 

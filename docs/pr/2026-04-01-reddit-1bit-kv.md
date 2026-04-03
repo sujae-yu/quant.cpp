@@ -2,7 +2,7 @@
 
 ## Title
 
-1-bit KV cache with byte-identical output to 4-bit — 10.7x compression, verified on 30 test cases (TurboQuant.cpp)
+1-bit KV cache with byte-identical output to 4-bit — 10.7x compression, verified on 30 test cases (quant.cpp)
 
 ## Body
 
@@ -24,16 +24,16 @@ turbo_kv_1b     1      10.7x       "Paris is the capital city of France."
 
 ```
 FP16 KV:          4,352 MB
-TurboQuant 1-bit:   408 MB   ← 3.9 GB saved
+quant.cpp 1-bit:   408 MB   ← 3.9 GB saved
 ```
 
 **How:** Faithful implementation of the [TurboQuant paper](https://arxiv.org/abs/2504.19874) (Google Research, ICLR 2026). Random Hadamard Transform decorrelates channels, then we just store signs. Attention becomes XOR + popcount — two CPU instructions per 128-dim key.
 
-The key insight from the paper: MSE-optimal quantizers are **biased** for inner product estimation. TurboQuant's two-stage approach (codebook + QJL residual) corrects this bias. At 1-bit, it's purely sign-based but still **unbiased** for inner products.
+The key insight from the paper: MSE-optimal quantizers are **biased** for inner product estimation. quant.cpp's two-stage approach (codebook + QJL residual) corrects this bias. At 1-bit, it's purely sign-based but still **unbiased** for inner products.
 
 **Reproduce:**
 ```bash
-git clone https://github.com/quantumaikr/TurboQuant.cpp && cd TurboQuant.cpp
+git clone https://github.com/quantumaikr/quant.cpp && cd quant.cpp
 bash scripts/quickstart.sh
 bash bench/kv_quality_bench.sh gemma3-4b.tqm
 # → 30/30 byte-identical matches
@@ -41,4 +41,4 @@ bash bench/kv_quality_bench.sh gemma3-4b.tqm
 
 Pure C, zero dependencies, 10K lines. Supports Gemma 3 (4B, 270M) and Qwen3.5 (0.8B).
 
-GitHub: https://github.com/quantumaikr/TurboQuant.cpp
+GitHub: https://github.com/quantumaikr/quant.cpp

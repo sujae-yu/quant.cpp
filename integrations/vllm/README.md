@@ -1,19 +1,19 @@
-# TurboQuant.cpp -- vLLM Integration Guide
+# quant.cpp -- vLLM Integration Guide
 
 ## Overview
 
-TurboQuant.cpp can be integrated with vLLM to provide extreme KV cache compression
-during serving. This guide explains how to use TurboQuant as a custom KV cache
+quant.cpp can be integrated with vLLM to provide extreme KV cache compression
+during serving. This guide explains how to use quant.cpp as a custom KV cache
 backend in vLLM, enabling 3-bit and 4-bit KV cache quantization with near-lossless
 quality.
 
 ## Architecture
 
 vLLM uses a paged KV cache with a `CacheEngine` that manages block allocation
-and GPU memory. TurboQuant integrates at two levels:
+and GPU memory. quant.cpp integrates at two levels:
 
-1. **Cache Engine**: Custom `TurboQuantCacheEngine` replaces the default cache
-   engine, using TurboQuant's paged cache with quantized blocks.
+1. **Cache Engine**: Custom `quant.cppCacheEngine` replaces the default cache
+   engine, using quant.cpp's paged cache with quantized blocks.
 
 2. **Attention Kernel**: Custom attention kernels that operate directly on
    quantized KV blocks, avoiding dequantization overhead.
@@ -25,13 +25,13 @@ vLLM Serving Engine
     |       |
     |       +-- Attention layers
     |               |
-    |               +-- TurboQuantAttention (custom)
+    |               +-- quant.cppAttention (custom)
     |                       |
     |                       +-- tq_attention() via Python bindings
     |
     +-- CacheEngine
             |
-            +-- TurboQuantCacheEngine (custom)
+            +-- quant.cppCacheEngine (custom)
                     |
                     +-- tq_cache_create() / tq_cache_append()
                     +-- Block-level quantization during reshape_and_cache
@@ -39,10 +39,10 @@ vLLM Serving Engine
 
 ## Prerequisites
 
-1. Build TurboQuant as a shared library:
+1. Build quant.cpp as a shared library:
 
 ```bash
-cd /path/to/TurboQuant.cpp
+cd /path/to/quant.cpp
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON
 cmake --build build -j$(nproc)
 ```
@@ -68,10 +68,10 @@ print(turboquant.__version__)  # Should print "0.1.0"
 ```python
 from vllm import LLM, SamplingParams
 
-# Use TurboQuant 3-bit KV cache
+# Use quant.cpp 3-bit KV cache
 llm = LLM(
     model="meta-llama/Llama-3-8B",
-    kv_cache_dtype="turbo3",        # TurboQuant 3-bit
+    kv_cache_dtype="turbo3",        # quant.cpp 3-bit
     max_model_len=32768,
 )
 
@@ -93,13 +93,13 @@ import torch
 from vllm.worker.cache_engine import CacheEngine
 
 
-class TurboQuantCacheEngine(CacheEngine):
-    """Custom vLLM cache engine using TurboQuant compression."""
+class quant.cppCacheEngine(CacheEngine):
+    """Custom vLLM cache engine using quant.cpp compression."""
 
     def __init__(self, cache_config, model_config, parallel_config):
         super().__init__(cache_config, model_config, parallel_config)
 
-        self.tq_ctx = turboquant.TurboQuantContext(
+        self.tq_ctx = turboquant.quant.cppContext(
             backend=turboquant.BACKEND_CUDA
         )
         self.key_type = turboquant.TURBO_3B
@@ -120,9 +120,9 @@ class TurboQuantCacheEngine(CacheEngine):
         tq_bytes_per_token = tq_key_bytes + tq_val_bytes
 
         compression = fp16_bytes_per_token * 2 / tq_bytes_per_token
-        print(f"[TurboQuant] KV cache compression: {compression:.1f}x")
-        print(f"[TurboQuant] Key type: {turboquant.type_name(self.key_type)}")
-        print(f"[TurboQuant] Value bits: {self.value_bits}")
+        print(f"[quant.cpp] KV cache compression: {compression:.1f}x")
+        print(f"[quant.cpp] Key type: {turboquant.type_name(self.key_type)}")
+        print(f"[quant.cpp] Value bits: {self.value_bits}")
 
         for layer_idx in range(self.num_layers):
             key_blocks = torch.zeros(
@@ -164,7 +164,7 @@ class TurboQuantCacheEngine(CacheEngine):
                 dst_val[dst].copy_(src_val[src])
 
     def close(self):
-        """Release TurboQuant context."""
+        """Release quant.cpp context."""
         if hasattr(self, 'tq_ctx') and self.tq_ctx is not None:
             self.tq_ctx.close()
             self.tq_ctx = None
@@ -183,7 +183,7 @@ _orig_reshape = ce.reshape_and_cache
 def tq_reshape_and_cache(key, value, key_cache, value_cache,
                           slot_mapping, kv_cache_dtype, kv_scale):
     if kv_cache_dtype == "turbo3":
-        ctx = turboquant.TurboQuantContext()
+        ctx = turboquant.quant.cppContext()
         # Quantize keys in-place
         for i, slot in enumerate(slot_mapping):
             k = key[i].cpu().numpy()
@@ -213,7 +213,7 @@ ce.reshape_and_cache = tq_reshape_and_cache
 
 ## Performance Considerations
 
-1. **Quantization overhead**: TurboQuant adds ~5-10us per token during prefill
+1. **Quantization overhead**: quant.cpp adds ~5-10us per token during prefill
    for key/value quantization. This is amortized over the lifetime of the cache.
 
 2. **Attention latency**: Quantized attention is typically faster than FP16
@@ -232,7 +232,7 @@ import time
 import turboquant
 import numpy as np
 
-ctx = turboquant.TurboQuantContext()
+ctx = turboquant.quant.cppContext()
 head_dim = 128
 
 # Benchmark quantization latency
@@ -254,7 +254,7 @@ ctx.close()
 
 ## Known Limitations
 
-1. **CUDA backend**: The CUDA backend for TurboQuant is under development.
+1. **CUDA backend**: The CUDA backend for quant.cpp is under development.
    Currently, quantization runs on CPU with data transfer to/from GPU.
 
 2. **Continuous batching**: Full continuous batching support requires custom
@@ -276,4 +276,4 @@ ctx.close()
 
 ## License
 
-Apache 2.0 -- same as TurboQuant.cpp
+Apache 2.0 -- same as quant.cpp

@@ -1,4 +1,4 @@
-# TurboQuant.cpp — Work Breakdown Structure v0.7
+# quant.cpp — Work Breakdown Structure v0.7
 
 **Version**: 0.7
 **Date**: 2026-03-29

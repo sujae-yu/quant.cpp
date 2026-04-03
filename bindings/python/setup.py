@@ -1,5 +1,5 @@
 """
-TurboQuant Python package setup.
+quant.cpp Python package setup.
 
 Install in development mode:
     pip install -e .
@@ -7,15 +7,15 @@ Install in development mode:
 Install from source:
     pip install .
 
-The package uses ctypes to load the pre-built TurboQuant shared library.
+The package uses ctypes to load the pre-built quant.cpp shared library.
 You must build the C library first:
 
-    cd /path/to/TurboQuant.cpp
+    cd /path/to/quant.cpp
     cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON
     cmake --build build -j$(nproc)
 
-Then set TURBOQUANT_LIB_PATH if the library is not in a standard location:
-    export TURBOQUANT_LIB_PATH=/path/to/TurboQuant.cpp/build
+Then set QUANT_LIB_PATH if the library is not in a standard location:
+    export QUANT_LIB_PATH=/path/to/quant.cpp/build
 """
 
 from setuptools import setup, find_packages
@@ -31,12 +31,12 @@ if readme_path.exists():
 setup(
     name="turboquant",
     version="0.1.0",
-    description="Python bindings for TurboQuant.cpp KV cache compression",
+    description="Python bindings for quant.cpp KV cache compression",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    author="TurboQuant Contributors",
+    author="QuantumAI Contributors",
     license="Apache-2.0",
-    url="https://github.com/turboquant/TurboQuant.cpp",
+    url="https://github.com/turboquant/quant.cpp",
     packages=find_packages(),
     python_requires=">=3.8",
     install_requires=[
@@ -66,8 +66,8 @@ setup(
     ],
     keywords="llm inference quantization kv-cache compression",
     project_urls={
-        "Documentation": "https://github.com/turboquant/TurboQuant.cpp/tree/main/docs",
-        "Source": "https://github.com/turboquant/TurboQuant.cpp",
-        "Tracker": "https://github.com/turboquant/TurboQuant.cpp/issues",
+        "Documentation": "https://github.com/turboquant/quant.cpp/tree/main/docs",
+        "Source": "https://github.com/turboquant/quant.cpp",
+        "Tracker": "https://github.com/turboquant/quant.cpp/issues",
     },
 )

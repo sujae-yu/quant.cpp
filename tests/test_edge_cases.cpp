@@ -1,5 +1,5 @@
 /**
- * Edge case tests for TurboQuant — BUG-4, BUG-7 verification
+ * Edge case tests for quant.cpp — BUG-4, BUG-7 verification
  * and systematic edge case coverage (n=1, NaN, Inf, all-same, large-n)
  */
 #include <gtest/gtest.h>

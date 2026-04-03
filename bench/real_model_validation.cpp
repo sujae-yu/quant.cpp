@@ -1,8 +1,8 @@
 /**
- * TurboQuant real-model KV cache validation benchmark
+ * quant.cpp real-model KV cache validation benchmark
  *
  * Reads binary KV cache files (dumped from a real LLM or realistic synthetic)
- * and measures quantization quality across all 7 TurboQuant types.
+ * and measures quantization quality across all 7 quant.cpp types.
  *
  * Binary format per file:
  *   Header: magic(4B) + layer_idx(4B) + num_heads(4B) + seq_len(4B) + head_dim(4B) = 20 bytes
@@ -332,7 +332,7 @@ int main(int argc, char** argv) {
         data_dir = argv[1];
     }
 
-    printf("=== TurboQuant Real-Model KV Cache Validation ===\n");
+    printf("=== quant.cpp Real-Model KV Cache Validation ===\n");
     printf("Data directory: %s\n\n", data_dir);
 
     /* Try to load layers 0-3 */

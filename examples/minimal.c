@@ -1,4 +1,4 @@
-/* TurboQuant.cpp — Minimal Example (10 lines of logic) */
+/* quant.cpp — Minimal Example (10 lines of logic) */
 #include "turboquant/turboquant.h"
 #include <stdio.h>
 #include <math.h>

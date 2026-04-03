@@ -1,5 +1,5 @@
 #!/bin/bash
-# TurboQuant.cpp — Hierarchical Harness Runner
+# quant.cpp — Hierarchical Harness Runner
 #
 # Combines two methodologies:
 #   - Karpathy AutoResearch: score → improve → score → revert-if-worse
@@ -39,7 +39,7 @@ while [ $# -gt 0 ]; do
 done
 
 echo "============================================"
-echo "  TurboQuant.cpp — Hierarchical Harness"
+echo "  quant.cpp — Hierarchical Harness"
 echo "  Mode: $MODE"
 echo "  Team: $TEAM_NAME"
 echo "  Target: $TARGET_SCORE"
@@ -75,7 +75,7 @@ module_task() {
     local mod="$1"
     case "$mod" in
         foundation)
-            echo "Create project foundation: CMakeLists.txt, include/turboquant/ headers (turboquant.h, tq_types.h, tq_spec.h), src/ directory structure. Read CLAUDE.md and docs/prd_v0.1.md for specifications. Run ./score.sh --quick after each change. Only modify: CMakeLists.txt, include/**, src/core/tq_traits.c"
+            echo "Create project foundation: CMakeLists.txt, include/quant/ headers (quant.h, tq_types.h, tq_spec.h), src/ directory structure. Read CLAUDE.md and docs/prd_v0.1.md for specifications. Run ./score.sh --quick after each change. Only modify: CMakeLists.txt, include/**, src/core/tq_traits.c"
             ;;
         polar)
             echo "Implement PolarQuant in src/core/tq_polar.c and tests/test_polar.cpp. Read refs/PolarQuant/models/modeling_llama_polar.py for the algorithm. Key: atan2 for angle, norm for radius, group min-max quantize, pack rho<<tbits|theta. Write Google Test unit tests. Run ./score.sh --quick after each change. Only modify: src/core/tq_polar.*, tests/test_polar.*"
@@ -84,7 +84,7 @@ module_task() {
             echo "Implement QJL in src/core/tq_qjl.c and tests/test_qjl.cpp. Read refs/QJL/models/llama2_utils_qjl.py for the algorithm. Key: random projection matrix, sign quantization, 8-bit packing, outlier detection via L2 norm top-k, Hamming distance attention. Write Google Test unit tests. Run ./score.sh --quick after each change. Only modify: src/core/tq_qjl.*, tests/test_qjl.*"
             ;;
         turbo)
-            echo "Implement TurboQuant composite in src/core/tq_turbo.c and tests/test_turbo.cpp. This combines PolarQuant (stage 1) + QJL residual correction (stage 2). Read docs/prd_v0.1.md section 6.1 FR-3. Write Google Test unit tests. Run ./score.sh --quick after each change. Only modify: src/core/tq_turbo.*, tests/test_turbo.*"
+            echo "Implement quant.cpp composite in src/core/tq_turbo.c and tests/test_turbo.cpp. This combines PolarQuant (stage 1) + QJL residual correction (stage 2). Read docs/prd_v0.1.md section 6.1 FR-3. Write Google Test unit tests. Run ./score.sh --quick after each change. Only modify: src/core/tq_turbo.*, tests/test_turbo.*"
             ;;
         uniform)
             echo "Implement uniform baseline in src/core/tq_uniform.c, src/core/tq_value_quant.c, and their tests. Simple min-max quantization for 2/4-bit. Also implement value cache quantization. Run ./score.sh --quick after each change. Only modify: src/core/tq_uniform.*, src/core/tq_value_quant.*, tests/test_uniform.*, tests/test_value.*"
@@ -217,7 +217,7 @@ run_hybrid() {
     echo ""
     echo "Phase 0: Initialize team"
     clawteam team spawn-team "$TEAM_NAME" \
-        -d "TurboQuant.cpp development" \
+        -d "quant.cpp development" \
         2>/dev/null || true
 
     while [ "$round" -lt "$MAX_ROUNDS" ]; do
@@ -286,7 +286,7 @@ run_hybrid() {
 # PARALLEL ONLY MODE
 # ============================================================
 run_parallel() {
-    clawteam team spawn-team "$TEAM_NAME" -d "TurboQuant.cpp" 2>/dev/null || true
+    clawteam team spawn-team "$TEAM_NAME" -d "quant.cpp" 2>/dev/null || true
     spawn_group "all" $MODULE_NAMES
     echo ""
     echo "All workers spawned. Monitor with:"

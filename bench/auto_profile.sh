@@ -21,7 +21,7 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="${PROJECT_DIR}/build"
-TQ_RUN="${BUILD_DIR}/tq_run"
+TQ_RUN="${BUILD_DIR}/quant"
 
 # Defaults
 MODEL_PATH=""
@@ -70,15 +70,15 @@ if [ -z "$MODEL_PATH" ]; then
 fi
 
 if [ ! -f "$TQ_RUN" ]; then
-    echo "Building tq_run..." >&2
+    echo "Building quant..." >&2
     cmake -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release "$PROJECT_DIR" 2>/dev/null
-    cmake --build "$BUILD_DIR" --target tq_run -j$(sysctl -n hw.ncpu 2>/dev/null || nproc) 2>/dev/null
+    cmake --build "$BUILD_DIR" --target quant -j$(sysctl -n hw.ncpu 2>/dev/null || nproc) 2>/dev/null
 fi
 
 TMPDIR=$(mktemp -d)
 trap "rm -rf $TMPDIR" EXIT
 
-echo "=== TurboQuant Auto Compression Profile ===" >&2
+echo "=== quant.cpp Auto Compression Profile ===" >&2
 echo "Model: $MODEL_PATH" >&2
 echo "Weight quant: $QUANT, Threads: $N_THREADS" >&2
 echo "" >&2
@@ -152,7 +152,7 @@ JSONEOF
     if [ "$N_LAYERS" != "unknown" ] && [ "$N_KV_HEADS" != "unknown" ] && [ "$HEAD_DIM" != "unknown" ]; then
         # FP16 baseline: 2 (K+V) * layers * kv_heads * head_dim * 2 bytes per token
         FP16_PER_TOKEN=$((2 * N_LAYERS * N_KV_HEADS * HEAD_DIM * 2))
-        # TurboQuant K (3-bit avg) + V (Q4): approximate
+        # quant.cpp K (3-bit avg) + V (Q4): approximate
         # K: ~3/8 bytes per element * layers * kv_heads * head_dim
         # V: ~0.5 bytes per element (Q4) * layers * kv_heads * head_dim
         K_BYTES=$(echo "scale=0; $N_LAYERS * $N_KV_HEADS * $HEAD_DIM * 3 / 8" | bc)
@@ -196,6 +196,6 @@ echo "" >&2
 echo "=== Auto Profile Complete ===" >&2
 echo "" >&2
 echo "Usage:" >&2
-echo "  tq_run model.tqm -k turbo_kv_3b -v q4 -V 32   # Apply recommendations" >&2
-echo "  tq_run model.tqm --bench-prefill                 # Verify prefill speed" >&2
-echo "  tq_run model.tqm --bench-memory                  # Verify decode speed" >&2
+echo "  quant model.tqm -k turbo_kv_3b -v q4 -V 32   # Apply recommendations" >&2
+echo "  quant model.tqm --bench-prefill                 # Verify prefill speed" >&2
+echo "  quant model.tqm --bench-memory                  # Verify decode speed" >&2

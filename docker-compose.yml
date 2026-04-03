@@ -1,15 +1,15 @@
 services:
-  turboquant:
+  quant:
     build: .
     volumes:
-      - ./models:/turboquant/models
+      - ./models:/quant/models
     command: ["models/model.tqm", "-p", "Hello", "-k", "turbo_kv_1b"]
 
   # Run with a custom prompt and KV type:
-  #   docker compose run turboquant models/model.tqm -p "Once upon a time" -k turbo_kv_3b -n 128
+  #   docker compose run quant models/model.tqm -p "Once upon a time" -k turbo_kv_3b -n 128
   #
   # Run perplexity evaluation:
-  #   docker compose run turboquant models/model.tqm --ppl models/test.txt -k turbo_kv_1b
+  #   docker compose run quant models/model.tqm --ppl models/test.txt -k turbo_kv_1b
   #
   # Show memory stats:
-  #   docker compose run turboquant models/model.tqm -p "Hello" -k turbo_kv_1b -M
+  #   docker compose run quant models/model.tqm -p "Hello" -k turbo_kv_1b -M

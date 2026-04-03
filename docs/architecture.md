@@ -1,4 +1,4 @@
-# TurboQuant.cpp Architecture
+# quant.cpp Architecture
 
 ## 4-Layer Stack
 

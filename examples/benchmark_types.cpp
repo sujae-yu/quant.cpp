@@ -1,5 +1,5 @@
 /**
- * TurboQuant.cpp — Compare all quantization types
+ * quant.cpp — Compare all quantization types
  */
 #include <cstdio>
 #include <cmath>

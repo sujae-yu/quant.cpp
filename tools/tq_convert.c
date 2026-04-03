@@ -1,5 +1,5 @@
 /**
- * tq_convert — Convert safetensors model to TQM (TurboQuant Model) format
+ * tq_convert — Convert safetensors model to TQM format
  *
  * Usage:
  *   tq_convert <model.safetensors> [tokenizer.json] -o <output.tqm>

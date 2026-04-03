@@ -1,4 +1,4 @@
-# TurboQuant.cpp — 극한 KV 캐시 압축을 내장한 LLM 추론 엔진
+# quant.cpp — 극한 KV 캐시 압축을 내장한 LLM 추론 엔진
 
 순수 C로 LLM 추론 엔진을 직접 구현했습니다. Qwen3.5-0.8B를 CPU에서 **14 tok/s**로 실행합니다 — PyTorch보다 17배 빠르고, PyTorch+GPU보다도 빠릅니다.
 
@@ -7,7 +7,7 @@
 ```
 PyTorch (CPU):     0.8 tok/s
 PyTorch (MPS GPU): 10  tok/s
-TurboQuant (CPU):  14  tok/s  ← GPU보다 빠름, 의존성 없음
+quant.cpp (CPU):  14  tok/s  ← GPU보다 빠름, 의존성 없음
 ```
 
 가중치 메모리: 1.7 GB → **533 MB** (Q8 양자화).
@@ -37,12 +37,12 @@ Artificial intelligence is a field of computer science...
 - HuggingFace BPE 토크나이저 (248K 어휘)
 - 스트리밍 토큰 출력
 
-TurboQuant (ICLR 2026), QJL (AAAI 2025), PolarQuant (AISTATS 2026) 논문 기반.
+quant.cpp (ICLR 2026), QJL (AAAI 2025), PolarQuant (AISTATS 2026) 논문 기반.
 llama.cpp, vLLM, ONNX의 아키텍처 패턴 흡수.
 
 8,500줄 C 코드. 70+ 테스트. Apache 2.0.
 
-https://github.com/quantumaikr/TurboQuant.cpp
+https://github.com/quantumaikr/quant.cpp
 
 ---
 

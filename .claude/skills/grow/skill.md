@@ -1,6 +1,6 @@
 ---
 name: grow
-description: "TurboQuant.cpp 지속성장 루프. 자동으로 현재 상태를 읽고, 가장 임팩트 있는 다음 작업을 선택하여 구현하고, 검증한다. 'grow', '성장', '계속', '다음', '진행', '개선' 요청 시 사용. 매 라운드마다 state.md를 읽고 업데이트하여 세션 간 연속성을 보장한다."
+description: "quant.cpp 지속성장 루프. 자동으로 현재 상태를 읽고, 가장 임팩트 있는 다음 작업을 선택하여 구현하고, 검증한다. 'grow', '성장', '계속', '다음', '진행', '개선' 요청 시 사용. 매 라운드마다 state.md를 읽고 업데이트하여 세션 간 연속성을 보장한다."
 ---
 
 # Grow — Continuous Improvement Loop
@@ -36,7 +36,7 @@ ctest --test-dir build --output-on-failure
 ```
 
 추가 검증 (해당 시):
-- `./build/tq_run MODEL -t TOK -p "1+1=" -n 5` → "2" 확인
+- `./build/quant MODEL -t TOK -p "1+1=" -n 5` → "2" 확인
 - `bash score.sh --quick`
 
 ### Step 5: Update State

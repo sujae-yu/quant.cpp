@@ -1,7 +1,7 @@
 /**
- * TurboQuant.cpp — llama.cpp integration header
+ * quant.cpp — llama.cpp integration header
  *
- * Defines GGML type registration for TurboQuant quantization types.
+ * Defines GGML type registration for quant.cpp quantization types.
  * Include this in your llama.cpp build to add TQ KV cache support.
  */
 #ifndef TQ_GGML_TYPE_H
@@ -14,7 +14,7 @@ extern "C" {
 #endif
 
 /**
- * Register TurboQuant types with GGML type system.
+ * Register quant.cpp types with GGML type system.
  * Call once during initialization.
  * Returns TQ_OK on success.
  */

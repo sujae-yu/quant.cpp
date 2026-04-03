@@ -1,9 +1,9 @@
 #!/bin/bash
 # =============================================================================
-# compare_llamacpp.sh — TurboQuant vs llama.cpp KV cache quantization benchmark
+# compare_llamacpp.sh — quant.cpp vs llama.cpp KV cache quantization benchmark
 # =============================================================================
 #
-# This script measures TurboQuant's KV cache compression and documents
+# This script measures quant.cpp's KV cache compression and documents
 # the equivalent llama.cpp commands for fair side-by-side comparison.
 #
 # Usage:
@@ -12,7 +12,7 @@
 # Example:
 #   bash bench/compare_llamacpp.sh models/SmolLM2-1.7B-Instruct-Q8_0.gguf 6
 #
-# What it measures (TurboQuant -- actually runs):
+# What it measures (quant.cpp -- actually runs):
 #   - Perplexity (teacher-forced on fixed 1095-word test text)
 #   - KV cache memory per token
 #   - Generation speed (tok/s)
@@ -62,7 +62,7 @@ CSV_OUT="$RESULTS_DIR/comparison_${DATE_STR}.csv"
 
 echo ""
 echo "================================================================"
-echo "  TurboQuant vs llama.cpp KV Cache Quantization Comparison"
+echo "  quant.cpp vs llama.cpp KV Cache Quantization Comparison"
 echo "================================================================"
 echo ""
 echo "  Model:    $MODEL_NAME"
@@ -74,12 +74,12 @@ echo ""
 echo "================================================================"
 
 # =========================================================================
-# SECTION 1: TurboQuant measurements (actually executed)
+# SECTION 1: quant.cpp measurements (actually executed)
 # =========================================================================
 
 echo ""
 echo "================================================================"
-echo "  SECTION 1: TurboQuant Measurements (live)"
+echo "  SECTION 1: quant.cpp Measurements (live)"
 echo "================================================================"
 echo ""
 
@@ -154,10 +154,10 @@ for i in "${!TQ_CONFIGS[@]}"; do
 done
 
 # ---------------------------------------------------------------------------
-# Print TurboQuant results table
+# Print quant.cpp results table
 # ---------------------------------------------------------------------------
 echo ""
-echo "  TurboQuant Results:"
+echo "  quant.cpp Results:"
 echo "  -----------------------------------------------------------------------"
 printf "  %-30s %8s %8s %10s %12s %8s\n" \
     "Config" "PPL" "NLL" "tok/s" "KV/tok" "Ratio"
@@ -286,7 +286,7 @@ printf "  %-32s %6s %6s %10s %s\n" \
 
 echo "  -----------------------------------------------------------------------"
 
-# Now fill in the actual TurboQuant measurements
+# Now fill in the actual quant.cpp measurements
 for i in "${!TQ_CONFIGS[@]}"; do
     local_label="${R_LABEL[$i]}"
     local_bits_k=$(echo "${TQ_CONFIGS[$i]}" | awk '{print $4}')
@@ -312,24 +312,24 @@ echo "================================================================"
 echo "  SECTION 4: Key Comparison Insights"
 echo "================================================================"
 echo ""
-echo "  What TurboQuant offers vs llama.cpp KV quantization:"
+echo "  What quant.cpp offers vs llama.cpp KV quantization:"
 echo ""
-echo "  1. LOWER BIT RATES: TurboQuant achieves 1-bit and 3-bit K cache"
+echo "  1. LOWER BIT RATES: quant.cpp achieves 1-bit and 3-bit K cache"
 echo "     quantization using PolarQuant + QJL algorithms. llama.cpp's"
 echo "     lowest is q4_0 (4.5 effective bits)."
 echo ""
 echo "  2. DIFFERENT ALGORITHMS: llama.cpp uses block-wise min-max (uniform)"
-echo "     quantization. TurboQuant uses:"
+echo "     quantization. quant.cpp uses:"
 echo "     - PolarQuant: exploits angular structure of attention keys"
 echo "     - QJL: Johnson-Lindenstrauss sign hashing for 1-bit keys"
-echo "     - TurboQuant: progressive residual (Polar 2b + QJL 1b = 3b)"
+echo "     - quant.cpp: progressive residual (Polar 2b + QJL 1b = 3b)"
 echo ""
 echo "  3. QUALITY AT LOW BITS: The critical comparison is at the low end:"
-echo "     - TurboQuant 3-bit K vs llama.cpp 4-bit K (q4_0)"
-echo "     - If TurboQuant 3b matches or beats llama.cpp 4b in PPL,"
+echo "     - quant.cpp 3-bit K vs llama.cpp 4-bit K (q4_0)"
+echo "     - If quant.cpp 3b matches or beats llama.cpp 4b in PPL,"
 echo "       that is 25% more compression at equal quality."
 echo ""
-echo "  4. EXTREME COMPRESSION: TurboQuant 1-bit K + Q4 V achieves"
+echo "  4. EXTREME COMPRESSION: quant.cpp 1-bit K + Q4 V achieves"
 echo "     approximately 5x total KV compression. No llama.cpp equivalent"
 echo "     exists at this bit rate."
 echo ""
@@ -346,7 +346,7 @@ for i in "${!TQ_CONFIGS[@]}"; do
     local_v_quant=$(echo "${TQ_CONFIGS[$i]}" | awk '{print $3}')
     local_bits_k=$(echo "${TQ_CONFIGS[$i]}" | awk '{print $4}')
     local_bits_v=$(echo "${TQ_CONFIGS[$i]}" | awk '{print $5}')
-    echo "$DATE_STR,$MODEL_NAME,turboquant,$local_kv_type,$local_v_quant,$local_bits_k,$local_bits_v,${R_PPL[$i]},${R_NLL[$i]},${R_TOKS[$i]},${R_KV_PER_TOK[$i]},${R_COMPRESS[$i]}" >> "$CSV_OUT"
+    echo "$DATE_STR,$MODEL_NAME,quant,$local_kv_type,$local_v_quant,$local_bits_k,$local_bits_v,${R_PPL[$i]},${R_NLL[$i]},${R_TOKS[$i]},${R_KV_PER_TOK[$i]},${R_COMPRESS[$i]}" >> "$CSV_OUT"
 done
 
 # Add llama.cpp reference rows (no measurements, just theoretical)
@@ -361,7 +361,7 @@ echo "================================================================"
 echo ""
 echo "  To complete the comparison, build llama.cpp and run the"
 echo "  commands from Section 2 on the same machine with the same model."
-echo "  Then paste the llama.cpp PPL numbers alongside TurboQuant's"
+echo "  Then paste the llama.cpp PPL numbers alongside quant.cpp's"
 echo "  for a fair apples-to-apples comparison."
 echo ""
 echo "  Quick validation command:"

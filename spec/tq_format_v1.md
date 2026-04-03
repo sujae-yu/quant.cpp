@@ -1,4 +1,4 @@
-# TurboQuant Format Specification v1
+# quant.cpp Format Specification v1
 
 ## Block Structures
 

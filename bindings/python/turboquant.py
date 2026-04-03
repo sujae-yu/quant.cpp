@@ -1,5 +1,5 @@
 """
-TurboQuant Python bindings (ctypes-based)
+quant.cpp Python bindings (ctypes-based)
 Requires: libtturboquant.so / libturboquant.dylib built from C source
 """
 import ctypes

@@ -1,6 +1,6 @@
 ---
 name: qa
-description: "TurboQuant.cpp의 통합 정합성을 검증한다. 모듈 간 경계면 불일치, 타입 시스템 정합성, quantize→attention 파이프라인, cache 무결성을 교차 비교한다. '검증', 'QA', '테스트', '정합성 확인', 'validate' 요청 시, 또는 코드 변경 후 머지 전에 자동으로 사용."
+description: "quant.cpp의 통합 정합성을 검증한다. 모듈 간 경계면 불일치, 타입 시스템 정합성, quantize→attention 파이프라인, cache 무결성을 교차 비교한다. '검증', 'QA', '테스트', '정합성 확인', 'validate' 요청 시, 또는 코드 변경 후 머지 전에 자동으로 사용."
 ---
 
 # QA — Integration Coherence Verification

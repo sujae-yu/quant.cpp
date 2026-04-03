@@ -1,7 +1,7 @@
 /**
- * TurboQuant.cpp — llama.cpp integration example
+ * quant.cpp — llama.cpp integration example
  *
- * Shows how to use TurboQuant for KV cache compression
+ * Shows how to use quant.cpp for KV cache compression
  * within a llama.cpp-based application.
  */
 #include <cstdio>
@@ -10,7 +10,7 @@ extern "C" {
 }
 
 int main() {
-    /* Initialize TurboQuant context */
+    /* Initialize quant.cpp context */
     tq_context_t* ctx = nullptr;
     tq_status status = tq_init(&ctx, TQ_BACKEND_CPU);
     if (status != TQ_OK) {
@@ -18,7 +18,7 @@ int main() {
         return 1;
     }
 
-    printf("TurboQuant v%s initialized\n", TQ_VERSION_STRING);
+    printf("quant.cpp v%s initialized\n", TQ_VERSION_STRING);
     printf("Backend: CPU\n\n");
 
     /* List available quantization types */

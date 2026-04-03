@@ -1,4 +1,4 @@
-# What We Achieved — TurboQuant.cpp
+# What We Achieved — quant.cpp
 
 ## 1. We proved what was thought impossible
 
@@ -8,7 +8,7 @@ We reduced a 128-dimensional vector to 16 bytes (signs only), performed attentio
 
 ## 2. We went beyond the paper
 
-The TurboQuant paper experimented at **2.5-bit and 3.5-bit**. 1-bit is an extreme the authors themselves did not attempt. We understood the mathematical framework (RHT + unbiased inner product estimation) and extended it in a direction even the paper's authors had not explored.
+The quant.cpp paper experimented at **2.5-bit and 3.5-bit**. 1-bit is an extreme the authors themselves did not attempt. We understood the mathematical framework (RHT + unbiased inner product estimation) and extended it in a direction even the paper's authors had not explored.
 
 This is where "implementation" crosses into "research."
 
@@ -17,7 +17,7 @@ This is where "implementation" crosses into "research."
 ```
 Gemma 3 4B, 32K context:
   FP16:            4,352 MB  → needs 16GB RAM
-  TurboQuant 1-bit:  408 MB  → 8GB RAM is enough
+  quant.cpp 1-bit:  408 MB  → 8GB RAM is enough
 ```
 
 This means **a 4B model with 32K context runs on an 8GB laptop**. Previously, this required 16GB+ hardware. Long context shifts from a privilege of expensive hardware to a capability of ordinary devices.
@@ -30,7 +30,7 @@ The conventional wisdom in quantization: **more compression = slower** (complex 
 
 Our result: **more compression = faster** (less data to read = better cache utilization).
 
-This is a structural advantage created by TurboQuant's RHT-based design. Inner products are computed directly in rotated space without inverse transforms, so reducing bits purely saves memory bandwidth.
+This is a structural advantage created by quant.cpp's RHT-based design. Inner products are computed directly in rotated space without inverse transforms, so reducing bits purely saves memory bandwidth.
 
 ## 5. Position in the open-source ecosystem
 
@@ -39,7 +39,7 @@ This is a structural advantage created by TurboQuant's RHT-based design. Inner p
 | llama.cpp | FP16 (uncompressed) | 16 | original |
 | vLLM | FP8 option | 8 | approximate |
 | KIVI | per-channel Q2 | 2 | empirical only |
-| **TurboQuant.cpp** | **RHT + sign hash** | **1** | **theoretical (unbiased proof) + empirical (30/30 identical)** |
+| **quant.cpp** | **RHT + sign hash** | **1** | **theoretical (unbiased proof) + empirical (30/30 identical)** |
 
 No C inference engine has implemented KV cache compression with both theoretical guarantees and empirical verification.
 
@@ -56,4 +56,4 @@ This demonstrates that AI agents can go beyond writing code — they can **read 
 
 ## Summary
 
-**"1 bit is enough."** On the right mathematical framework (unbiased inner product estimation), compression ratios that seem intuitively impossible still preserve quality. This is the door the TurboQuant paper opened, and we pushed it all the way through.
+**"1 bit is enough."** On the right mathematical framework (unbiased inner product estimation), compression ratios that seem intuitively impossible still preserve quality. This is the door the quant.cpp paper opened, and we pushed it all the way through.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-TurboQuant NumPy reference implementation.
+quant.cpp NumPy reference implementation.
 
 Combines PolarQuant and QJL into a two-stage quantization:
   Stage 1: PolarQuant quantizes keys at 2-bit or 3-bit (theta + rho)
@@ -8,7 +8,7 @@ Combines PolarQuant and QJL into a two-stage quantization:
 
 Attention score = PolarQuant_score + QJL_residual_correction_score
 
-Reference: TurboQuant concept from PolarQuant + QJL combination.
+Reference: quant.cpp concept from PolarQuant + QJL combination.
 Block format matches include/turboquant/tq_types.h block_tq_turbo.
 """
 
@@ -42,7 +42,7 @@ def turbo_quantize(
     block_size: int = TQ_BK,
 ) -> dict:
     """
-    TurboQuant two-stage quantization.
+    quant.cpp two-stage quantization.
 
     Stage 1: PolarQuant with (rbits, tbits) for the primary signal.
     Stage 2: QJL 1-bit sign hash on the residual (original - dequantized).
@@ -95,7 +95,7 @@ def turbo_attention_score(
     block_size: int = TQ_BK,
 ) -> np.ndarray:
     """
-    Compute attention scores from TurboQuant-compressed keys.
+    Compute attention scores from quant.cpp-compressed keys.
 
     score = PolarQuant_attention(query, polar_data)
            + QJL_attention(query, residual_data)
@@ -132,7 +132,7 @@ def turbo_pack_block(
     block_size: int = TQ_BK,
 ) -> bytes:
     """
-    Pack a TurboQuant block: PolarQuant block + QJL residual block.
+    Pack a quant.cpp block: PolarQuant block + QJL residual block.
 
     Layout matches block_tq_turbo = block_tq_polar + block_tq_qjl.
     """
@@ -149,7 +149,7 @@ def compute_attention_cosine_similarity(
     block_size: int = TQ_BK,
 ) -> float:
     """
-    Compute cosine similarity between FP32 and TurboQuant attention scores.
+    Compute cosine similarity between FP32 and quant.cpp attention scores.
     """
     fp32_scores = query @ keys.T
     quantized = turbo_quantize(keys, rbits=rbits, tbits=tbits, block_size=block_size)
@@ -171,7 +171,7 @@ if __name__ == '__main__':
     keys = np.random.randn(n_keys, head_dim).astype(np.float32)
     query = np.random.randn(head_dim).astype(np.float32)
 
-    print("=== TurboQuant 3-bit (Polar 2b + QJL 1b) ===")
+    print("=== quant.cpp 3-bit (Polar 2b + QJL 1b) ===")
     quantized_3b = turbo_quantize(keys, rbits=1, tbits=2)
     turbo_scores_3b = turbo_attention_score(query, quantized_3b, head_dim=head_dim)
     cos_sim_3b = compute_attention_cosine_similarity(query, keys, rbits=1, tbits=2)
@@ -182,9 +182,9 @@ if __name__ == '__main__':
     polar_only_cos = polar_cos(query, keys, rbits=1, tbits=2)
     print(f"PolarQuant-only (3b) cosine: {polar_only_cos:.6f}")
     improvement_3b = cos_sim_3b - polar_only_cos
-    print(f"TurboQuant improvement: {improvement_3b:+.6f}")
+    print(f"quant.cpp improvement: {improvement_3b:+.6f}")
 
-    print("\n=== TurboQuant 4-bit (Polar 3b + QJL 1b) ===")
+    print("\n=== quant.cpp 4-bit (Polar 3b + QJL 1b) ===")
     quantized_4b = turbo_quantize(keys, rbits=1, tbits=3)
     cos_sim_4b = compute_attention_cosine_similarity(query, keys, rbits=1, tbits=3)
     print(f"Attention cosine similarity: {cos_sim_4b:.6f}")
@@ -192,7 +192,7 @@ if __name__ == '__main__':
     polar_only_cos_4b = polar_cos(query, keys, rbits=1, tbits=3)
     print(f"PolarQuant-only (4b) cosine: {polar_only_cos_4b:.6f}")
     improvement_4b = cos_sim_4b - polar_only_cos_4b
-    print(f"TurboQuant improvement: {improvement_4b:+.6f}")
+    print(f"quant.cpp improvement: {improvement_4b:+.6f}")
 
     # Pack block test
     block_bytes = turbo_pack_block(quantized_3b, vec_idx=0, block_idx=0)
@@ -202,4 +202,4 @@ if __name__ == '__main__':
     expected_total = expected_polar + expected_qjl
     print(f"\nBlock size: {len(block_bytes)} bytes (expected {expected_total})")
 
-    print("\nAll TurboQuant reference tests passed.")
+    print("\nAll quant.cpp reference tests passed.")

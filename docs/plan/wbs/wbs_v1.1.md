@@ -1,4 +1,4 @@
-# TurboQuant.cpp — Work Breakdown Structure v1.1
+# quant.cpp — Work Breakdown Structure v1.1
 
 **Version**: 1.1
 **Date**: 2026-03-31
@@ -45,7 +45,7 @@ Target model: `google/gemma-3-4b-it` (or `unsloth/gemma-3-4b-it`). Architecture 
   - [ ] Verify output file size is reasonable (expected ~2-3 GB for Q4 weights)
   - [ ] Spot-check weight statistics (mean, std) for sanity
 - [ ] Validate forward pass (~3h)
-  - [ ] Run `tq_run` with a simple prompt, verify no crashes or NaNs
+  - [ ] Run `quant` with a simple prompt, verify no crashes or NaNs
   - [ ] Compare logits against PyTorch reference for first 10 tokens of a fixed prompt
   - [ ] Verify KV cache quantization works at head_dim=256
   - [ ] Verify attention scores are numerically stable at 34 layers
@@ -74,7 +74,7 @@ Llama 3.2 3B uses standard transformer with GQA, RoPE, SwiGLU, RMSNorm. Very sim
   - [ ] Add chat template formatting for Llama 3 instruction format
 - [ ] Validation (~3h)
   - [ ] Run `tq_convert` on Llama 3.2 3B
-  - [ ] Run `tq_run` and verify coherent text generation
+  - [ ] Run `quant` and verify coherent text generation
   - [ ] Compare logits against PyTorch reference
   - [ ] Verify tok/s and memory are competitive
 
@@ -89,12 +89,12 @@ Llama 3.2 3B uses standard transformer with GQA, RoPE, SwiGLU, RMSNorm. Very sim
   - [ ] Implement `tq_cache_get_stats(cache)` that computes actual memory usage
   - [ ] Track per-layer memory breakdown (useful for mixed-precision schemes)
 - [ ] Integrate with CLI (~1h)
-  - [ ] Add `--memory` flag to `tq_run` that prints KV cache stats after generation
+  - [ ] Add `--memory` flag to `quant` that prints KV cache stats after generation
   - [ ] Print format: `KV Cache: {total_mb} MB ({key_mb} MB keys + {value_mb} MB values) for {n_tokens} tokens`
   - [ ] Print per-layer breakdown when `--verbose` is also set
 - [ ] Baseline measurements (~1h)
   - [ ] Measure FP16 KV memory (theoretical: `2 * n_layers * n_kv_heads * head_dim * seq_len * 2 bytes`)
-  - [ ] Measure Q4 KV memory (TurboQuant uniform_4b)
+  - [ ] Measure Q4 KV memory (quant.cpp uniform_4b)
   - [ ] Calculate and report compression ratio
   - [ ] Verify compression ratio matches expected ~3.5-4x for Q4
 
@@ -104,8 +104,8 @@ Llama 3.2 3B uses standard transformer with GQA, RoPE, SwiGLU, RMSNorm. Very sim
   - [ ] Script to generate prompts of increasing length: 1K, 4K, 8K, 16K, 32K tokens
   - [ ] Use natural text (e.g., concatenated paragraphs) not random tokens
   - [ ] Include a "needle" question at the end to test retrieval quality
-- [ ] TurboQuant long context runs (~2h)
-  - [ ] Run `tq_run` at each context length, record: wall time, peak RSS, tok/s, KV cache MB
+- [ ] quant.cpp long context runs (~2h)
+  - [ ] Run `quant` at each context length, record: wall time, peak RSS, tok/s, KV cache MB
   - [ ] Verify no OOM or crash up to model's max context
   - [ ] Record quality metric: perplexity or needle retrieval accuracy
 - [ ] llama.cpp baseline comparison (~2h)
@@ -115,7 +115,7 @@ Llama 3.2 3B uses standard transformer with GQA, RoPE, SwiGLU, RMSNorm. Very sim
   - [ ] Also test llama.cpp with Q4_0 KV cache for fair comparison
 - [ ] Find OOM crossover point (~1h)
   - [ ] On a fixed memory budget (e.g., 8 GB), find max context for each engine
-  - [ ] Document the crossover: "TurboQuant supports Nx longer context in same memory"
+  - [ ] Document the crossover: "quant.cpp supports Nx longer context in same memory"
   - [ ] Record exact numbers for chart generation
 
 ### B3: Benchmark Script & Chart (~4h)
@@ -130,7 +130,7 @@ Llama 3.2 3B uses standard transformer with GQA, RoPE, SwiGLU, RMSNorm. Very sim
   - [ ] `bench/plot_long_context.py` using matplotlib
   - [ ] Dual y-axis chart: memory (MB) on left, tok/s on right
   - [ ] X-axis: context length (log scale)
-  - [ ] Two series per metric: TurboQuant (solid) vs llama.cpp (dashed)
+  - [ ] Two series per metric: quant.cpp (solid) vs llama.cpp (dashed)
   - [ ] Highlight OOM point for llama.cpp with annotation
   - [ ] Save as `docs/assets/long_context_chart.png`
 - [ ] Generate and validate chart (~0.5h)
@@ -147,11 +147,11 @@ Llama 3.2 3B uses standard transformer with GQA, RoPE, SwiGLU, RMSNorm. Very sim
 - [ ] Pre-release checklist (~1h)
   - [ ] All tests pass (`ctest --test-dir build --output-on-failure`)
   - [ ] No compiler warnings (`-Wall -Wextra -Werror`)
-  - [ ] `tq_run` works end-to-end on at least one model
+  - [ ] `quant` works end-to-end on at least one model
   - [ ] README is accurate and up-to-date
   - [ ] LICENSE file exists
 - [ ] Create release (~1h)
-  - [ ] Create annotated git tag: `git tag -a v0.1.0 -m "TurboQuant.cpp v0.1.0"`
+  - [ ] Create annotated git tag: `git tag -a v0.1.0 -m "quant.cpp v0.1.0"`
   - [ ] Write release notes (update `scripts/release_notes_v0.1.0.md` if needed)
   - [ ] Include: feature summary, supported models, build instructions, known limitations
   - [ ] Publish via `gh release create v0.1.0 --title "v0.1.0" --notes-file scripts/release_notes_v0.1.0.md`
@@ -178,7 +178,7 @@ Llama 3.2 3B uses standard transformer with GQA, RoPE, SwiGLU, RMSNorm. Very sim
 ### C3: Community Launch (~3h)
 
 - [ ] r/LocalLLaMA post (~1.5h)
-  - [ ] Draft post: "TurboQuant.cpp — KV cache compression lets you run 32K context where llama.cpp OOMs"
+  - [ ] Draft post: "quant.cpp — KV cache compression lets you run 32K context where llama.cpp OOMs"
   - [ ] Lead with the chart, not speed claims
   - [ ] Include: what it is, how it works (1 paragraph), the benchmark results, how to try it
   - [ ] Link to GitHub repo and release
@@ -223,7 +223,7 @@ A1 (Dynamic Buffers) ──→ A2 (Gemma 4B) ──→ A3 (Llama 3B, stretch)
 
 ## Completion Criteria
 
-- [ ] `tq_run --model gemma-3-4b-it.tqm --prompt "What is AI?"` generates coherent text
+- [ ] `quant --model gemma-3-4b-it.tqm --prompt "What is AI?"` generates coherent text
 - [ ] KV cache memory usage is reported via `--memory` flag
 - [ ] Long context benchmark CSV and chart exist at `bench/` and `docs/assets/`
 - [ ] GitHub release v0.1.0 is published

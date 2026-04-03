@@ -1,4 +1,4 @@
-# TurboQuant.cpp v1.1 PRD — Long Context Proof
+# quant.cpp v1.1 PRD — Long Context Proof
 
 **Version**: 1.1
 **Date**: 2026-03-31
@@ -9,7 +9,7 @@
 
 ## Overview
 
-TurboQuant.cpp v1.1 proves the practical value of KV cache compression by supporting 3B+ parameter models and demonstrating measurable memory savings at long context lengths (8K-32K tokens). The release culminates in a public benchmark showing that TurboQuant continues inference where llama.cpp runs out of memory.
+quant.cpp v1.1 proves the practical value of KV cache compression by supporting 3B+ parameter models and demonstrating measurable memory savings at long context lengths (8K-32K tokens). The release culminates in a public benchmark showing that quant.cpp continues inference where llama.cpp runs out of memory.
 
 Current state: 47 stars, 9 forks, two toy-sized models (270M, 0.8B), no GitHub Release, no long-context proof. v1.1 fixes all three gaps.
 
@@ -28,7 +28,7 @@ Current state: 47 stars, 9 forks, two toy-sized models (270M, 0.8B), no GitHub R
 
 ### Phase A: Larger Model Support
 
-**Goal**: Make TurboQuant useful beyond toy models.
+**Goal**: Make quant.cpp useful beyond toy models.
 
 **Target model** (pick one, in priority order):
 1. Llama 3.2 3B — widest community adoption
@@ -59,14 +59,14 @@ Current state: 47 stars, 9 forks, two toy-sized models (270M, 0.8B), no GitHub R
 **Benchmark design**:
 - **Context lengths**: 1K, 2K, 4K, 8K, 16K, 32K tokens
 - **Measurements**: KV cache memory (bytes), peak RSS, tokens/sec, output quality
-- **Comparison**: TurboQuant (PolarQuant 3-bit KV) vs llama.cpp (FP16 KV)
+- **Comparison**: quant.cpp (PolarQuant 3-bit KV) vs llama.cpp (FP16 KV)
 - **Hardware**: 8GB RAM machine (or constrained via `ulimit`)
 
 **Key experiments**:
 
-1. **Memory scaling chart**: X-axis = context length, Y-axis = KV cache memory. Two lines: TurboQuant vs llama.cpp. Should show ~7x gap widening linearly.
+1. **Memory scaling chart**: X-axis = context length, Y-axis = KV cache memory. Two lines: quant.cpp vs llama.cpp. Should show ~7x gap widening linearly.
 
-2. **OOM crossover**: Find the context length N where llama.cpp exceeds available memory but TurboQuant still runs. For a 3B model on 8GB RAM, this crossover should be around 16K-32K tokens.
+2. **OOM crossover**: Find the context length N where llama.cpp exceeds available memory but quant.cpp still runs. For a 3B model on 8GB RAM, this crossover should be around 16K-32K tokens.
 
 3. **Quality preservation**: At each context length, measure output cosine similarity to prove compression does not degrade quality at long contexts.
 
@@ -83,7 +83,7 @@ Current state: 47 stars, 9 forks, two toy-sized models (270M, 0.8B), no GitHub R
 
 **GitHub Release v0.1.0**:
 - [ ] Tag `v0.1.0` on main
-- [ ] Pre-built binaries: macOS ARM64 (`tq_run`, `tq_convert`)
+- [ ] Pre-built binaries: macOS ARM64 (`quant`, `tq_convert`)
 - [ ] Pre-built binaries: Ubuntu x86-64 (via GitHub Actions or cross-compile)
 - [ ] CHANGELOG.md with feature summary
 - [ ] Release notes include benchmark chart and key numbers
@@ -129,7 +129,7 @@ Current state: 47 stars, 9 forks, two toy-sized models (270M, 0.8B), no GitHub R
 Runs LLMs on a 8GB laptop. Cannot use llama.cpp for long conversations because KV cache eats all RAM. Wants to chat with a 3B model at 16K+ context without OOM.
 
 **Sam — LLM Framework Evaluator**
-Evaluates inference engines for integration. Needs benchmark data comparing memory usage. Will not consider TurboQuant without reproducible numbers on a real model.
+Evaluates inference engines for integration. Needs benchmark data comparing memory usage. Will not consider quant.cpp without reproducible numbers on a real model.
 
 ---
 
@@ -149,7 +149,7 @@ Evaluates inference engines for integration. Needs benchmark data comparing memo
 |---|-----------|-------------|--------|
 | 1 | 3B+ model runs | End-to-end inference, coherent output | Cosine sim > 0.99 vs PyTorch |
 | 2 | KV memory reduction | Measured at 32K context | 5-7x less than llama.cpp |
-| 3 | OOM crossover | llama.cpp OOMs at N tokens, TurboQuant does not | Demonstrated on 8GB RAM |
+| 3 | OOM crossover | llama.cpp OOMs at N tokens, quant.cpp does not | Demonstrated on 8GB RAM |
 | 4 | GitHub Release | v0.1.0 published with binaries | macOS ARM64 + Ubuntu x86-64 |
 | 5 | Community reception | Reddit/HN post with benchmark data | Positive reception, not spam-filtered |
 
@@ -199,4 +199,4 @@ At 32K context:
   3-bit TQ KV: 524,288 * 32,768 / 5.3 = ~3 GB  (fits in 8GB RAM)
 ```
 
-This is the crossover. At 32K context on 8GB RAM, llama.cpp cannot run. TurboQuant can.
+This is the crossover. At 32K context on 8GB RAM, llama.cpp cannot run. quant.cpp can.

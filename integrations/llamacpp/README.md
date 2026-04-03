@@ -1,12 +1,12 @@
-# TurboQuant -- llama.cpp Integration Guide
+# quant.cpp -- llama.cpp Integration Guide
 
 ## Quick Start (3 steps)
 
-### 1. Add TurboQuant to your llama.cpp build
+### 1. Add quant.cpp to your llama.cpp build
 
 ```cmake
 # In your llama.cpp CMakeLists.txt, add:
-add_subdirectory(path/to/TurboQuant.cpp turboquant)
+add_subdirectory(path/to/quant.cpp turboquant)
 target_link_libraries(llama PRIVATE turboquant)
 ```
 
@@ -43,7 +43,7 @@ All CLI names also accept short forms: `turbo3`, `polar4`, `uniform4`, `qjl1`, e
 
 ## How It Works
 
-TurboQuant hooks into llama.cpp's KV cache layer:
+quant.cpp hooks into llama.cpp's KV cache layer:
 
 ```
 Normal:  key_states (FP16) -> KV cache (FP16) -> attention
@@ -58,7 +58,7 @@ full materialization of FP32 keys.
 
 ## Memory Impact
 
-| Model | Context | FP16 Cache | TurboQuant (turbo3) | Saved |
+| Model | Context | FP16 Cache | quant.cpp (turbo3) | Saved |
 |-------|---------|------------|---------------------|-------|
 | Llama-3.2-3B | 64K | 7.00 GB | 1.25 GB | 82% |
 | Llama-3-8B | 32K | 2.00 GB | 0.36 GB | 82% |
@@ -70,16 +70,16 @@ full materialization of FP32 keys.
 
 ```cmake
 # In llama.cpp's CMakeLists.txt:
-add_subdirectory(path/to/TurboQuant.cpp turboquant)
+add_subdirectory(path/to/quant.cpp turboquant)
 target_link_libraries(llama PRIVATE turboquant)
 ```
 
 ### Option B: Link pre-built library
 
-Build TurboQuant first:
+Build quant.cpp first:
 
 ```bash
-cd /path/to/TurboQuant.cpp
+cd /path/to/quant.cpp
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ```
@@ -87,11 +87,11 @@ cmake --build build -j$(nproc)
 Then in llama.cpp's CMakeLists.txt:
 
 ```cmake
-option(LLAMA_TURBOQUANT "Enable TurboQuant KV cache compression" OFF)
+option(LLAMA_TURBOQUANT "Enable quant.cpp KV cache compression" OFF)
 
 if(LLAMA_TURBOQUANT)
     set(TURBOQUANT_LIB_PATH "" CACHE PATH "Path to libturboquant.a")
-    set(TURBOQUANT_INCLUDE_PATH "" CACHE PATH "Path to TurboQuant include/")
+    set(TURBOQUANT_INCLUDE_PATH "" CACHE PATH "Path to quant.cpp include/")
 
     add_library(turboquant STATIC IMPORTED)
     set_target_properties(turboquant PROPERTIES
@@ -110,8 +110,8 @@ Build with:
 ```bash
 cmake -B build \
   -DLLAMA_TURBOQUANT=ON \
-  -DTURBOQUANT_LIB_PATH=/path/to/TurboQuant.cpp/build \
-  -DTURBOQUANT_INCLUDE_PATH=/path/to/TurboQuant.cpp/include
+  -DTURBOQUANT_LIB_PATH=/path/to/quant.cpp/build \
+  -DTURBOQUANT_INCLUDE_PATH=/path/to/quant.cpp/include
 cmake --build build -j$(nproc)
 ```
 
@@ -120,7 +120,7 @@ cmake --build build -j$(nproc)
 ```cpp
 #include "tq_ggml_type.h"
 
-// Initialize TurboQuant types (call once at startup)
+// Initialize quant.cpp types (call once at startup)
 tq_ggml_register_types();
 
 // Parse CLI argument
@@ -181,7 +181,7 @@ A: Ensure `TURBOQUANT_INCLUDE_PATH` points to the directory containing
 
 **Q: Linker errors about undefined tq_* symbols**
 A: Make sure `libturboquant.a` is built and `TURBOQUANT_LIB_PATH` is correct.
-Also ensure `-lm` is linked (TurboQuant uses libm for math functions).
+Also ensure `-lm` is linked (quant.cpp uses libm for math functions).
 
 **Q: Quality degradation with QJL 1-bit**
 A: QJL 1-bit provides maximum compression but lower quality. Use `turbo3`
@@ -194,4 +194,4 @@ For most use cases, `turbo3` is the recommended default.
 
 ## License
 
-Apache 2.0 -- same as TurboQuant.cpp
+Apache 2.0 -- same as quant.cpp

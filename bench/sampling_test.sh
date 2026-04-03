@@ -1,5 +1,5 @@
 #!/bin/bash
-# TurboQuant.cpp — Temperature Sampling Comparison
+# quant.cpp — Temperature Sampling Comparison
 #
 # Tests that all KV compression types produce similar quality
 # stochastic output at different temperature settings.
@@ -10,12 +10,12 @@
 # Usage:
 #   bash bench/sampling_test.sh <model.tqm>
 #
-# Requirements: built tq_run binary in build/
+# Requirements: built quant binary in build/
 
 set -e
 
 MODEL="${1:-model.tqm}"
-TQ_RUN="./build/tq_run"
+TQ_RUN="./build/quant"
 THREADS=6
 RESULTS_DIR="bench/sampling_results"
 
@@ -39,7 +39,7 @@ NTOK=100
 PROMPT="Write a short poem about the ocean."
 
 echo "============================================================"
-echo "  TurboQuant Temperature Sampling Comparison"
+echo "  quant.cpp Temperature Sampling Comparison"
 echo "============================================================"
 echo ""
 echo "  Model:        $MODEL"

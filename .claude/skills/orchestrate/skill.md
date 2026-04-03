@@ -1,11 +1,11 @@
 ---
 name: orchestrate
-description: "TurboQuant.cpp 개발 오케스트레이터. 에이전트 팀을 구성하고, score 기반 Phase 전환, 병렬 작업 위임, Merge Gate를 자동 수행한다. '개발 시작', '하네스 실행', '팀 구성', '오케스트레이션' 요청 시 사용. 프로젝트의 핵심 개발 루프를 조율하는 상위 스킬."
+description: "quant.cpp 개발 오케스트레이터. 에이전트 팀을 구성하고, score 기반 Phase 전환, 병렬 작업 위임, Merge Gate를 자동 수행한다. '개발 시작', '하네스 실행', '팀 구성', '오케스트레이션' 요청 시 사용. 프로젝트의 핵심 개발 루프를 조율하는 상위 스킬."
 ---
 
-# TurboQuant Orchestrator
+# quant.cpp Orchestrator
 
-TurboQuant.cpp 에이전트 팀을 조율하여 프로젝트를 자율적으로 발전시키는 통합 스킬.
+quant.cpp 에이전트 팀을 조율하여 프로젝트를 자율적으로 발전시키는 통합 스킬.
 
 ## 아키텍처: 계층적 위임 + 팬아웃/팬인
 

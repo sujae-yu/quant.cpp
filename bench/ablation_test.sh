@@ -1,23 +1,23 @@
 #!/bin/bash
-# TurboQuant.cpp — Ablation Test
+# quant.cpp — Ablation Test
 #
 # Compares quantization methods at increasing token lengths to show
 # where each method diverges from the uniform_4b baseline.
 #
 # This helps answer community questions:
-#   1. Does TurboQuant's codebook + QJL actually help vs naive uniform?
+#   1. Does quant.cpp's codebook + QJL actually help vs naive uniform?
 #   2. At what context length do different methods start diverging?
 #   3. How does 1-bit compare to 3-bit in practice?
 #
 # Usage:
 #   bash bench/ablation_test.sh <model.tqm>
 #
-# Requirements: built tq_run binary in build/
+# Requirements: built quant binary in build/
 
 set -e
 
 MODEL="${1:-model.tqm}"
-TQ_RUN="./build/tq_run"
+TQ_RUN="./build/quant"
 THREADS=6
 RESULTS_DIR="bench/ablation_results"
 
@@ -44,7 +44,7 @@ PROMPTS=(
 )
 
 echo "============================================================"
-echo "  TurboQuant Ablation Test"
+echo "  quant.cpp Ablation Test"
 echo "============================================================"
 echo ""
 echo "  Model:        $MODEL"
@@ -211,7 +211,7 @@ echo "       values evenly across all dimensions. Without RHT,"
 echo "       a few large-magnitude dimensions would dominate the"
 echo "       quantization error, causing systematic bias in inner"
 echo "       products. This is proven in Theorem 3.1 of the"
-echo "       TurboQuant paper (arxiv:2504.19874)."
+echo "       quant.cpp paper (arxiv:2504.19874)."
 echo ""
 echo "  Results saved to: $RESULTS_DIR/"
 echo ""

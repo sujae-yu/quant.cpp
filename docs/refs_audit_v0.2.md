@@ -1,4 +1,4 @@
-# TurboQuant.cpp — refs/ Absorption Audit v0.2
+# quant.cpp — refs/ Absorption Audit v0.2
 
 **Date**: 2026-03-29
 
@@ -22,7 +22,7 @@
 - [x] Self-contained blocks with embedded scales — All 5 block types
 - [x] static_assert size verification — 6 assertions across tq_types.h
 - [x] Type traits O(1) dispatch — `TQ_TRAITS[type]` indexed table
-- [x] vec_dot pairing — `residual_type` for TurboQuant composite
+- [x] vec_dot pairing — `residual_type` for quant.cpp composite
 - [x] SIMD function pointer swapping — cpu_dispatch.c with CPUID detection
 
 ## vLLM (Cache Management)

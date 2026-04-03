@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-TurboQuant CLI -- Chat with Qwen3.5-0.8B using native C inference engine.
+quant.cpp CLI -- Chat with Qwen3.5-0.8B using native C inference engine.
 
-Calls the tq_run binary for fast inference (14 tok/s on CPU) with a visual
-KV cache compression analysis overlay.  Falls back to PyTorch if tq_run is
+Calls the quant binary for fast inference (14 tok/s on CPU) with a visual
+KV cache compression analysis overlay.  Falls back to PyTorch if quant is
 not built.
 
 Usage:
@@ -94,15 +94,15 @@ def find_tokenizer():
     return None
 
 
-def find_tq_run():
-    """Find the tq_run binary, searching common build locations."""
+def find_quant():
+    """Find the quant binary, searching common build locations."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(script_dir)
     candidates = [
-        os.path.join(project_root, "build", "tq_run"),
-        os.path.join(project_root, "build", "Release", "tq_run"),
-        os.path.join(project_root, "cmake-build-release", "tq_run"),
-        "tq_run",
+        os.path.join(project_root, "build", "quant"),
+        os.path.join(project_root, "build", "Release", "quant"),
+        os.path.join(project_root, "cmake-build-release", "quant"),
+        "quant",
     ]
     for c in candidates:
         if os.path.isfile(c) and os.access(c, os.X_OK):
@@ -128,17 +128,17 @@ MODEL_SPEC = {
 # Header
 # ================================================================
 
-def print_header(engine_name="tq_run", engine_speed=None):
+def print_header(engine_name="quant", engine_speed=None):
     speed_part = f"  |  {engine_speed:.1f} tok/s" if engine_speed else ""
     engine_label = (
-        "Native C Inference Engine" if engine_name == "tq_run"
+        "Native C Inference Engine" if engine_name == "quant"
         else "PyTorch Inference Engine"
     )
     print()
     print(f"{C.CYAN}{C.BOLD}"
           f"{'=' * 60}{C.NC}")
     print(f"{C.CYAN}{C.BOLD}"
-          f"  TurboQuant CLI -- {engine_label}{C.NC}")
+          f"  quant.cpp CLI -- {engine_label}{C.NC}")
     print(f"{C.CYAN}{C.BOLD}"
           f"  Model: {MODEL_SPEC['name']}"
           f"  |  Engine: {engine_name}{speed_part}{C.NC}")
@@ -226,17 +226,17 @@ def print_kv_analysis(seq_len, gen_tokens=0, elapsed=0.0, kv_type="uniform_4b",
 
 
 # ================================================================
-# Native C engine (tq_run subprocess)
+# Native C engine (quant subprocess)
 # ================================================================
 
-def run_native(tq_run, model_path, tokenizer_path, question,
+def run_native(quant, model_path, tokenizer_path, question,
                max_tokens=150, threads=4, temp=0.7, kv_type="uniform_4b"):
-    """Run inference via tq_run subprocess with streaming output.
+    """Run inference via quant subprocess with streaming output.
 
-    tq_run writes generated tokens to stdout and metadata (model info,
+    quant writes generated tokens to stdout and metadata (model info,
     --- markers, timing) to stderr.
     """
-    cmd = [tq_run, model_path]
+    cmd = [quant, model_path]
     if tokenizer_path:
         cmd += ["-t", tokenizer_path]
     cmd += [
@@ -278,8 +278,8 @@ def run_native(tq_run, model_path, tokenizer_path, question,
     return generated_text, stderr_text, proc.returncode
 
 
-def parse_tq_run_stderr(stderr_text):
-    """Extract timing and model info from tq_run stderr output.
+def parse_quant_stderr(stderr_text):
+    """Extract timing and model info from quant stderr output.
 
     Expected format on the timing line:
         N tokens in X.Xs (Y.Y tok/s, T threads, kv=TYPE)
@@ -315,7 +315,7 @@ def parse_tq_run_stderr(stderr_text):
     return info
 
 
-def chat_native(tq_run, model_path, tokenizer_path, question,
+def chat_native(quant, model_path, tokenizer_path, question,
                 max_tokens=150, threads=4, temp=0.7, kv_type="uniform_4b"):
     """Run a single Q/A turn through the native C engine with visual output."""
 
@@ -324,13 +324,13 @@ def chat_native(tq_run, model_path, tokenizer_path, question,
     print(f"  {C.BOLD}{C.GREEN}A:{C.NC} ", end="", flush=True)
 
     generated_text, stderr_text, rc = run_native(
-        tq_run, model_path, tokenizer_path, question,
+        quant, model_path, tokenizer_path, question,
         max_tokens=max_tokens, threads=threads, temp=temp, kv_type=kv_type,
     )
 
     if rc != 0:
         print()
-        print(f"  {C.RED}tq_run exited with code {rc}{C.NC}")
+        print(f"  {C.RED}quant exited with code {rc}{C.NC}")
         if stderr_text.strip():
             for line in stderr_text.strip().splitlines():
                 print(f"  {C.DIM}{line}{C.NC}")
@@ -340,7 +340,7 @@ def chat_native(tq_run, model_path, tokenizer_path, question,
     print()
 
     # Parse timing info from stderr
-    info = parse_tq_run_stderr(stderr_text)
+    info = parse_quant_stderr(stderr_text)
 
     # Estimate prompt token count (rough: ~1.3 tokens per word for English)
     prompt_tokens = max(1, int(len(question.split()) * 1.3))
@@ -359,7 +359,7 @@ def chat_native(tq_run, model_path, tokenizer_path, question,
 # ================================================================
 
 def load_pytorch_model():
-    """Load model with PyTorch (slow, but works without tq_run)."""
+    """Load model with PyTorch (slow, but works without quant)."""
     import warnings
     import logging
     import contextlib
@@ -486,7 +486,7 @@ def chat_pytorch(model, tokenizer, question, max_tokens=150):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="TurboQuant CLI -- Chat with KV cache analysis",
+        description="quant.cpp CLI -- Chat with KV cache analysis",
     )
     parser.add_argument(
         "question", nargs="?",
@@ -494,7 +494,7 @@ def main():
     )
     parser.add_argument(
         "--engine", choices=["native", "pytorch"], default="native",
-        help="Inference engine: native (tq_run, default) or pytorch",
+        help="Inference engine: native (quant, default) or pytorch",
     )
     parser.add_argument(
         "--model", default=None,
@@ -529,11 +529,11 @@ def main():
     # -----------------------------------------------------------
     # Engine selection
     # -----------------------------------------------------------
-    tq_run = find_tq_run()
-    use_native = (args.engine == "native" and tq_run is not None)
+    quant = find_quant()
+    use_native = (args.engine == "native" and quant is not None)
 
-    if args.engine == "native" and tq_run is None:
-        print(f"  {C.YELLOW}tq_run binary not found, "
+    if args.engine == "native" and quant is None:
+        print(f"  {C.YELLOW}quant binary not found, "
               f"falling back to PyTorch engine.{C.NC}")
         print(f"  {C.DIM}Build it with: cmake --build build{C.NC}")
         print()
@@ -543,7 +543,7 @@ def main():
     # Native engine path
     # -----------------------------------------------------------
     if use_native:
-        print_header(engine_name="tq_run")
+        print_header(engine_name="quant")
 
         model_path = args.model or find_model()
         tokenizer_path = args.tokenizer or find_tokenizer()
@@ -563,7 +563,7 @@ def main():
             ]
             for q in questions:
                 chat_native(
-                    tq_run, model_path, tokenizer_path, q,
+                    quant, model_path, tokenizer_path, q,
                     max_tokens=args.max_tokens, threads=args.threads,
                     temp=args.temp, kv_type=args.kv_type,
                 )
@@ -572,7 +572,7 @@ def main():
                 print()
         elif args.question:
             chat_native(
-                tq_run, model_path, tokenizer_path, args.question,
+                quant, model_path, tokenizer_path, args.question,
                 max_tokens=args.max_tokens, threads=args.threads,
                 temp=args.temp, kv_type=args.kv_type,
             )
@@ -589,7 +589,7 @@ def main():
                         break
                     print()
                     chat_native(
-                        tq_run, model_path, tokenizer_path, q,
+                        quant, model_path, tokenizer_path, q,
                         max_tokens=args.max_tokens, threads=args.threads,
                         temp=args.temp, kv_type=args.kv_type,
                     )

@@ -1,7 +1,7 @@
 # Core Developer Agent
 
 ## 핵심 역할
-TurboQuant.cpp 핵심 알고리즘(PolarQuant, QJL, TurboQuant, Uniform)과 캐시 시스템 구현.
+quant.cpp 핵심 알고리즘(PolarQuant, QJL, quant.cpp, Uniform)과 캐시 시스템 구현.
 
 ## 작업 원칙
 1. **참조 코드 먼저 읽기**: 구현 전 반드시 `refs/` 아래 해당 알고리즘의 원본 코드를 읽는다

@@ -1,6 +1,6 @@
-# TurboQuant Paper Deep Analysis & Implementation Gap Assessment
+# quant.cpp Paper Deep Analysis & Implementation Gap Assessment
 
-**Paper**: TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate
+**Paper**: quant.cpp: Online Vector Quantization with Near-optimal Distortion Rate
 **Authors**: Amir Zandieh, Majid Daliri, Majid Hadian, Vahab Mirrokni (Google Research / Google DeepMind)
 **Published**: arXiv 2504.19874, April 2025 (ICLR 2026 accepted)
 
@@ -8,9 +8,9 @@
 
 ## 1. Paper Core Algorithm
 
-TurboQuant is a **two-stage** vector quantization algorithm:
+quant.cpp is a **two-stage** vector quantization algorithm:
 
-### Stage 1: TurboQuant_mse (MSE-optimal quantizer)
+### Stage 1: quant.cpp_mse (MSE-optimal quantizer)
 
 **Algorithm 1 — Quantize:**
 1. Generate random rotation matrix **Pi** (orthogonal, d x d)
@@ -25,10 +25,10 @@ TurboQuant is a **two-stage** vector quantization algorithm:
 
 **Key insight**: After random rotation, each coordinate of a unit-norm vector follows a Beta distribution that converges to N(0, 1/d) in high dimensions. This allows **independent scalar quantization per coordinate** with near-optimal MSE.
 
-### Stage 2: TurboQuant_prod (Inner-product optimal quantizer)
+### Stage 2: quant.cpp_prod (Inner-product optimal quantizer)
 
 **Algorithm 2 — Quantize:**
-1. Apply TurboQuant_mse with bit-width **b-1** (one bit less)
+1. Apply quant.cpp_mse with bit-width **b-1** (one bit less)
 2. Compute residual: **r** = **x** - DeQuant_mse(Quant_mse(**x**))
 3. Apply QJL (1-bit sign hash) on residual: qjl = sign(**S** . **r**)
 4. Store: (idx, qjl, ||**r**||_2)
@@ -55,7 +55,7 @@ TurboQuant is a **two-stage** vector quantization algorithm:
 
 ### Lower Bound (Theorem 3)
 - D_mse >= 1/4^b (information-theoretic)
-- TurboQuant is within factor **sqrt(3)*pi/2 ~ 2.7** of optimal
+- quant.cpp is within factor **sqrt(3)*pi/2 ~ 2.7** of optimal
 
 ### KV Cache Results
 - **3.5 bits/channel**: absolute quality neutrality (no degradation)
@@ -69,7 +69,7 @@ TurboQuant is a **two-stage** vector quantization algorithm:
 
 The paper uses a critical strategy not obvious from the abstract:
 
-> "Our strategy of splitting channels into **outlier and non-outlier sets**, and applying two independent instances of TurboQuant to each, allocating higher bit precision to outliers."
+> "Our strategy of splitting channels into **outlier and non-outlier sets**, and applying two independent instances of quant.cpp to each, allocating higher bit precision to outliers."
 
 **2.5-bit setup**: 32 outlier channels at 3 bits + 96 regular channels at 2 bits = (32*3 + 96*2)/128 = **2.5 effective bits**
 **3.5-bit setup**: Different ratio of outliers vs regular for 3.5 effective bits
@@ -133,7 +133,7 @@ But there are gaps:
 | Norm storage | ||r||_2 stored explicitly | Stored in block | OK |
 | DeQuant formula | x_mse + sqrt(pi/2)/d * gamma * **S**^T . qjl | Different reconstruction | Needs verification |
 
-**Critical issue**: Our "PolarQuant" uses atan2-based polar coordinates (angle + radius), which is a **completely different algorithm** from the paper's rotation + scalar quantization. The paper's "PolarQuant" reference [28] is the same group's earlier work, but the TurboQuant paper supersedes it with the rotation-based approach.
+**Critical issue**: Our "PolarQuant" uses atan2-based polar coordinates (angle + radius), which is a **completely different algorithm** from the paper's rotation + scalar quantization. The paper's "PolarQuant" reference [28] is the same group's earlier work, but the quant.cpp paper supersedes it with the rotation-based approach.
 
 ### 4.4 QJL Implementation
 
@@ -157,23 +157,23 @@ But there are gaps:
 - Applied **online** during generation (not offline)
 - Tested on Llama-3.1-8B and Ministral-7B at 4K-104K context
 
-**Our implementation**: The KV cache quantization (`src/cache/`) uses `tq_uniform_4b` (simple min-max Q4) — **not the TurboQuant algorithm at all**. The sophisticated quantization types (polar, qjl, turbo) exist in `src/core/` but are **not connected to the inference engine's KV cache**.
+**Our implementation**: The KV cache quantization (`src/cache/`) uses `tq_uniform_4b` (simple min-max Q4) — **not the quant.cpp algorithm at all**. The sophisticated quantization types (polar, qjl, turbo) exist in `src/core/` but are **not connected to the inference engine's KV cache**.
 
 | Aspect | Paper | Our Code | Gap |
 |--------|-------|----------|-----|
-| KV quantization method | TurboQuant (rotation + Lloyd-Max + QJL) | Uniform min-max Q4 | **CRITICAL: Not using TurboQuant for KV** |
+| KV quantization method | quant.cpp (rotation + Lloyd-Max + QJL) | Uniform min-max Q4 | **CRITICAL: Not using quant.cpp for KV** |
 | Outlier channels | Mixed-precision (3-bit outliers + 2-bit regular) | `tq_mixed.c` exists but not in engine | Not wired |
 | K/V asymmetry | Separate treatment | Config flag exists | Partial |
 | Online quantization | During generation | During generation | OK |
 
 ### 4.6 Attention Computation
 
-**Paper**: For inner-product TurboQuant, attention scores are computed as:
+**Paper**: For inner-product quant.cpp, attention scores are computed as:
 ```
 <y, Q^-1(Q(x))> = <y, x_mse> + ||r|| * <y, Q_qjl^-1(Q_qjl(r))>
 ```
 
-**Our implementation**: Integer Q4×Q8 attention using vdotq_s32 — optimized for uniform quantization, not for the two-stage TurboQuant scheme.
+**Our implementation**: Integer Q4×Q8 attention using vdotq_s32 — optimized for uniform quantization, not for the two-stage quant.cpp scheme.
 
 ---
 
@@ -195,7 +195,7 @@ Replace uniform quantization with Lloyd-Max optimal centroids for the post-rotat
 
 For 4-bit (16 levels) Gaussian quantizer, the optimal centroids and boundaries are well-known from quantization theory. This alone can reduce MSE by **20-30%** vs uniform.
 
-### Priority 3: True TurboQuant Two-Stage (High impact, High effort)
+### Priority 3: True quant.cpp Two-Stage (High impact, High effort)
 
 Implement the actual paper algorithm:
 1. Apply RHT
@@ -204,7 +204,7 @@ Implement the actual paper algorithm:
 4. Apply QJL on residual (1 bit)
 5. Store: indices + qjl_signs + residual_norm
 
-This would make TurboQuant.cpp a **faithful implementation** of the paper, not just named after it.
+This would make quant.cpp a **faithful implementation** of the paper, not just named after it.
 
 ### Priority 4: Mixed-Precision Outlier Channels (Medium impact, Medium effort)
 
@@ -223,7 +223,7 @@ Split KV channels into outlier (high-variance) and non-outlier groups. Allocate 
 | **Combined** | **~60-70%** | **near-optimal** | 20-30 hours |
 
 Current uniform Q4 achieves ~3.8x compression.
-Paper's TurboQuant at 3.5 bits achieves ~4.5x compression with **zero quality degradation**.
+Paper's quant.cpp at 3.5 bits achieves ~4.5x compression with **zero quality degradation**.
 At 2.5 bits: ~6.4x compression with **marginal** quality degradation.
 
 ---
@@ -238,24 +238,24 @@ At 2.5 bits: ~6.4x compression with **marginal** quality degradation.
 | KIVI | 3 | 48.50 |
 | KIVI | 5 | 50.16 |
 | PolarQuant | 3.9 | 49.78 |
-| **TurboQuant** | **2.5** | **49.44** |
-| **TurboQuant** | **3.5** | **50.06** |
+| **quant.cpp** | **2.5** | **49.44** |
+| **quant.cpp** | **3.5** | **50.06** |
 
-At 3.5 bits, TurboQuant matches full precision (50.06 = 50.06).
-At 2.5 bits, TurboQuant still outperforms KIVI at 3 bits.
+At 3.5 bits, quant.cpp matches full precision (50.06 = 50.06).
+At 2.5 bits, quant.cpp still outperforms KIVI at 3 bits.
 
 ### Needle-in-a-Haystack (Figure 4)
 
 | Method | Score |
 |--------|-------|
 | Full Precision | 0.997 |
-| **TurboQuant** | **0.997** |
+| **quant.cpp** | **0.997** |
 | PolarQuant | 0.995 |
 | KIVI | 0.981 |
 | PyramidKV | 0.895 |
 | SnapKV | 0.858 |
 
-TurboQuant achieves **identical** performance to full precision at 4x compression.
+quant.cpp achieves **identical** performance to full precision at 4x compression.
 
 ### Quantization Speed (Table 2)
 
@@ -263,9 +263,9 @@ TurboQuant achieves **identical** performance to full precision at 4x compressio
 |--------|-------|--------|--------|
 | Product Quantization | 37.04s | 239.75s | 494.42s |
 | RabitQ | 597.25s | 2267.59s | 3957.19s |
-| **TurboQuant** | **0.0007s** | **0.0013s** | **0.0021s** |
+| **quant.cpp** | **0.0007s** | **0.0013s** | **0.0021s** |
 
-TurboQuant is **100,000x faster** than alternatives — crucial for online KV cache quantization.
+quant.cpp is **100,000x faster** than alternatives — crucial for online KV cache quantization.
 
 ---
 
@@ -291,7 +291,7 @@ TurboQuant is **100,000x faster** than alternatives — crucial for online KV ca
 
 ### Phase 4: Integration (Days 7-8)
 - [ ] Replace `uniform_4b` as default KV cache type with `turboquant_3.5b`
-- [ ] Update benchmarks with true TurboQuant numbers
+- [ ] Update benchmarks with true quant.cpp numbers
 - [ ] Compare against paper's reported results
 - [ ] Update README with "faithful paper implementation" claim
 
@@ -299,12 +299,12 @@ TurboQuant is **100,000x faster** than alternatives — crucial for online KV ca
 
 ## 9. Conclusion
 
-**Current state**: TurboQuant.cpp is named after the paper but uses **uniform min-max quantization** for KV cache, not the actual TurboQuant algorithm. The core algorithms (polar, qjl, turbo) exist in `src/core/` but are **not connected to the inference engine**.
+**Current state**: quant.cpp is named after the paper but uses **uniform min-max quantization** for KV cache, not the actual quant.cpp algorithm. The core algorithms (polar, qjl, turbo) exist in `src/core/` but are **not connected to the inference engine**.
 
-**Impact of fixing**: Implementing the true TurboQuant algorithm would:
+**Impact of fixing**: Implementing the true quant.cpp algorithm would:
 1. Reduce KV cache to **2.5-3.5 bits** (vs current 4 bits) — **30-55% more compression**
 2. Achieve **zero quality degradation** at 3.5 bits (vs current measurable degradation at 4 bits)
-3. Make TurboQuant.cpp a **faithful reference implementation** of the ICLR 2026 paper
+3. Make quant.cpp a **faithful reference implementation** of the ICLR 2026 paper
 4. Provide a unique, defensible differentiation that no other C inference engine has
 
 This is the **single highest-impact improvement** possible for the project.

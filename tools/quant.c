@@ -250,12 +250,12 @@ int main(int argc, char** argv) {
             value_quant_bits == 4 ? "Q4" : (value_quant_bits == 2 ? "Q2" : "FP16"));
 
     if (quant_mode == 1) {
-        fprintf(stderr, "Quantizing weights to 1-bit (TurboQuant sign hash)...\n");
+        fprintf(stderr, "Quantizing weights to 1-bit (quant.cpp sign hash)...\n");
         extern void tq_quantize_weights_1bit(tq_model_t*);
         tq_quantize_weights_1bit(model);
     }
     if (quant_mode == 6) {
-        fprintf(stderr, "Quantizing weights to Q4+Q2 (TurboQuant Progressive Residual, 6-bit)...\n");
+        fprintf(stderr, "Quantizing weights to Q4+Q2 (quant.cpp Progressive Residual, 6-bit)...\n");
         extern void tq_quantize_weights_q4q2(tq_model_t*);
         tq_quantize_weights_q4q2(model);
     } else

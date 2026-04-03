@@ -1,5 +1,5 @@
 #!/bin/bash
-# bandwidth_bench.sh -- Memory bandwidth profiling for TurboQuant KV cache
+# bandwidth_bench.sh -- Memory bandwidth profiling for quant.cpp KV cache
 #
 # Measures tok/s at different KV types and context lengths to demonstrate
 # that compressed KV cache maintains speed better at longer contexts.
@@ -15,10 +15,10 @@ set -euo pipefail
 
 MODEL="${1:?Usage: $0 <model.tqm> [--threads N]}"
 THREADS="${3:-4}"
-TQ_RUN="${TQ_RUN:-./build/tq_run}"
+TQ_RUN="${TQ_RUN:-./build/quant}"
 
 if [ ! -f "$TQ_RUN" ]; then
-    echo "Error: tq_run not found at $TQ_RUN. Build first." >&2
+    echo "Error: quant not found at $TQ_RUN. Build first." >&2
     echo "  cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j" >&2
     exit 1
 fi
@@ -33,7 +33,7 @@ if [ "${2:-}" = "--threads" ] && [ -n "${3:-}" ]; then
     THREADS="$3"
 fi
 
-echo "=== TurboQuant Memory Bandwidth Benchmark ==="
+echo "=== quant.cpp Memory Bandwidth Benchmark ==="
 echo "Model: $MODEL"
 echo "Threads: $THREADS"
 echo ""

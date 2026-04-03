@@ -1,4 +1,4 @@
-# TurboQuant.cpp — Work Breakdown Structure v0.8
+# quant.cpp — Work Breakdown Structure v0.8
 
 **Version**: 0.8
 **Date**: 2026-03-29
@@ -55,7 +55,7 @@
     ```
     x → RMSNorm → Q,K,V projection (matmul)
     Q,K → RoPE
-    K,V → TurboQuant KV cache (quantize + store)
+    K,V → quant.cpp KV cache (quantize + store)
     Q × KV_cache → attention scores (integer Q4×Q8!)
     scores → softmax → weighted sum of V
     → output projection → residual add
@@ -90,9 +90,9 @@
   - [ ] Decode: 한 토큰씩 생성
   - [ ] Sampling: temperature, top-p
   - [ ] 스트리밍: 토큰 생성 즉시 콜백
-- [ ] `tools/tq_run.c` — CLI 실행 파일
+- [ ] `tools/quant.c` — CLI 실행 파일
   ```bash
-  tq_run --model model.safetensors --prompt "Hello" --kv-type uniform_4b
+  quant --model model.safetensors --prompt "Hello" --kv-type uniform_4b
   ```
 - [ ] 벤치마크: tok/s 측정
 
@@ -103,15 +103,15 @@
 - [ ] PyTorch 대비 출력 비교 (동일 프롬프트 → 유사 로짓)
 - [ ] 속도: CPU 10+ tok/s 달성 확인
 - [ ] 메모리: < 2 GB 확인
-- [ ] KV 캐시: TurboQuant 양자화 동작 확인
+- [ ] KV 캐시: quant.cpp 양자화 동작 확인
 - [ ] 정수 attention: 실제 추론에서 사용 확인
 
 ---
 
 ## 완료 기준
 
-- [ ] `tq_run --model qwen3.5-0.8b --prompt "What is AI?"` 실행 → 텍스트 생성
+- [ ] `quant --model qwen3.5-0.8b --prompt "What is AI?"` 실행 → 텍스트 생성
 - [ ] CPU 10+ tok/s
 - [ ] 외부 의존성 0 (libc/libm만)
-- [ ] KV 캐시에 TurboQuant uniform_4b 자동 적용
+- [ ] KV 캐시에 quant.cpp uniform_4b 자동 적용
 - [ ] 정수 Q4×Q8 attention이 실제 추론에서 동작

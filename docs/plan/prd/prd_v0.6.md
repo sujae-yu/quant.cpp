@@ -1,4 +1,4 @@
-# TurboQuant.cpp — Product Requirements Document v0.6
+# quant.cpp — Product Requirements Document v0.6
 
 **Version**: 0.6
 **Date**: 2026-03-29

@@ -1,5 +1,5 @@
 /**
- * test_turbo_kv_1b.cpp -- Tests for TurboQuant 1-bit KV cache (Hamming attention)
+ * test_turbo_kv_1b.cpp -- Tests for quant.cpp 1-bit KV cache (Hamming attention)
  *
  * Tests the RHT + sign extraction pipeline for extreme 1-bit KV compression.
  * Validates block structure, attention accuracy via XOR+popcount, and

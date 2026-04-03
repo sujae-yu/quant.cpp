@@ -1,10 +1,10 @@
-# TurboQuant 1-bit KV Cache Patch for llama.cpp
+# quant.cpp 1-bit KV Cache Patch for llama.cpp
 
-Self-contained patch adding TurboQuant 1-bit KV cache quantization to llama.cpp.
+Self-contained patch adding quant.cpp 1-bit KV cache quantization to llama.cpp.
 
-## What is TurboQuant 1-bit KV?
+## What is quant.cpp 1-bit KV?
 
-TurboQuant uses the Random Hadamard Transform (RHT) to decorrelate KV cache
+quant.cpp uses the Random Hadamard Transform (RHT) to decorrelate KV cache
 channels, then stores just the sign bit per dimension. Attention is computed
 using XOR + popcount (Hamming distance), achieving:
 
@@ -13,7 +13,7 @@ using XOR + popcount (Hamming distance), achieving:
 - **Attention cosine ~ 2/pi = 0.637** (theoretical, verified empirically)
 - **Ultra-fast attention** via bitwise operations (no floating-point multiply per key)
 
-Reference: TurboQuant (arXiv 2504.19874)
+Reference: quant.cpp (arXiv 2504.19874)
 
 ## Files
 
@@ -47,7 +47,7 @@ cp ggml-turbo-quant.c  <llama.cpp>/ggml/src/
 In `ggml/include/ggml.h`, add before `GGML_TYPE_COUNT`:
 
 ```c
-GGML_TYPE_TQ_KV_1B = 41,  // TurboQuant 1-bit KV (24 bytes per 128 elements)
+GGML_TYPE_TQ_KV_1B = 41,  // quant.cpp 1-bit KV (24 bytes per 128 elements)
 ```
 
 ### Step 3: Add type traits to ggml.c

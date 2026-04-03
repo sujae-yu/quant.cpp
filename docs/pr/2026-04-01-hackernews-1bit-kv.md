@@ -6,11 +6,11 @@ Show HN: 1-bit KV cache in pure C — 10.7x compression, byte-identical output (
 
 ## URL
 
-https://github.com/quantumaikr/TurboQuant.cpp
+https://github.com/quantumaikr/quant.cpp
 
 ## First comment
 
-We implemented the TurboQuant paper (Google Research, ICLR 2026) in pure C and pushed it to the extreme: 1-bit KV cache that produces byte-identical output to 4-bit quantization.
+We implemented the quant.cpp paper (Google Research, ICLR 2026) in pure C and pushed it to the extreme: 1-bit KV cache that produces byte-identical output to 4-bit quantization.
 
 The math: LLM attention computes inner products <q, k>. Standard quantizers minimize reconstruction error but introduce bias in inner product estimation. The paper proves that Random Hadamard Transform + sign quantization gives an unbiased estimator. At 1 bit per dimension, attention reduces to XOR + popcount.
 

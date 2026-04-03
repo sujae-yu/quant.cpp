@@ -1,13 +1,13 @@
 /**
- * ggml-turbo-quant.h -- TurboQuant 1-bit KV cache quantization for llama.cpp
+ * ggml-turbo-quant.h -- quant.cpp 1-bit KV cache quantization for llama.cpp
  *
  * Apache 2.0 License, QuantumAI Inc.
  *
- * Self-contained implementation of TurboQuant 1-bit KV cache compression.
+ * Self-contained implementation of quant.cpp 1-bit KV cache compression.
  * Algorithm: L2-normalize -> Random Hadamard Transform -> sign extraction.
  * Attention: XOR + popcount Hamming distance -> inner product estimator.
  *
- * Reference: TurboQuant (arXiv 2504.19874)
+ * Reference: quant.cpp (arXiv 2504.19874)
  *   - 1-bit per dimension with RHT decorrelation
  *   - Theoretical attention cosine similarity: 2/pi ~ 0.637
  *   - Compression: 20 bytes per 128 elements (1.25 bpw including metadata)
@@ -27,7 +27,7 @@ extern "C" {
 #endif
 
 /* ============================================================
- * Block definition: TurboQuant 1-bit KV cache
+ * Block definition: quant.cpp 1-bit KV cache
  *
  * 20 bytes per 128 elements = 1.25 bits per element (with metadata)
  * Pure sign bits = 1.0 bpw, metadata overhead = 0.25 bpw
@@ -62,7 +62,7 @@ typedef char tq_check_block_size[(sizeof(block_tq_kv_1b) == 24) ? 1 : -1];
  * ============================================================ */
 
 /**
- * Quantize a row of float values to 1-bit TurboQuant KV blocks.
+ * Quantize a row of float values to 1-bit quant.cpp KV blocks.
  *
  * Pipeline: L2-normalize -> RHT (Walsh-Hadamard + random signs) -> sign extraction.
  *
@@ -73,7 +73,7 @@ typedef char tq_check_block_size[(sizeof(block_tq_kv_1b) == 24) ? 1 : -1];
 void quantize_row_tq_kv_1b_ref(const float * x, block_tq_kv_1b * y, int64_t k);
 
 /**
- * Dequantize 1-bit TurboQuant KV blocks back to float.
+ * Dequantize 1-bit quant.cpp KV blocks back to float.
  *
  * Pipeline: sign -> scale by sqrt(2/pi)/sqrt(dim) -> inverse RHT -> scale by norm.
  * Note: This is a rough reconstruction. The real value of 1-bit is in Hamming attention.

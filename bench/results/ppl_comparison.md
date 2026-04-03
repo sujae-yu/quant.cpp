@@ -1,4 +1,4 @@
-# PPL Comparison: TurboQuant vs llama.cpp KV Quantization
+# PPL Comparison: quant.cpp vs llama.cpp KV Quantization
 
 Model: SmolLM2-1.7B-Instruct (Llama architecture, head_dim=64)
 Text: bench/data/ppl_test_2k.txt (~1900 words, ~2500 tokens)
@@ -11,7 +11,7 @@ Hardware: Apple M3, 16GB
 | FP16 (baseline) | 2.83 | — | 16 |
 | Q4_0 | 3.13 | **+10.6%** | 4 |
 
-## TurboQuant.cpp (our engine, CPU)
+## quant.cpp (our engine, CPU)
 
 | KV Config | PPL | Delta vs baseline | KV Bits/element |
 |-----------|-----|-------------------|-----------------|
@@ -28,9 +28,9 @@ The KEY metric is the DELTA from each engine's own baseline.
 | Method | Compression | PPL Delta |
 |--------|-------------|-----------|
 | llama.cpp Q4_0 KV | 4x | +10.6% |
-| **TurboQuant 1-bit K** | **16x (K only)** | **+0.00%** |
+| **quant.cpp 1-bit K** | **16x (K only)** | **+0.00%** |
 
-TurboQuant achieves 4x more compression on keys with zero PPL increase,
+quant.cpp achieves 4x more compression on keys with zero PPL increase,
 while llama.cpp's Q4 KV shows measurable quality degradation.
 
 ## llama.cpp Full KV Type Comparison (SmolLM2 1.7B, 2K tokens)

@@ -1,10 +1,10 @@
 /**
- * ggml-turbo-quant.c -- TurboQuant 1-bit KV cache quantization for llama.cpp
+ * ggml-turbo-quant.c -- quant.cpp 1-bit KV cache quantization for llama.cpp
  *
  * Apache 2.0 License, QuantumAI Inc.
  *
  * Self-contained C99 implementation. No external dependencies beyond libc/libm.
- * Ported from TurboQuant.cpp src/core/tq_rht.c and src/core/tq_turbo_kv.c.
+ * Ported from quant.cpp src/core/tq_rht.c and src/core/tq_turbo_kv.c.
  *
  * Algorithm overview:
  *   Quantize:   L2-normalize -> RHT (random signs + Walsh-Hadamard) -> sign bits
@@ -252,7 +252,7 @@ void dequantize_row_tq_kv_1b(const block_tq_kv_1b * x, float * y, int64_t k) {
  *   2. Extract query sign bits ONCE
  *   3. Per key: XOR + popcount -> Hamming distance -> score
  *
- * Inner product estimator (from QJL/TurboQuant theory):
+ * Inner product estimator (from QJL/quant.cpp theory):
  *   <q, k> ~ q_norm * k_norm * sqrt(pi/2) / dim * (2*agree - dim)
  *
  * where agree = dim - hamming_distance(q_signs, k_signs).

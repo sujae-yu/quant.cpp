@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# ppl_standard.sh — Standardized perplexity evaluation for TurboQuant
+# ppl_standard.sh — Standardized perplexity evaluation for quant.cpp
 # =============================================================================
 #
 # Runs perplexity evaluation on the standard test text (bench/data/ppl_test_1k.txt)
@@ -55,7 +55,7 @@ WORD_COUNT=$(wc -w < "$PPL_TEXT" | tr -d ' ')
 DATE_STR=$(date +%Y-%m-%d_%H%M%S)
 
 echo "============================================================"
-echo "  TurboQuant Standardized Perplexity Evaluation"
+echo "  quant.cpp Standardized Perplexity Evaluation"
 echo "============================================================"
 echo ""
 echo "  Model:     $MODEL_NAME"
@@ -73,12 +73,12 @@ echo ""
 CONFIGS=(
     "FP32_baseline           fp32        fp16  FP32 K + FP16 V (no KV quantization)"
     "uniform_4b_K            uniform_4b  fp16  Uniform 4-bit K + FP16 V"
-    "turbo_1b_K              turbo_kv_1b fp16  TurboQuant 1-bit K + FP16 V"
-    "turbo_1b_K_q4_V         turbo_kv_1b q4    TurboQuant 1-bit K + Q4 V"
-    "turbo_3b_K              turbo_kv_3b fp16  TurboQuant 3-bit K + FP16 V"
-    "turbo_3b_K_q4_V         turbo_kv_3b q4    TurboQuant 3-bit K + Q4 V"
-    "turbo_4b_K              turbo_kv_4b fp16  TurboQuant 4-bit K + FP16 V"
-    "turbo_4b_K_q4_V         turbo_kv_4b q4    TurboQuant 4-bit K + Q4 V"
+    "turbo_1b_K              turbo_kv_1b fp16  quant.cpp 1-bit K + FP16 V"
+    "turbo_1b_K_q4_V         turbo_kv_1b q4    quant.cpp 1-bit K + Q4 V"
+    "turbo_3b_K              turbo_kv_3b fp16  quant.cpp 3-bit K + FP16 V"
+    "turbo_3b_K_q4_V         turbo_kv_3b q4    quant.cpp 3-bit K + Q4 V"
+    "turbo_4b_K              turbo_kv_4b fp16  quant.cpp 4-bit K + FP16 V"
+    "turbo_4b_K_q4_V         turbo_kv_4b q4    quant.cpp 4-bit K + Q4 V"
 )
 
 # CSV header

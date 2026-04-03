@@ -2,7 +2,7 @@
 
 ## Title
 
-TurboQuant.cpp — Pure C inference engine with 3.8x KV cache compression. Runs Gemma 3 4B at 32K context using 1.2 GB KV instead of 4.4 GB.
+quant.cpp — Pure C inference engine with 3.8x KV cache compression. Runs Gemma 3 4B at 32K context using 1.2 GB KV instead of 4.4 GB.
 
 ## Body
 
@@ -13,7 +13,7 @@ At short contexts, KV memory doesn't matter much. But at 32K+ tokens, it becomes
 **The numbers (Gemma 3 4B):**
 
 ```
-Context     llama.cpp KV (FP16)    TurboQuant KV (Q4)    Saved
+Context     llama.cpp KV (FP16)    quant.cpp KV (Q4)    Saved
 ─────────   ──────────────────     ──────────────────    ──────
 4K tokens          544 MB                145 MB           399 MB
 32K tokens       4,352 MB              1,156 MB         3,196 MB
@@ -27,7 +27,7 @@ Context     llama.cpp KV (FP16)    TurboQuant KV (Q4)    Saved
 - Same ballpark. We're not claiming to be faster.
 
 **What's different:**
-- 3.8x KV cache compression (TurboQuant/PolarQuant/QJL algorithms from ICLR 2026)
+- 3.8x KV cache compression (quant.cpp/PolarQuant/QJL algorithms from ICLR 2026)
 - 3 models: Gemma 3 4B, Qwen3.5-0.8B, Gemma 3 270M
 - Pure C, zero dependencies, ~1MB binary
 - Multi-architecture: DeltaNet hybrid (Qwen) + sliding window (Gemma)
@@ -35,7 +35,7 @@ Context     llama.cpp KV (FP16)    TurboQuant KV (Q4)    Saved
 
 **Quick start:**
 ```bash
-git clone https://github.com/quantumaikr/TurboQuant.cpp && cd TurboQuant.cpp
+git clone https://github.com/quantumaikr/quant.cpp && cd quant.cpp
 bash scripts/quickstart.sh "What is deep learning?"
 ```
 
@@ -43,7 +43,7 @@ Built in 2 days. 9,000 lines of C. 20 test suites. First release: v0.1.0.
 
 The KV compression matters most for long context on limited RAM — exactly the scenario local LLM users care about.
 
-GitHub: https://github.com/quantumaikr/TurboQuant.cpp
+GitHub: https://github.com/quantumaikr/quant.cpp
 
 ---
 

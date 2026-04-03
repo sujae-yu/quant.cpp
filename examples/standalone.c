@@ -1,5 +1,5 @@
 /**
- * TurboQuant.cpp — Standalone C example
+ * quant.cpp — Standalone C example
  * Demonstrates basic quantize → attention workflow
  */
 #include "turboquant/turboquant.h"

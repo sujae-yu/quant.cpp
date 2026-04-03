@@ -1,4 +1,4 @@
-# TurboQuant Real-Model KV Cache Validation Results
+# quant.cpp Real-Model KV Cache Validation Results
 
 Generated: 2026-03-29
 
@@ -60,7 +60,7 @@ Key observations:
 1. **Data generation**: `tests/reference/dump_real_kv_cache.py` generates KV cache
    with realistic statistics (log-normal per-channel variance, RoPE-like outliers)
 2. **Quantization**: Each vector is quantized and dequantized using the reference
-   C implementation for all 7 TurboQuant types
+   C implementation for all 7 quant.cpp types
 3. **MSE**: Mean squared error between original and reconstructed vectors
 4. **Attention cosine**: Cosine similarity between FP32 attention scores and
    quantized attention scores (using deterministic pseudo-random queries)

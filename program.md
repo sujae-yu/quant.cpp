@@ -1,4 +1,4 @@
-# TurboQuant.cpp — Agent Program Specification
+# quant.cpp — Agent Program Specification
 
 ## Objective
 

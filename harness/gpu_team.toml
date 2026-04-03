@@ -1,4 +1,4 @@
-# TurboQuant.cpp GPU Backend Team — ClawTeam Configuration
+# quant.cpp GPU Backend Team — ClawTeam Configuration
 # Based on code audit: CUDA 100%, Metal 80%, NEON 95%, AVX2 40%
 # New: Vulkan (AMD support), ROCm/HIP, Metal completion, AVX2 completion
 #
@@ -20,7 +20,7 @@ name = "vulkan-dev"
 backend = "claude"
 files = ["src/backend/vulkan/**"]
 task = """
-Create Vulkan compute shader backend for TurboQuant KV compression.
+Create Vulkan compute shader backend for quant.cpp KV compression.
 This enables AMD GPU support (Radeon RX, MI250/MI300).
 
 REFERENCE: Port from CUDA kernels in src/backend/cuda/ (100% complete).
@@ -144,7 +144,7 @@ Root causes to fix:
    - Add mixed-precision loading: detect DeltaNet layers in tq_load_gguf,
      keep alpha/beta as FP32 (they're small: [hidden, n_heads] = 2048*32*4 = 256KB each)
 
-Test: ./build/tq_run models/Qwen3.5-35B-A3B-UD-IQ2_XXS.gguf -p "Hello" -n 20
+Test: ./build/quant models/Qwen3.5-35B-A3B-UD-IQ2_XXS.gguf -p "Hello" -n 20
 should produce coherent English text, not "!!!!".
 """
 

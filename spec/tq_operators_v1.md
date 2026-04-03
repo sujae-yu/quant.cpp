@@ -1,4 +1,4 @@
-# TurboQuant Operator Specification v1
+# quant.cpp Operator Specification v1
 
 ## PolarQuantize
 

@@ -1,4 +1,4 @@
-# TurboQuant.cpp — LLM Inference Engine with Extreme KV Cache Compression
+# quant.cpp — LLM Inference Engine with Extreme KV Cache Compression
 
 We built an LLM inference engine from scratch in pure C. It runs Qwen3.5-0.8B at **14 tok/s on CPU** — 17x faster than PyTorch, and faster than PyTorch on Apple GPU.
 
@@ -7,7 +7,7 @@ We built an LLM inference engine from scratch in pure C. It runs Qwen3.5-0.8B at
 ```
 PyTorch (CPU):     0.8 tok/s
 PyTorch (MPS GPU): 10  tok/s
-TurboQuant (CPU):  14  tok/s  ← faster than GPU, no dependencies
+quant.cpp (CPU):  14  tok/s  ← faster than GPU, no dependencies
 ```
 
 Weight memory: 1.7 GB → **533 MB** with Q8 quantization.
@@ -37,9 +37,9 @@ Artificial intelligence is a field of computer science...
 - HuggingFace BPE tokenizer (248K vocab)
 - Streaming token output
 
-Built on TurboQuant (ICLR 2026), QJL (AAAI 2025), PolarQuant (AISTATS 2026).
+Built on quant.cpp (ICLR 2026), QJL (AAAI 2025), PolarQuant (AISTATS 2026).
 Architecture patterns from llama.cpp, vLLM, and ONNX.
 
 8,500 lines of C. 70+ tests. Apache 2.0.
 
-https://github.com/quantumaikr/TurboQuant.cpp
+https://github.com/quantumaikr/quant.cpp

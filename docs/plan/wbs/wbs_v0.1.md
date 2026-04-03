@@ -1,4 +1,4 @@
-# TurboQuant.cpp — Work Breakdown Structure v0.1
+# quant.cpp — Work Breakdown Structure v0.1
 
 **Version**: 0.1
 **Date**: 2026-03-29
@@ -64,7 +64,7 @@
 - [x] `spec/tq_format_v1.md` 작성
   - [ ] PolarQuant 블록 바이너리 레이아웃 정의
   - [ ] QJL 블록 바이너리 레이아웃 정의
-  - [ ] TurboQuant 합성 블록 레이아웃 정의
+  - [ ] quant.cpp 합성 블록 레이아웃 정의
   - [ ] 비트 패킹 규칙 (ONNX int2/int4 LSB-first 준수)
   - [ ] 엔디안 규칙 (little-endian)
   - [ ] 블록 정렬 규칙
@@ -80,12 +80,12 @@
 - [x] Python 레퍼런스 구현 작성
   - [x] `tests/reference/polar_quant_ref.py` — PolarQuant numpy 레퍼런스
   - [x] `tests/reference/qjl_ref.py` — QJL numpy 레퍼런스
-  - [x] `tests/reference/turbo_quant_ref.py` — TurboQuant 합성 레퍼런스
+  - [x] `tests/reference/turbo_quant_ref.py` — quant.cpp 합성 레퍼런스
 - [x] 테스트 벡터 생성 스크립트: `tests/reference/generate_test_vectors.py`
 - [x] `spec/test_vectors/` 디렉토리에 바이너리 테스트 벡터 저장
   - [x] `polar_3b_d128_b128.bin` — PolarQuant 3-bit, head_dim=128, block=128
   - [x] `qjl_1b_d128_s256.bin` — QJL 1-bit, head_dim=128, sketch=256
-  - [ ] `turbo_3b_d128.bin` — TurboQuant 3-bit 합성
+  - [ ] `turbo_3b_d128.bin` — quant.cpp 3-bit 합성
   - [x] `uniform_4b_d128.bin` — Uniform 4-bit baseline
 
 ---
@@ -150,9 +150,9 @@
   - [ ] Attention score 정확도 테스트
   - [ ] 다양한 sketch_dim (128, 256, 512) 테스트
 
-### M1.4 TurboQuant 합성 구현
+### M1.4 quant.cpp 합성 구현
 
-- [x] `src/core/tq_turbo.c` — TurboQuant 합성 알고리즘
+- [x] `src/core/tq_turbo.c` — quant.cpp 합성 알고리즘
   - [ ] `tq_turbo_quantize_ref()` — 2단계 양자화
     - [ ] 1단계: PolarQuant 양자화
     - [ ] 잔여 오차 계산: `residual = original - dequantized`
@@ -161,8 +161,8 @@
     - [ ] PolarQuant attention score 계산
     - [ ] QJL 잔여 보정 score 계산
     - [ ] 가중 합산
-- [x] `tests/test_turbo.cpp` — TurboQuant 단위 테스트
-  - [ ] PolarQuant-only 대비 TurboQuant 품질 개선 검증
+- [x] `tests/test_turbo.cpp` — quant.cpp 단위 테스트
+  - [ ] PolarQuant-only 대비 quant.cpp 품질 개선 검증
   - [ ] 테스트 벡터 비트 정확 일치
   - [ ] 다양한 비트 할당 조합 테스트
 
@@ -322,7 +322,7 @@
   - [ ] `tq_qjl_gqa_score_kernel<<<>>>` — GQA 전용
 - [ ] `tests/test_cuda_qjl.cpp`
 
-### M3.4 TurboQuant CUDA 커널
+### M3.4 quant.cpp CUDA 커널
 
 - [x] `src/backend/cuda/tq_turbo.cu` — 합성 커널
   - [ ] `tq_turbo_quantize_kernel<<<>>>` — PolarQuant + QJL 잔여를 1-pass
@@ -400,7 +400,7 @@
     - [ ] Norm-weighted score 재구성
 - [ ] `tests/test_metal_qjl.mm`
 
-### M4.4 TurboQuant + Fused Metal 셰이더
+### M4.4 quant.cpp + Fused Metal 셰이더
 
 - [x] `src/backend/metal/tq_turbo.metal` — 합성 커널
 - [x] `src/backend/metal/tq_fused_cache.metal` — Fused 캐시 커널
@@ -430,21 +430,21 @@
 
 - [x] `integrations/llamacpp/tq_ggml_type.h` — GGML 타입 등록
   - [ ] 새 `GGML_TYPE_TQ_*` 열거형 값 정의
-  - [ ] `ggml_type_traits` 테이블에 TurboQuant 타입 추가
+  - [ ] `ggml_type_traits` 테이블에 quant.cpp 타입 추가
   - [ ] `from_float`, `to_float` 함수 연결
 - [x] `integrations/llamacpp/tq_kv_cache.cpp` — KV 캐시 백엔드
   - [ ] `--kv-cache-type turbo3` CLI 옵션 추가
-  - [ ] KV 캐시 할당 시 TurboQuant 캐시 생성
-  - [ ] Attention 연산 시 TurboQuant attention 호출
+  - [ ] KV 캐시 할당 시 quant.cpp 캐시 생성
+  - [ ] Attention 연산 시 quant.cpp attention 호출
 - [x] `integrations/llamacpp/README.md` — 통합 가이드
-- [ ] llama.cpp 빌드에 TurboQuant 의존성 추가하는 CMake 패치
-- [ ] 통합 테스트: llama.cpp + TurboQuant로 실제 모델 추론
+- [ ] llama.cpp 빌드에 quant.cpp 의존성 추가하는 CMake 패치
+- [ ] 통합 테스트: llama.cpp + quant.cpp로 실제 모델 추론
 
 ### M5.2 Python 바인딩
 
 - [x] `bindings/python/turboquant/__init__.py`
 - [x] `bindings/python/turboquant/_core.pyx` 또는 pybind11 모듈
-  - [ ] `TurboQuantContext` 클래스
+  - [ ] `quant.cppContext` 클래스
   - [ ] `quantize_keys()`, `quantize_values()` 메서드
   - [ ] `attention()` 메서드
   - [ ] NumPy 배열 입출력
@@ -460,11 +460,11 @@
   - [ ] reshape_and_cache 오버라이드
   - [ ] PagedAttention 블록 테이블 호환
 - [x] `integrations/vllm/README.md` — 통합 가이드
-- [ ] 통합 테스트: vLLM + TurboQuant 서빙 테스트
+- [ ] 통합 테스트: vLLM + quant.cpp 서빙 테스트
 
 ### M5.4 예제 코드
 
-- [x] `examples/standalone.c` — 순수 C에서 TurboQuant 사용
+- [x] `examples/standalone.c` — 순수 C에서 quant.cpp 사용
 - [x] `examples/llamacpp_integration.cpp` — llama.cpp 통합 예제
 - [x] `examples/python_quickstart.py` — Python 빠른 시작
 
@@ -488,7 +488,7 @@
 
 - [x] `bench/performance/bench_memory.cpp` — 메모리 사용량
   - [ ] 컨텍스트 길이별 KV 캐시 메모리 측정
-  - [ ] FP16 vs Q4_0 vs TurboQuant 3-bit 비교
+  - [ ] FP16 vs Q4_0 vs quant.cpp 3-bit 비교
   - [ ] Progressive Compression 효과 측정
 - [x] `bench/performance/bench_latency.cpp` — 지연시간
   - [ ] Prefill 지연 (양자화 오버헤드 포함)

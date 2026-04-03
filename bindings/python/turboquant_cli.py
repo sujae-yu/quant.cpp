@@ -1,7 +1,7 @@
 """
-TurboQuant.cpp Python bindings (subprocess wrapper for quant CLI)
+quant.cpp Python bindings (subprocess wrapper for quant CLI)
 
-Provides a simple, pip-install-friendly interface to the TurboQuant inference
+Provides a simple, pip-install-friendly interface to the quant.cpp inference
 engine without requiring C FFI or shared library loading. Communicates with
 the compiled quant binary via subprocess.
 
@@ -46,7 +46,7 @@ def _find_quant() -> Optional[str]:
     return found
 
 
-class TurboQuant:
+class quant.cpp:
     """High-level Python wrapper around the quant CLI.
 
     Uses subprocess to call the compiled quant binary, parsing its
@@ -62,7 +62,7 @@ class TurboQuant:
         quant_path: Explicit path to quant binary (auto-detected if None).
 
     Example:
-        tq = TurboQuant("models/qwen3.5-0.8b.tqm", kv_type="turbo_kv_1b")
+        tq = quant.cpp("models/qwen3.5-0.8b.tqm", kv_type="turbo_kv_1b")
         print(tq.generate("The capital of France is"))
         print(f"PPL: {tq.perplexity('test.txt')}")
         print(tq.memory_stats())
@@ -283,6 +283,6 @@ class TurboQuant:
 
     def __repr__(self) -> str:
         return (
-            f"TurboQuant(model={self._model_path!r}, "
+            f"quant.cpp(model={self._model_path!r}, "
             f"kv_type={self._kv_type!r}, v_quant={self._v_quant!r})"
         )

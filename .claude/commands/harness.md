@@ -42,7 +42,7 @@ $ARGUMENTS can override the target score (default: 0.9).
 
 ```bash
 # Create team
-clawteam team spawn-team tq-dev -d "TurboQuant.cpp development"
+clawteam team spawn-team tq-dev -d "quant.cpp development"
 
 # Spawn workers for each independent module
 clawteam spawn --team tq-dev --agent-name polar --workspace --repo . \

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-TurboQuant Real-Time Demo — Actual KV cache compression on live model
+quant.cpp Real-Time Demo — Actual KV cache compression on live model
 
-This demo ACTUALLY uses TurboQuant to compress the KV cache from a real
-Qwen3.5-0.8B inference, then computes attention scores using TurboQuant's
+This demo ACTUALLY uses quant.cpp to compress the KV cache from a real
+Qwen3.5-0.8B inference, then computes attention scores using quant.cpp's
 integer kernel, and compares speed + quality vs PyTorch FP32.
 
 This is NOT a simulation — it's real quantization on real model data.
@@ -53,7 +53,7 @@ def main():
 
     print()
     print(f"{C_CYAN}{C_BOLD}╔══════════════════════════════════════════════════════════╗{C_NC}")
-    print(f"{C_CYAN}{C_BOLD}║  TurboQuant Real-Time Demo — Actual KV Compression      ║{C_NC}")
+    print(f"{C_CYAN}{C_BOLD}║  quant.cpp Real-Time Demo — Actual KV Compression      ║{C_NC}")
     print(f"{C_CYAN}{C_BOLD}║  Model: Qwen3.5-0.8B  |  Powered by QuantumAI Inc.      ║{C_NC}")
     print(f"{C_CYAN}{C_BOLD}╚══════════════════════════════════════════════════════════╝{C_NC}")
     print()
@@ -77,11 +77,11 @@ def main():
     dev_label = "MPS" if device == "mps" else "CPU"
     print(f" {C_GREEN}✓{C_NC} ({dev_label})")
 
-    # ── Load TurboQuant ──
-    print(f"  {C_DIM}[2/5] Loading TurboQuant...{C_NC}", end="", flush=True)
+    # ── Load quant.cpp ──
+    print(f"  {C_DIM}[2/5] Loading quant.cpp...{C_NC}", end="", flush=True)
     try:
-        from turboquant import TurboQuant
-        tq = TurboQuant("cpu")
+        from quant import quant.cpp
+        tq = quant.cpp("cpu")
         print(f" {C_GREEN}✓{C_NC}")
     except Exception as e:
         print(f" {C_RED}✗{C_NC} ({e})")
@@ -133,8 +133,8 @@ def main():
     nh, sl, hd = layers_data[0]["keys"].shape
     total_fp16 = sum(d["keys"].nbytes + d["values"].nbytes for d in layers_data)
 
-    # ── REAL TurboQuant A/B comparison ──
-    print(f"  {C_DIM}[5/5] Real A/B comparison: PyTorch FP32 vs TurboQuant Q4×Q8{C_NC}")
+    # ── REAL quant.cpp A/B comparison ──
+    print(f"  {C_DIM}[5/5] Real A/B comparison: PyTorch FP32 vs quant.cpp Q4×Q8{C_NC}")
     print()
     print(f"  {C_BOLD}📊 Real-Time KV Cache Compression Results{C_NC}")
     print(f"  {C_DIM}{'─' * 56}{C_NC}")
@@ -159,11 +159,11 @@ def main():
                 fp32_scores = keys_h @ query_np
             total_fp32_time += (time.time() - t0)
 
-            # TurboQuant Q4 attention
+            # quant.cpp Q4 attention
             t0 = time.time()
             for _ in range(100):
-                q_data = tq.quantize_keys(keys_h, TurboQuant.UNIFORM_4B)
-                tq_scores = tq.attention(query_np, q_data, sl, hd, TurboQuant.UNIFORM_4B)
+                q_data = tq.quantize_keys(keys_h, quant.cpp.UNIFORM_4B)
+                tq_scores = tq.attention(query_np, q_data, sl, hd, quant.cpp.UNIFORM_4B)
             total_tq_time += (time.time() - t0)
 
             # Quality
@@ -175,11 +175,11 @@ def main():
     fp32_avg = total_fp32_time / n_total * 1000  # ms per 100 reps
     tq_avg = total_tq_time / n_total * 1000
     avg_cosine = np.mean(cosine_scores)
-    tq_compressed = sum(len(tq.quantize_keys(ld["keys"][0], TurboQuant.UNIFORM_4B)) * nh
+    tq_compressed = sum(len(tq.quantize_keys(ld["keys"][0], quant.cpp.UNIFORM_4B)) * nh
                         for ld in layers_data)
 
     # Results
-    print(f"  {C_BOLD}{'Metric':<28} {'FP32':>12} {'TurboQuant':>12} {'Ratio':>8}{C_NC}")
+    print(f"  {C_BOLD}{'Metric':<28} {'FP32':>12} {'quant.cpp':>12} {'Ratio':>8}{C_NC}")
     print(f"  {'─'*28} {'─'*12} {'─'*12} {'─'*8}")
 
     print(f"  {'KV Cache Size':<28} {sz(total_fp16):>12} {sz(tq_compressed):>12} "
@@ -197,12 +197,12 @@ def main():
     print()
     print(f"  {C_BOLD}Memory Comparison:{C_NC}")
     print(f"  FP16:       {sz(total_fp16):>10}  {C_RED}{BAR * 25}{C_NC}")
-    print(f"  TurboQuant: {sz(tq_compressed):>10}  {bar(tq_compressed, total_fp16)}")
+    print(f"  quant.cpp: {sz(tq_compressed):>10}  {bar(tq_compressed, total_fp16)}")
     print(f"  {C_GREEN}{C_BOLD}Saved: {sz(total_fp16 - tq_compressed)} ({(1-tq_compressed/total_fp16)*100:.0f}%){C_NC}")
 
     print()
     print(f"  {C_DIM}All numbers above are REAL — measured on actual Qwen3.5-0.8B KV cache,{C_NC}")
-    print(f"  {C_DIM}not synthetic benchmarks. TurboQuant compression is applied live.{C_NC}")
+    print(f"  {C_DIM}not synthetic benchmarks. quant.cpp compression is applied live.{C_NC}")
     print()
 
 

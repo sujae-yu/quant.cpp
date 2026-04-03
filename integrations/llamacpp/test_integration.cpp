@@ -1,5 +1,5 @@
 /**
- * TurboQuant llama.cpp integration test
+ * quant.cpp llama.cpp integration test
  *
  * Simulates the full llama.cpp integration flow without linking
  * against llama.cpp itself:
@@ -11,7 +11,7 @@
  *   6. Verify results
  *
  * Build:
- *   Compiled as part of the TurboQuant test suite when TQ_BUILD_TESTS=ON
+ *   Compiled as part of the quant.cpp test suite when TQ_BUILD_TESTS=ON
  */
 
 #include <gtest/gtest.h>
@@ -138,7 +138,7 @@ TEST(LlamaCppIntegration, ParseKvCacheType) {
 /* ============================================================
  * Test: from_float / to_float roundtrip via GGML wrappers
  *
- * For each TurboQuant type, quantize a block of data through
+ * For each quant.cpp type, quantize a block of data through
  * the GGML-compatible wrappers and verify the roundtrip MSE
  * is within acceptable bounds.
  * ============================================================ */
@@ -298,7 +298,7 @@ TEST(LlamaCppIntegration, BytesPerToken) {
     /* FP16 baseline: 128 * 2 * 2 = 512 bytes per token per head (K+V) */
     size_t fp16_bytes = (size_t)head_dim * 2 * 2;
 
-    /* TurboQuant should use less memory */
+    /* quant.cpp should use less memory */
     for (int i = 0; i < TQ_TYPE_COUNT; i++) {
         size_t tq_bytes = tq_llamacpp_bytes_per_token(head_dim, (tq_type)i, 0);
         /* Key is compressed, value is FP16 (default) */

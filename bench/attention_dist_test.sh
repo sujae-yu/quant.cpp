@@ -1,12 +1,12 @@
 #!/bin/bash
 # attention_dist_test.sh -- Attention score distribution preservation test
 #
-# Runs the attention distribution test suite that verifies TurboQuant
+# Runs the attention distribution test suite that verifies quant.cpp
 # preserves the full attention score distribution (cosine similarity,
 # Spearman rank correlation, top-k overlap), not just argmax.
 #
 # Also proves random keys break attention (non-trivial compression)
-# and compares TurboQuant vs uniform at same bit-width.
+# and compares quant.cpp vs uniform at same bit-width.
 #
 # Usage: bash bench/attention_dist_test.sh
 

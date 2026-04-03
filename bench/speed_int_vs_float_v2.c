@@ -1,5 +1,5 @@
 /**
- * TurboQuant v0.7 — Honest A/B Speed Benchmark
+ * quant.cpp v0.7 — Honest A/B Speed Benchmark
  *
  * Fixes from v1:
  * 1. FP32 baseline uses NEON-optimized dot product (fair comparison)
@@ -85,7 +85,7 @@ extern void tq_uniform_4b_attention_neon(const float* query, const void* kv,
 int main(void) {
     printf("\n");
     printf("================================================================\n");
-    printf("  TurboQuant v0.7 — Honest A/B Speed Benchmark\n");
+    printf("  quant.cpp v0.7 — Honest A/B Speed Benchmark\n");
     printf("  FP32 NEON vs Integer Q4xQ8 NEON (fair comparison)\n");
     printf("================================================================\n");
     printf("\n");

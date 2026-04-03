@@ -1,5 +1,5 @@
 /**
- * TurboQuant — Qwen3.5-0.8B KV Cache Validation
+ * quant.cpp — Qwen3.5-0.8B KV Cache Validation
  *
  * Validates all quantization types (including v0.6: RHT, mixed precision)
  * on Qwen3.5-0.8B architecture: 2 KV heads, 256 head_dim, hybrid attention.
@@ -71,7 +71,7 @@ struct TypeInfo {
 int main() {
     printf("\n");
     printf("================================================================\n");
-    printf("  TurboQuant — Qwen3.5-0.8B KV Cache Validation\n");
+    printf("  quant.cpp — Qwen3.5-0.8B KV Cache Validation\n");
     printf("  Architecture: Hybrid (DeltaNet + Gated Attention)\n");
     printf("  KV Heads: 2, Head Dim: 256, Attention Layers: 6/24\n");
     printf("================================================================\n\n");

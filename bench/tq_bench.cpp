@@ -1,5 +1,5 @@
 /**
- * TurboQuant performance benchmark
+ * quant.cpp performance benchmark
  *
  * Outputs machine-readable metrics:
  *   quantize_throughput=XXXXX          (elements/ms, best available)

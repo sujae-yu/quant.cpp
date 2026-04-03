@@ -1,5 +1,5 @@
 /**
- * test_turbo_quant_kv.cpp -- Standalone test for TurboQuant 1-bit KV cache
+ * test_turbo_quant_kv.cpp -- Standalone test for quant.cpp 1-bit KV cache
  *
  * Apache 2.0 License, QuantumAI Inc.
  *
@@ -418,7 +418,7 @@ static int test_edge_cases(void) {
 
 int main(void) {
     printf("===========================================\n");
-    printf("TurboQuant 1-bit KV Cache -- Standalone Test\n");
+    printf("quant.cpp 1-bit KV Cache -- Standalone Test\n");
     printf("===========================================\n\n");
 
     int failures = 0;

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-TurboQuant.cpp -- LongBench Accuracy Benchmark
+quant.cpp -- LongBench Accuracy Benchmark
 
-This script evaluates TurboQuant KV cache quantization quality on the
+This script evaluates quant.cpp KV cache quantization quality on the
 LongBench benchmark suite. It measures F1 score degradation compared
 to an FP16 baseline across multiple long-context tasks.
 
@@ -207,7 +207,7 @@ def run_real_benchmark(model_name: str, tasks: List[str],
     This function requires:
     - A GPU with sufficient memory for the model
     - The transformers and datasets libraries
-    - The TurboQuant Python bindings
+    - The quant.cpp Python bindings
 
     The workflow is:
     1. Load model and tokenizer
@@ -334,7 +334,7 @@ def _compute_f1(prediction: str, reference: str) -> float:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="TurboQuant LongBench Accuracy Benchmark"
+        description="quant.cpp LongBench Accuracy Benchmark"
     )
     parser.add_argument(
         "--model", type=str, default="meta-llama/Llama-3-8B",
@@ -371,7 +371,7 @@ def main():
     if fp16_avg > 0:
         degradation = (fp16_avg - turbo3_avg) / fp16_avg
         if degradation > 0.02:  # More than 2% degradation
-            print(f"\nWARNING: TurboQuant 3-bit degradation ({degradation:.1%}) "
+            print(f"\nWARNING: quant.cpp 3-bit degradation ({degradation:.1%}) "
                   f"exceeds 2% threshold")
             return 1
     return 0

@@ -1,4 +1,4 @@
-# TurboQuant — Qwen3.5-0.8B Validation Results (REAL MODEL)
+# quant.cpp — Qwen3.5-0.8B Validation Results (REAL MODEL)
 
 **Date**: 2026-03-29
 **Model**: [Qwen/Qwen3.5-0.8B](https://huggingface.co/Qwen/Qwen3.5-0.8B)

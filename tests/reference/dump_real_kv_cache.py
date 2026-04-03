@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dump real KV cache from a small LLM for TurboQuant validation.
+"""Dump real KV cache from a small LLM for quant.cpp validation.
 
 Generates binary files with format:
   Header: magic(4B) + layer_idx(4B) + num_heads(4B) + seq_len(4B) + head_dim(4B) = 20 bytes

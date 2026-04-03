@@ -1,5 +1,5 @@
 /**
- * TurboQuant quality benchmark
+ * quant.cpp quality benchmark
  *
  * Outputs machine-readable metrics:
  *   roundtrip_mse=X.XXXXXX

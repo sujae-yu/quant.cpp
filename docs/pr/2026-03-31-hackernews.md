@@ -6,7 +6,7 @@ Show HN: Pure C LLM engine with 3.8x KV cache compression (9K lines, zero deps)
 
 ## URL
 
-https://github.com/quantumaikr/TurboQuant.cpp
+https://github.com/quantumaikr/quant.cpp
 
 ## Comment (post immediately after submission)
 
@@ -14,7 +14,7 @@ Hi HN, I built a LLM inference engine in pure C that compresses the KV cache dur
 
 The problem: at long contexts (32K+ tokens), the KV cache — not the weights — becomes the memory bottleneck. A 4B model at 32K context needs 4.4 GB just for KV in FP16.
 
-TurboQuant quantizes the KV cache to Q4 on-the-fly, reducing that to 1.2 GB (3.8x compression) with 0.999 cosine similarity to FP16 output. Based on three recent papers: TurboQuant (ICLR '26), QJL (AAAI '25), PolarQuant (AISTATS '26).
+quant.cpp quantizes the KV cache to Q4 on-the-fly, reducing that to 1.2 GB (3.8x compression) with 0.999 cosine similarity to FP16 output. Based on three recent papers: quant.cpp (ICLR '26), QJL (AAAI '25), PolarQuant (AISTATS '26).
 
 Technical details:
 - 9,000 lines of C11, libc only, no external dependencies

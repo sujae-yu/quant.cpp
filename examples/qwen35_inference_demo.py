@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-TurboQuant.cpp — Qwen3.5-0.8B Inference Demo
+quant.cpp — Qwen3.5-0.8B Inference Demo
 
-실제 모델로 추론하면서 KV 캐시를 TurboQuant로 압축했을 때의
+실제 모델로 추론하면서 KV 캐시를 quant.cpp로 압축했을 때의
 메모리 절약과 품질 보존을 직접 확인합니다.
 
 Usage:
@@ -15,13 +15,13 @@ import os
 import time
 import numpy as np
 
-# TurboQuant Python bindings
+# quant.cpp Python bindings
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../bindings/python"))
 
 def run_demo():
     print()
     print("=" * 70)
-    print("  TurboQuant.cpp — Qwen3.5-0.8B Real Inference Demo")
+    print("  quant.cpp — Qwen3.5-0.8B Real Inference Demo")
     print("=" * 70)
     print()
 
@@ -95,16 +95,16 @@ def run_demo():
     print(f"  Total KV cache (FP16): {total_kv_bytes_fp16:,} bytes ({total_kv_bytes_fp16/1024:.1f} KB)")
     print()
 
-    # ── Step 4: TurboQuant compression ──
-    print("[4/5] TurboQuant A/B test on real KV cache...")
+    # ── Step 4: quant.cpp compression ──
+    print("[4/5] quant.cpp A/B test on real KV cache...")
     print()
 
     try:
-        from turboquant import TurboQuant
-        tq = TurboQuant("cpu")
+        from turboquant import quant.cpp
+        tq = quant.cpp("cpu")
         has_tq = True
     except Exception as e:
-        print(f"  TurboQuant bindings not available: {e}")
+        print(f"  quant.cpp bindings not available: {e}")
         print("  Falling back to NumPy simulation...")
         has_tq = False
 
@@ -139,7 +139,7 @@ def run_demo():
                 values_h = ld["values"][h]
 
                 if has_tq:
-                    # Real TurboQuant quantization
+                    # Real quant.cpp quantization
                     k_quant = tq.quantize_keys(keys_h, qtype)
                     k_deq = tq.dequantize_keys(k_quant, sl, hd, qtype)
                     v_quant = tq.quantize_keys(values_h, qtype)

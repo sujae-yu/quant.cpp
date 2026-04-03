@@ -6,7 +6,7 @@ Post: 16 upvotes, 5.4K views, 19 comments
 
 ## @MrRandom04 — "re-implementing all of llama.cpp just to add whatever approach"
 
-We don't intend to replace llama.cpp. We have a self-contained llama.cpp integration patch (`integrations/llamacpp/patch/`, 4 files, ~1000 lines) that adds `--cache-type-k tq_kv_1b` as a drop-in option. The standalone engine exists for research and to verify the algorithm on multiple architectures (Llama, Gemma, Qwen, Qwen-MoE — 4 verified). The goal is to get TurboQuant KV into llama.cpp as a native cache type.
+We don't intend to replace llama.cpp. We have a self-contained llama.cpp integration patch (`integrations/llamacpp/patch/`, 4 files, ~1000 lines) that adds `--cache-type-k tq_kv_1b` as a drop-in option. The standalone engine exists for research and to verify the algorithm on multiple architectures (Llama, Gemma, Qwen, Qwen-MoE — 4 verified). The goal is to get quant.cpp KV into llama.cpp as a native cache type.
 
 ---
 
@@ -24,7 +24,7 @@ KV compression helps most with **long contexts**, not bigger models. With 1-bit 
 - Before: ~2.5 GB KV cache
 - After: ~500 MB KV cache → frees ~2 GB for longer context or larger batch
 
-If you're already fitting a model in 24GB, TurboQuant lets you push context from 32K → 100K+ on the same hardware. But it won't help you fit a model that's too large for VRAM (weight memory is separate from KV cache).
+If you're already fitting a model in 24GB, quant.cpp lets you push context from 32K → 100K+ on the same hardware. But it won't help you fit a model that's too large for VRAM (weight memory is separate from KV cache).
 
 Note: we currently don't have CUDA GPU acceleration (it compiles but is untested). That's next on the roadmap.
 
@@ -43,7 +43,7 @@ Clarification:
 
 ## @BillDStrong — "What magic is this. I didn't realize there was a 1-bit version"
 
-Good observation — the paper (TurboQuant, ICLR 2026) focuses on 2.5-bit and 3.5-bit configurations. The 1-bit version is our extension of the paper's framework.
+Good observation — the paper (quant.cpp, ICLR 2026) focuses on 2.5-bit and 3.5-bit configurations. The 1-bit version is our extension of the paper's framework.
 
 The key insight: the paper's RHT (Randomized Hadamard Transform) makes the quantization error **unbiased** for inner products at any bit-width. We pushed this to the extreme — 1 bit = just the sign of each dimension after RHT. Mathematically, this gives a cosine similarity of 2/pi ≈ 0.637 (we measured 0.634), which is the information-theoretic maximum for sign-only quantization.
 
@@ -68,7 +68,7 @@ Gemma 3 4B at 32K context:
 
 For a 16GB Mac or laptop, this means going from 32K → 100K+ context without any hardware upgrade. The limiting factor shifts from KV memory to model weight memory.
 
-This is available today — `./build/tq_run model.gguf -p "your long prompt" -k turbo_kv_1b -v q4 --ctx 131072`. The `--ctx` flag overrides the default context limit.
+This is available today — `./build/quant model.gguf -p "your long prompt" -k turbo_kv_1b -v q4 --ctx 131072`. The `--ctx` flag overrides the default context limit.
 
 ---
 
@@ -92,9 +92,9 @@ The real unlock is for use cases like RAG with long documents, code analysis wit
 
 Valid concern. Two reasons for the standalone engine:
 
-1. **Algorithm verification across architectures.** We needed to test TurboQuant KV on Llama, Gemma (sliding window), Qwen3.5 (DeltaNet hybrid), and Qwen-MoE (256 experts) — each with very different attention mechanisms. A standalone engine let us control every variable and measure PPL impact precisely. Debugging quantization bugs inside llama.cpp's 200K+ line codebase would have been much harder during research.
+1. **Algorithm verification across architectures.** We needed to test quant.cpp KV on Llama, Gemma (sliding window), Qwen3.5 (DeltaNet hybrid), and Qwen-MoE (256 experts) — each with very different attention mechanisms. A standalone engine let us control every variable and measure PPL impact precisely. Debugging quantization bugs inside llama.cpp's 200K+ line codebase would have been much harder during research.
 
-2. **The integration path is real.** `integrations/llamacpp/` has a working GGML type registration that adds TurboQuant types alongside existing Q4/Q8 types. The plan is an upstream PR — not maintaining a parallel engine forever.
+2. **The integration path is real.** `integrations/llamacpp/` has a working GGML type registration that adds quant.cpp types alongside existing Q4/Q8 types. The plan is an upstream PR — not maintaining a parallel engine forever.
 
 You're right that a fork would give more confidence in correctness. Once the algorithm is validated (which is what the standalone engine proved), the next step is exactly that — getting it into llama.cpp where it benefits from their battle-tested infrastructure. The standalone engine is the research prototype; llama.cpp integration is the production path.
 
@@ -128,15 +128,15 @@ Implying the post was AI-generated due to em dash usage. Not worth engaging dire
 
 ---
 
-## @Candid_Koala_3602 — "Can TurboQuant also replace transformers in the same mechanism? Angular mappings instead of weights?"
+## @Candid_Koala_3602 — "Can quant.cpp also replace transformers in the same mechanism? Angular mappings instead of weights?"
 
-> "Can TurboQuant also replace transformers in the same mechanism? That would be the real win. Angular mappings instead of weights?"
+> "Can quant.cpp also replace transformers in the same mechanism? That would be the real win. Angular mappings instead of weights?"
 
-Interesting idea. Short answer: TurboQuant doesn't replace the transformer architecture — it compresses the **data** (KV cache, weights) that the transformer operates on.
+Interesting idea. Short answer: quant.cpp doesn't replace the transformer architecture — it compresses the **data** (KV cache, weights) that the transformer operates on.
 
 But the underlying insight — that angular/directional information is sufficient for attention — is related to what you're describing. The 1-bit path essentially reduces attention to cosine similarity via sign hashing, which is a form of angular mapping. Whether this could extend to replacing weight matrices with purely angular representations is an open research question.
 
-The closest existing work is probably binary/ternary weight networks (BWN/TWN) and more recently BitNet (1-bit weights). TurboQuant's contribution is showing that the **KV cache** specifically tolerates extreme quantization because attention is inherently a ranking operation, not a reconstruction operation.
+The closest existing work is probably binary/ternary weight networks (BWN/TWN) and more recently BitNet (1-bit weights). quant.cpp's contribution is showing that the **KV cache** specifically tolerates extreme quantization because attention is inherently a ranking operation, not a reconstruction operation.
 
 ---
 

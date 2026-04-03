@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-TurboQuant.cpp -- RULER Benchmark Script
+quant.cpp -- RULER Benchmark Script
 
 RULER (Real-world Understanding and Language Extraction from Retrieval) measures
 how well LLMs handle long-context tasks with different KV cache quantization.
 
-This script defines the benchmark workflow for evaluating TurboQuant's KV cache
+This script defines the benchmark workflow for evaluating quant.cpp's KV cache
 compression across various context lengths and retrieval depths.
 
 Benchmark Workflow:
-  1. Load a pre-trained model (e.g., Llama-3-8B) with TurboQuant KV cache.
+  1. Load a pre-trained model (e.g., Llama-3-8B) with quant.cpp KV cache.
   2. For each context length (4K, 8K, 16K, 32K, 64K, 128K):
      a. Generate synthetic documents with embedded "needles" at various depths.
-     b. Run the model with TurboQuant quantized KV cache.
+     b. Run the model with quant.cpp quantized KV cache.
      c. Measure recall@k for each depth position (0%, 25%, 50%, 75%, 100%).
   3. Compare results across quantization types:
      - FP16 baseline
@@ -257,7 +257,7 @@ def run_ruler_benchmark(output_path: str = None) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="RULER benchmark for TurboQuant KV cache quantization"
+        description="RULER benchmark for quant.cpp KV cache quantization"
     )
     parser.add_argument(
         "--model", type=str, default="simulated",
@@ -280,7 +280,7 @@ def main():
     if args.model != "simulated":
         print(f"NOTE: Model '{args.model}' requested but only simulated mode "
               "is currently implemented.", file=sys.stderr)
-        print("Run with TurboQuant Python bindings for actual model evaluation.",
+        print("Run with quant.cpp Python bindings for actual model evaluation.",
               file=sys.stderr)
 
     run_ruler_benchmark(output_path=args.output)

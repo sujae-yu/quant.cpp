@@ -1,6 +1,6 @@
-# TurboQuant.cpp — 1-bit KV 캐시, 품질 손실 제로. 35B MoE 검증.
+# quant.cpp — 1-bit KV 캐시, 품질 손실 제로. 35B MoE 검증.
 
-TurboQuant 논문(ICLR 2026)을 순수 C로 구현한 독립 추론 엔진입니다. llama.cpp 포크가 아닌 자체 구축.
+quant.cpp 논문(ICLR 2026)을 순수 C로 구현한 독립 추론 엔진입니다. llama.cpp 포크가 아닌 자체 구축.
 
 **하는 일:** Randomized Hadamard Transform + 부호 해싱으로 KV 캐시 key를 1비트로 압축합니다. 출력이 비압축 baseline과 바이트 동일합니다.
 
@@ -44,6 +44,6 @@ Value: 블록별 Q4 또는 Q2 양자화
 
 논문은 일반 양자화기가 내적 추정에 체계적 편향을 도입함을 증명. RHT + QJL 보정이 이를 수학적으로 비편향으로 만듦.
 
-https://github.com/quantumaikr/TurboQuant.cpp
+https://github.com/quantumaikr/quant.cpp
 
 논문: https://arxiv.org/abs/2504.19874

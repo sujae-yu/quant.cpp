@@ -1,4 +1,4 @@
-# TurboQuant.cpp — Session State
+# quant.cpp — Session State
 
 **Last updated**: 2026-04-02
 **Score**: 98.1% (structure 90%, correctness 100%, quality 100%, perf 100%, integration 100%)
@@ -13,7 +13,7 @@
 - DeltaNet hybrid + sliding window + GQA + MoE (256 experts, top-8, shared)
 - GGUF tokenizer loading from metadata
 
-### TurboQuant KV Compression (핵심 가치)
+### quant.cpp KV Compression (핵심 가치)
 - 12 KV quantization types (RHT + Lloyd-Max + QJL)
 - 1-bit K: byte-identical output on ALL verified models (270M~35B)
 - Gemma 4B PPL: +0.03% with 1-bit K + Q4 V (4.9x compression)
@@ -76,5 +76,5 @@ Gemma 4B (TQM)        Q4           20.2 tok/s  -
 
 ### P6: IQ2_XXS Quality on 35B
 - Simple factual queries work ("Paris"), complex reasoning fails
-- This is IQ2 weight limitation, not TurboQuant issue
+- This is IQ2 weight limitation, not quant.cpp issue
 - Need Q4_K or Q5_K 35B model (~15GB) to prove quality

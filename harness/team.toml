@@ -1,13 +1,13 @@
-# TurboQuant.cpp — ClawTeam Configuration
+# quant.cpp — ClawTeam Configuration
 # Multi-agent development harness
 #
 # Usage:
-#   clawteam team spawn-team turboquant --template harness/team.toml
-#   clawteam board attach turboquant
+#   clawteam team spawn-team quant --template harness/team.toml
+#   clawteam board attach quant
 
 [team]
-name = "turboquant"
-description = "TurboQuant.cpp — Cross-platform KV cache compression library"
+name = "quant"
+description = "quant.cpp — Cross-platform KV cache compression library"
 repo = "."
 
 # ============================================================
@@ -18,7 +18,7 @@ repo = "."
 name = "architect"
 role = "leader"
 task = """
-You are the lead architect for TurboQuant.cpp.
+You are the lead architect for quant.cpp.
 
 1. Read program.md and docs/wbs_v0.1.md
 2. Run ./score.sh to see current state

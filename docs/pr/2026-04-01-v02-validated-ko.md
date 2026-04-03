@@ -1,4 +1,4 @@
-# TurboQuant.cpp v0.2 — 모든 주장에 숫자가 붙었습니다
+# quant.cpp v0.2 — 모든 주장에 숫자가 붙었습니다
 
 V 캐시 양자화와 전수 검증 스위트를 출시합니다. 바뀐 것들을 정리합니다.
 
@@ -54,13 +54,13 @@ Gemma 3 4B — 토큰당 총 K+V:
 ## 사용법
 
 ```bash
-git clone https://github.com/quantumaikr/TurboQuant.cpp && cd TurboQuant.cpp
+git clone https://github.com/quantumaikr/quant.cpp && cd quant.cpp
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DTQ_BUILD_TESTS=ON
 cmake --build build -j$(nproc)
 ctest --test-dir build                          # 26/26 통과해야 합니다
-./build/tq_run gemma3-4b.tqm -p "1+1=" -j 6 -n 5 -T 0.0 -k turbo_kv_1b -v q4 -M
+./build/quant gemma3-4b.tqm -p "1+1=" -j 6 -n 5 -T 0.0 -k turbo_kv_1b -v q4 -M
 ```
 
 ---
 
-[GitHub](https://github.com/quantumaikr/TurboQuant.cpp) | [릴리즈 노트](../RELEASE_NOTES.md) | [논문](https://arxiv.org/abs/2504.19874)
+[GitHub](https://github.com/quantumaikr/quant.cpp) | [릴리즈 노트](../RELEASE_NOTES.md) | [논문](https://arxiv.org/abs/2504.19874)

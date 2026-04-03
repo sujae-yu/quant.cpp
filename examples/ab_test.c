@@ -1,9 +1,9 @@
 /**
- * TurboQuant.cpp — A/B Test: FP16 vs Quantized KV Cache
+ * quant.cpp — A/B Test: FP16 vs Quantized KV Cache
  *
  * Direct side-by-side comparison showing:
  *   A) FP16 baseline (no compression)
- *   B) TurboQuant compressed (each type)
+ *   B) quant.cpp compressed (each type)
  *
  * For each quantization type, measures:
  *   - Memory per token
@@ -64,7 +64,7 @@ int main(void) {
 
     printf("\n");
     printf("╔══════════════════════════════════════════════════════════════╗\n");
-    printf("║        TurboQuant.cpp — A/B Test: FP16 vs Quantized        ║\n");
+    printf("║        quant.cpp — A/B Test: FP16 vs Quantized        ║\n");
     printf("╚══════════════════════════════════════════════════════════════╝\n");
     printf("\n");
     printf("  Config: head_dim=%d, seq_len=%d, queries=%d\n", HEAD_DIM, SEQ_LEN, N_QUERIES);

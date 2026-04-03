@@ -1,4 +1,4 @@
-# TurboQuant.cpp — Product Requirements Document v0.5
+# quant.cpp — Product Requirements Document v0.5
 
 **Version**: 0.5
 **Date**: 2026-03-29
@@ -89,7 +89,7 @@ typedef struct {
 Progressive config에 별도 key_type, value_type 설정:
 ```c
 typedef struct {
-    tq_type  key_warm_type;    // Keys: PolarQuant or TurboQuant
+    tq_type  key_warm_type;    // Keys: PolarQuant or quant.cpp
     tq_type  value_warm_type;  // Values: Uniform (amplitude preservation)
     tq_type  key_cold_type;
     tq_type  value_cold_type;

@@ -2,14 +2,14 @@
  * test_rate_distortion.cpp -- Information-theoretic lower bound verification
  *
  * Computes the rate-distortion lower bound for Gaussian sources and
- * compares against actual TurboQuant MSE at each bit-width.
+ * compares against actual quant.cpp MSE at each bit-width.
  *
  * For Gaussian N(0, sigma^2):
  *   R(D) = 0.5 * log2(sigma^2 / D)
  *   At b bits: minimum achievable MSE = sigma^2 * 2^(-2b)
  *
  * Lloyd-Max achieves ~1.18x the theoretical minimum for Gaussian.
- * TurboQuant uses Lloyd-Max codebooks, so we expect:
+ * quant.cpp uses Lloyd-Max codebooks, so we expect:
  *   actual_MSE / theoretical_min ~ 1.1 to 1.3
  */
 
@@ -69,7 +69,7 @@ TEST(RateDistortion, TheoreticalBoundFormula) {
 }
 
 /* ============================================================
- * Test 2: TurboQuant Q4 (4-bit uniform) MSE vs theoretical bound
+ * Test 2: quant.cpp Q4 (4-bit uniform) MSE vs theoretical bound
  *
  * Q4 uses min-max uniform quantization with 16 levels.
  * For uniform quantization of N(0,1) to 16 levels:
@@ -129,7 +129,7 @@ TEST(RateDistortion, Q4UniformVsTheoretical) {
 }
 
 /* ============================================================
- * Test 3: TurboQuant Q2 (2-bit Lloyd-Max) MSE vs theoretical bound
+ * Test 3: quant.cpp Q2 (2-bit Lloyd-Max) MSE vs theoretical bound
  *
  * Q2 uses Lloyd-Max codebook centroids optimized for N(0,1).
  * Expected gap: ~1.18x for Lloyd-Max 2-bit Gaussian.
@@ -184,7 +184,7 @@ TEST(RateDistortion, Q2LloydMaxVsTheoretical) {
  * Test 4: Rate-distortion table across all bit-widths
  *
  * Print a comprehensive table comparing theoretical lower bounds
- * with actual TurboQuant MSE for 1, 2, 3, 4 bit quantization.
+ * with actual quant.cpp MSE for 1, 2, 3, 4 bit quantization.
  * ============================================================ */
 TEST(RateDistortion, ComprehensiveTable) {
     const int dim = 256;
@@ -235,7 +235,7 @@ TEST(RateDistortion, ComprehensiveTable) {
                 2, d_min, mse, "Q2 Lloyd-Max", mse / d_min);
     }
 
-    /* TurboQuant types via the public API */
+    /* quant.cpp types via the public API */
     tq_context_t* ctx = NULL;
     tq_status status = tq_init(&ctx, TQ_BACKEND_CPU);
     if (status == TQ_OK && ctx) {

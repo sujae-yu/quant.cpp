@@ -1,7 +1,7 @@
 """
-TurboQuant ctypes-based Python bindings.
+quant.cpp ctypes-based Python bindings.
 
-Loads the compiled TurboQuant shared library (libturboquant.so on Linux,
+Loads the compiled quant.cpp shared library (libturboquant.so on Linux,
 libturboquant.dylib on macOS) and provides a Pythonic interface with
 NumPy array support.
 """
@@ -23,7 +23,7 @@ from numpy.ctypeslib import ndpointer
 # ---------------------------------------------------------------------------
 
 def _find_library() -> Optional[str]:
-    """Locate the TurboQuant shared library on disk."""
+    """Locate the quant.cpp shared library on disk."""
     # Platform-specific library name
     system = platform.system()
     if system == "Darwin":
@@ -37,7 +37,7 @@ def _find_library() -> Optional[str]:
     search_dirs = []
 
     # 1. Environment variable
-    env_path = os.environ.get("TURBOQUANT_LIB_PATH")
+    env_path = os.environ.get("QUANT_LIB_PATH")
     if env_path:
         search_dirs.append(env_path)
 
@@ -62,12 +62,12 @@ def _find_library() -> Optional[str]:
 
 
 def get_library_path() -> Optional[str]:
-    """Return the resolved path to the TurboQuant shared library, or None."""
+    """Return the resolved path to the quant.cpp shared library, or None."""
     return _find_library()
 
 
-class TurboQuantError(Exception):
-    """Exception raised when a TurboQuant C API call fails."""
+class quant.cppError(Exception):
+    """Exception raised when a quant.cpp C API call fails."""
     pass
 
 
@@ -93,9 +93,9 @@ class _TQLib:
 
         lib_path = _find_library()
         if lib_path is None:
-            raise TurboQuantError(
-                "Could not find TurboQuant shared library. "
-                "Build with -DBUILD_SHARED_LIBS=ON or set TURBOQUANT_LIB_PATH."
+            raise quant.cppError(
+                "Could not find quant.cpp shared library. "
+                "Build with -DBUILD_SHARED_LIBS=ON or set QUANT_LIB_PATH."
             )
 
         self._lib = ctypes.CDLL(lib_path)
@@ -212,12 +212,12 @@ def _get_lib():
 
 
 def _check_status(status: int, operation: str = ""):
-    """Raise TurboQuantError if status is not TQ_OK (0)."""
+    """Raise quant.cppError if status is not TQ_OK (0)."""
     if status != 0:
         lib = _get_lib()
         msg = lib.tq_status_string(status)
         msg_str = msg.decode("utf-8") if msg else f"error code {status}"
-        raise TurboQuantError(f"{operation}: {msg_str}" if operation else msg_str)
+        raise quant.cppError(f"{operation}: {msg_str}" if operation else msg_str)
 
 
 # ---------------------------------------------------------------------------
@@ -225,14 +225,14 @@ def _check_status(status: int, operation: str = ""):
 # ---------------------------------------------------------------------------
 
 def type_name(tq_type: int) -> str:
-    """Return the human-readable name for a TurboQuant type."""
+    """Return the human-readable name for a quant.cpp type."""
     lib = _get_lib()
     result = lib.tq_type_name(tq_type)
     return result.decode("utf-8") if result else "unknown"
 
 
 def type_bpe(tq_type: int) -> float:
-    """Return bits-per-element for a TurboQuant type."""
+    """Return bits-per-element for a quant.cpp type."""
     lib = _get_lib()
     return float(lib.tq_type_bpe(tq_type))
 
@@ -241,13 +241,13 @@ def type_bpe(tq_type: int) -> float:
 # Module-level convenience functions
 # ---------------------------------------------------------------------------
 
-_default_ctx: Optional["TurboQuantContext"] = None
+_default_ctx: Optional["quant.cppContext"] = None
 
 
-def _get_default_ctx() -> "TurboQuantContext":
+def _get_default_ctx() -> "quant.cppContext":
     global _default_ctx
     if _default_ctx is None:
-        _default_ctx = TurboQuantContext()
+        _default_ctx = quant.cppContext()
     return _default_ctx
 
 
@@ -310,28 +310,28 @@ def attention(query: np.ndarray, kv_cache: bytes,
 
 
 # ---------------------------------------------------------------------------
-# TurboQuantContext class
+# quant.cppContext class
 # ---------------------------------------------------------------------------
 
-class TurboQuantContext:
-    """High-level Python wrapper around the TurboQuant C context.
+class quant.cppContext:
+    """High-level Python wrapper around the quant.cpp C context.
 
     Manages the lifecycle of a tq_context_t handle and provides methods
     for quantizing keys/values and computing attention scores.
 
     Usage:
-        ctx = TurboQuantContext(backend=BACKEND_CPU)
+        ctx = quant.cppContext(backend=BACKEND_CPU)
         quantized = ctx.quantize_keys(keys_np, tq_type=TURBO_3B)
         scores = ctx.attention(query_np, quantized, seq_len=100, tq_type=TURBO_3B)
         ctx.close()
 
     Or as a context manager:
-        with TurboQuantContext() as ctx:
+        with quant.cppContext() as ctx:
             quantized = ctx.quantize_keys(keys_np)
     """
 
     def __init__(self, backend: int = 99):
-        """Create a TurboQuant context.
+        """Create a quant.cpp context.
 
         Args:
             backend: Backend to use. One of:
@@ -383,7 +383,7 @@ class TurboQuantContext:
         n, head_dim = keys.shape
         out_size = self._lib.tq_quantize_keys_size(n, head_dim, tq_type)
         if out_size == 0:
-            raise TurboQuantError(f"Invalid type {tq_type} or dimensions")
+            raise quant.cppError(f"Invalid type {tq_type} or dimensions")
 
         out_buf = (ctypes.c_uint8 * out_size)()
         keys_ptr = keys.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
@@ -415,7 +415,7 @@ class TurboQuantContext:
         n, head_dim = values.shape
         out_size = self._lib.tq_quantize_values_size(n, head_dim, bits)
         if out_size == 0:
-            raise TurboQuantError(f"Invalid bits={bits} or dimensions")
+            raise quant.cppError(f"Invalid bits={bits} or dimensions")
 
         out_buf = (ctypes.c_uint8 * out_size)()
         values_ptr = values.ctypes.data_as(ctypes.POINTER(ctypes.c_float))

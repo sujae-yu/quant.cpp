@@ -37,7 +37,7 @@ Fair NEON-vs-NEON benchmark (Apple M-series, median of 7 runs):
 - Larger head_dim benefits more (Q4 data fits in L1 cache)
 
 ### Core Library
-- 7 quantization types: PolarQuant (3/4b), QJL (1b), TurboQuant (3/4b), Uniform (2/4b)
+- 7 quantization types: PolarQuant (3/4b), QJL (1b), quant.cpp (3/4b), Uniform (2/4b)
 - Direct attention kernels: QJL Hamming distance, PolarQuant cos/sin LUT (no dequantization needed)
 - Self-contained block formats with ONNX-compliant LSB-first bit packing
 - O(1) type traits dispatch table (llama.cpp pattern)
@@ -77,7 +77,7 @@ Fair NEON-vs-NEON benchmark (Apple M-series, median of 7 runs):
 
 ### Integration
 - **llama.cpp**: GGML type registration (7 types, base offset 256), CLI parser with 21 aliases, from_float/to_float/vec_dot wrappers, 10 integration tests
-- **Python**: ctypes bindings with NumPy support, pip installable (`pip install -e .`), TurboQuant class with quantize_keys/dequantize_keys/attention methods
+- **Python**: ctypes bindings with NumPy support, pip installable (`pip install -e .`), quant.cpp class with quantize_keys/dequantize_keys/attention methods
 - **vLLM**: integration scaffold with README guide
 - **Examples**: minimal.c (10 lines), standalone.c, ab_test.c, demo_real_model.c, benchmark_types.cpp, python_quickstart.py, llamacpp_integration.cpp
 
@@ -101,14 +101,14 @@ Fair NEON-vs-NEON benchmark (Apple M-series, median of 7 runs):
 
 ### Memory Impact
 
-| Model | Context | FP16 Cache | TurboQuant | Saved |
+| Model | Context | FP16 Cache | quant.cpp | Saved |
 |-------|---------|------------|------------|-------|
 | Llama-3.2-3B | 64K | 7.00 GB | 0.93 GB | **87%** |
 | Qwen3.5-0.5B | 128K | 10.50 GB | 2.79 GB | **73%** |
 | Phi-3-mini | 16K | 6.00 GB | 1.59 GB | **73%** |
 
 ### References
-- TurboQuant (ICLR 2026) — arXiv:2504.19874
+- quant.cpp (ICLR 2026) — arXiv:2504.19874
 - QJL (AAAI 2025) — arXiv:2406.03482
 - PolarQuant (AISTATS 2026) — arXiv:2502.02617
 - Harness plugin (revfactory/harness) — agent team methodology

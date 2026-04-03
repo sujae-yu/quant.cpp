@@ -1,5 +1,5 @@
 /**
- * TurboQuant.cpp -- Individual Kernel Performance Benchmark
+ * quant.cpp -- Individual Kernel Performance Benchmark
  *
  * Times each operation (quantize, dequantize, attention) separately for
  * all 7 quantization types. Reports both machine-readable metrics and a
@@ -191,7 +191,7 @@ int main() {
     const int N_VECTORS    = 10000;
     const int SEQ_LEN      = 512;
 
-    printf("# TurboQuant Kernel Performance Benchmark\n");
+    printf("# quant.cpp Kernel Performance Benchmark\n");
     printf("# HEAD_DIM=%d, N_VECTORS=%d (quant/dequant), SEQ_LEN=%d (attention)\n",
            HEAD_DIM, N_VECTORS, SEQ_LEN);
 #ifdef __ARM_NEON

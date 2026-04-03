@@ -1,5 +1,5 @@
 #!/bin/bash
-# TurboQuant.cpp — One-command quickstart
+# quant.cpp — One-command quickstart
 # Downloads Qwen3.5-0.8B, builds the engine, converts the model, and runs inference.
 #
 # Usage:
@@ -13,14 +13,14 @@ THREADS="${2:-4}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-echo "=== TurboQuant.cpp Quickstart ==="
+echo "=== quant.cpp Quickstart ==="
 echo ""
 
 # Step 1: Build
-if [ ! -f build/tq_run ]; then
+if [ ! -f build/quant ]; then
     echo "[1/4] Building..."
     cmake -B build -DCMAKE_BUILD_TYPE=Release -DTQ_BUILD_TESTS=OFF -DTQ_BUILD_BENCH=OFF -Wno-dev 2>/dev/null
-    cmake --build build -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)" --target tq_run --target tq_convert 2>&1 | tail -3
+    cmake --build build -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)" --target quant --target tq_convert 2>&1 | tail -3
     echo "      Done."
 else
     echo "[1/4] Build found."
@@ -69,4 +69,4 @@ fi
 # Step 4: Run inference
 echo "[4/4] Running inference..."
 echo ""
-./build/tq_run model.tqm -p "$PROMPT" -j "$THREADS" -n 100
+./build/quant model.tqm -p "$PROMPT" -j "$THREADS" -n 100

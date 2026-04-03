@@ -34,7 +34,7 @@ static const int N_VECTORS = 10000;
 static const int N_WARMUP = 100;
 
 int main(void) {
-    printf("=== TurboQuant KV Cache Quantization Overhead ===\n");
+    printf("=== quant.cpp KV Cache Quantization Overhead ===\n");
     printf("dim=%d, vectors=%d\n\n", DIM, N_VECTORS);
 
     /* Generate random input vectors */

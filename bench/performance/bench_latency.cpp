@@ -1,8 +1,8 @@
 /**
- * TurboQuant.cpp -- Latency Benchmark
+ * quant.cpp -- Latency Benchmark
  *
  * Measures per-call latency for quantization and attention operations
- * across all TurboQuant quantization types.
+ * across all quant.cpp quantization types.
  *
  * Metrics output (machine-readable):
  *   quant_latency_<type>=XXX.XX      (microseconds per vector)
@@ -149,7 +149,7 @@ int main() {
     const int N_VECTORS   = 1000;
     const int SEQ_LEN     = 1024;
 
-    printf("# TurboQuant Latency Benchmark\n");
+    printf("# quant.cpp Latency Benchmark\n");
     printf("# HEAD_DIM=%d, N_VECTORS=%d, SEQ_LEN=%d\n\n", HEAD_DIM, N_VECTORS, SEQ_LEN);
 
     /* Generate random input data */

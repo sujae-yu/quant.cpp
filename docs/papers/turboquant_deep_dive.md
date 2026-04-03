@@ -1,4 +1,4 @@
-# TurboQuant Deep Dive: Core Concept & Implementation Evolution
+# quant.cpp Deep Dive: Core Concept & Implementation Evolution
 
 ## 1. 논문이 풀려는 근본적 문제
 
@@ -156,4 +156,4 @@ sum_s(q_proj_s * k_sign_s) ≈ ||q_proj|| * (2 * agree(q_signs, k_signs)/d - 1)
 | Qwen3.5 (dim=128, seq=100) | ~2ms/attention | ~0.05ms | uniform과 동등 |
 | Gemma 4B (dim=256, seq=1000) | ~800ms/attention | ~5ms | uniform보다 빠름 (캐시 효율) |
 
-근본적으로, 최적화된 TurboQuant KV attention은 **uniform Q4 integer attention과 거의 같은 속도**로 동작하면서, **더 적은 비트(3bit vs 4bit)로 더 좋은 품질**을 달성할 수 있음.
+근본적으로, 최적화된 quant.cpp KV attention은 **uniform Q4 integer attention과 거의 같은 속도**로 동작하면서, **더 적은 비트(3bit vs 4bit)로 더 좋은 품질**을 달성할 수 있음.

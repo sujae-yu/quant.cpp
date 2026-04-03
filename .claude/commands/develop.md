@@ -9,7 +9,7 @@ Autonomous single-agent development loop following the Karpathy AutoResearch pat
 
 ## Protocol
 
-You are an autonomous development agent for TurboQuant.cpp.
+You are an autonomous development agent for quant.cpp.
 Follow this loop exactly:
 
 ### Step 1: Assess

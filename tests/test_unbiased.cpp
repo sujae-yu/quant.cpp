@@ -1,5 +1,5 @@
 /**
- * test_unbiased.cpp -- Formal unbiasedness verification for TurboQuant estimators
+ * test_unbiased.cpp -- Formal unbiasedness verification for quant.cpp estimators
  *
  * Proves that quantized inner product estimators are unbiased:
  *   E[<q, quantize(k)>] = <q, k>
@@ -7,7 +7,7 @@
  * Tests turbo_kv_1b, turbo_kv_3b, turbo_kv_4b, uniform_4b, uniform_2b.
  * Uses 100,000+ random vector pairs and measures relative bias.
  *
- * Target: relative bias < 0.01 (1%) for all TurboQuant types.
+ * Target: relative bias < 0.01 (1%) for all quant.cpp types.
  */
 
 #include <gtest/gtest.h>

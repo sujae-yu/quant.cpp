@@ -1,4 +1,4 @@
-# TurboQuant.cpp — Work Breakdown Structure v0.4
+# quant.cpp — Work Breakdown Structure v0.4
 
 **Version**: 0.4
 **Date**: 2026-03-29
@@ -43,7 +43,7 @@
 - [x] `src/core/tq_context.c` — 입력 검증 강화
   - [x] `seq_len == 0` → TQ_OK 즉시 반환 (no-op)
   - [x] `head_dim < 2` → TQ_ERR_INVALID_DIM
-  - [x] `head_dim % 2 != 0` (PolarQuant/TurboQuant 타입) → TQ_ERR_INVALID_DIM
+  - [x] `head_dim % 2 != 0` (PolarQuant/quant.cpp 타입) → TQ_ERR_INVALID_DIM
   - [x] `keys == NULL || out == NULL` → TQ_ERR_NULL_PTR
 - [x] `src/core/tq_context.c` — `tq_attention()` 입력 검증
   - [x] `query == NULL || kv_cache == NULL || scores == NULL` → TQ_ERR_NULL_PTR

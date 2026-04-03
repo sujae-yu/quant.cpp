@@ -1,8 +1,8 @@
-# TurboQuant.cpp -- Benchmark Results
+# quant.cpp -- Benchmark Results
 
 ## Overview
 
-This document summarizes the benchmark results for TurboQuant.cpp v0.1.0,
+This document summarizes the benchmark results for quant.cpp v0.1.0,
 covering memory compression, quantization quality, latency, and accuracy
 on standard LLM benchmarks.
 
@@ -106,7 +106,7 @@ Degradation vs FP16:
 
 Retrieval accuracy at various context lengths and needle depths.
 
-### TurboQuant 3-bit
+### quant.cpp 3-bit
 
 | Context | 0%   | 25%  | 50%  | 75%  | 100% |
 |---------|------|------|------|------|------|

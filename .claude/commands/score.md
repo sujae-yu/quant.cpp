@@ -4,7 +4,7 @@ description: Run the 5-dimension scoring harness and display results
 
 # Score
 
-Run the TurboQuant.cpp scoring harness to measure project completeness across 5 dimensions.
+Run the quant.cpp scoring harness to measure project completeness across 5 dimensions.
 
 ## Steps
 

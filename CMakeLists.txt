@@ -35,7 +35,7 @@ if(APPLE)
     if(ACCELERATE_LIB)
         target_link_libraries(turboquant PRIVATE ${ACCELERATE_LIB})
         target_compile_definitions(turboquant PRIVATE TQ_HAS_ACCELERATE=1 ACCELERATE_NEW_LAPACK=1)
-        message(STATUS "TurboQuant: Accelerate framework enabled (cblas/AMX)")
+        message(STATUS "quant.cpp: Accelerate framework enabled (cblas/AMX)")
     endif()
 endif()
 
@@ -98,7 +98,7 @@ if(TQ_BUILD_METAL AND APPLE)
         )
         add_custom_target(turboquant_metallib ALL DEPENDS ${TQ_METALLIB})
     else()
-        message(WARNING "TurboQuant: Metal shader compiler not found (need Xcode). "
+        message(WARNING "quant.cpp: Metal shader compiler not found (need Xcode). "
                         "Shaders will not be compiled — runtime .metallib loading will fail. "
                         "Obj-C dispatch code will still be built.")
         add_custom_target(turboquant_metallib)  # no-op target
@@ -130,7 +130,7 @@ if(TQ_BUILD_METAL AND APPLE)
     add_dependencies(turboquant turboquant_metallib)
     add_dependencies(turboquant_shared turboquant_metallib)
 
-    message(STATUS "TurboQuant: Metal backend enabled — shaders: ${TQ_METALLIB}")
+    message(STATUS "quant.cpp: Metal backend enabled — shaders: ${TQ_METALLIB}")
 endif()
 
 # CUDA backend (NVIDIA GPU)
@@ -142,7 +142,7 @@ if(TQ_BUILD_CUDA)
     target_compile_definitions(turboquant PRIVATE TQ_BUILD_CUDA=1)
     target_compile_definitions(turboquant_shared PRIVATE TQ_BUILD_CUDA=1)
     set_source_files_properties(${TQ_CUDA_SOURCES} PROPERTIES LANGUAGE CUDA)
-    message(STATUS "TurboQuant: CUDA backend enabled")
+    message(STATUS "quant.cpp: CUDA backend enabled")
 endif()
 
 # Vulkan backend (cross-platform GPU — AMD, NVIDIA, Intel)
@@ -156,9 +156,9 @@ if(TQ_BUILD_VULKAN)
         target_link_libraries(turboquant_shared PRIVATE Vulkan::Vulkan)
         target_compile_definitions(turboquant PRIVATE TQ_BUILD_VULKAN=1)
         target_compile_definitions(turboquant_shared PRIVATE TQ_BUILD_VULKAN=1)
-        message(STATUS "TurboQuant: Vulkan backend enabled (${Vulkan_LIBRARY})")
+        message(STATUS "quant.cpp: Vulkan backend enabled (${Vulkan_LIBRARY})")
     else()
-        message(WARNING "TurboQuant: TQ_BUILD_VULKAN=ON but Vulkan SDK not found. "
+        message(WARNING "quant.cpp: TQ_BUILD_VULKAN=ON but Vulkan SDK not found. "
                         "Install Vulkan SDK or set VULKAN_SDK environment variable. "
                         "Building without Vulkan backend.")
     endif()
@@ -175,9 +175,9 @@ if(TQ_BUILD_ROCM)
         target_link_libraries(turboquant_shared PRIVATE hip::device)
         target_compile_definitions(turboquant PRIVATE TQ_BUILD_ROCM=1)
         target_compile_definitions(turboquant_shared PRIVATE TQ_BUILD_ROCM=1)
-        message(STATUS "TurboQuant: ROCm/HIP backend enabled")
+        message(STATUS "quant.cpp: ROCm/HIP backend enabled")
     else()
-        message(WARNING "TurboQuant: TQ_BUILD_ROCM=ON but HIP SDK not found. "
+        message(WARNING "quant.cpp: TQ_BUILD_ROCM=ON but HIP SDK not found. "
                         "Install ROCm or set HIP_PATH. "
                         "Building without ROCm backend.")
     endif()

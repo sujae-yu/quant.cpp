@@ -1,5 +1,5 @@
 #!/bin/bash
-# TurboQuant.cpp — Comprehensive Scoring Harness
+# quant.cpp — Comprehensive Scoring Harness
 # Compatible with bash 3.2+ (macOS default)
 #
 # Usage:
@@ -371,7 +371,7 @@ print_final() {
 # ============================================================
 echo ""
 echo "========================================"
-echo "  TurboQuant.cpp — Scoring Report"
+echo "  quant.cpp — Scoring Report"
 echo "  $(date '+%Y-%m-%d %H:%M:%S')"
 echo "========================================"
 

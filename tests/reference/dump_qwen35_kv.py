@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Dump real KV cache from Qwen3.5-0.8B for TurboQuant validation.
+Dump real KV cache from Qwen3.5-0.8B for quant.cpp validation.
 
 Model: https://huggingface.co/Qwen/Qwen3.5-0.8B
 Architecture: Hybrid (6 × (3× DeltaNet + 1× Gated Attention))
@@ -42,7 +42,7 @@ def dump_with_transformers():
     prompt = (
         "The key to efficient LLM inference is quantizing the key-value cache, "
         "which reduces memory usage while preserving attention accuracy. "
-        "Recent research from Google has shown that TurboQuant can achieve "
+        "Recent research from Google has shown that quant.cpp can achieve "
         "6x KV cache compression at 3-bit with zero quality loss. "
         "The algorithm works by first applying a Random Hadamard Transform "
         "to decorrelate the vector coordinates, then using optimal scalar "
@@ -208,7 +208,7 @@ def generate_qwen35_synthetic():
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("  TurboQuant — Qwen3.5-0.8B KV Cache Dump")
+    print("  quant.cpp — Qwen3.5-0.8B KV Cache Dump")
     print("=" * 60)
     print()
 

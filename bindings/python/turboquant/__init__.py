@@ -1,23 +1,23 @@
 """
-TurboQuant -- Cross-platform KV cache compression for LLM inference.
+quant.cpp -- Cross-platform KV cache compression for LLM inference.
 
 Python bindings using ctypes to interface with the C library.
 
 Usage:
     import turboquant
 
-    ctx = turboquant.TurboQuantContext()
+    ctx = turboquant.quant.cppContext()
     quantized = ctx.quantize_keys(keys_np, type=turboquant.TURBO_3B)
     scores = ctx.attention(query_np, quantized, type=turboquant.TURBO_3B)
     ctx.close()
 """
 
 __version__ = "0.1.0"
-__author__ = "TurboQuant Contributors"
+__author__ = "quant.cpp Contributors"
 
 from turboquant._core import (
-    TurboQuantContext,
-    TurboQuantError,
+    quant.cppContext,
+    quant.cppError,
     quantize_keys,
     quantize_values,
     dequantize_keys,
@@ -42,10 +42,10 @@ BACKEND_CUDA  = 1
 BACKEND_METAL = 2
 BACKEND_AUTO  = 99
 
-class TurboQuant:
-    """Simplified TurboQuant API for quick experimentation.
+class quant.cpp:
+    """Simplified quant.cpp API for quick experimentation.
 
-    Wraps TurboQuantContext with a convenient interface matching the
+    Wraps quant.cppContext with a convenient interface matching the
     type constants defined on the class itself.
     """
 
@@ -68,7 +68,7 @@ class TurboQuant:
         self._np = _np
         backend_map = {"cpu": 0, "cuda": 1, "metal": 2, "auto": 99}
         backend_int = backend_map.get(backend, 0) if isinstance(backend, str) else backend
-        self._ctx = TurboQuantContext(backend=backend_int)
+        self._ctx = quant.cppContext(backend=backend_int)
 
     def quantize_keys(self, keys, qtype=UNIFORM_4B):
         """Quantize key vectors. keys: [n, head_dim] float32 array."""
@@ -99,13 +99,13 @@ class TurboQuant:
         self.close()
 
     def __repr__(self):
-        return "TurboQuant(backend=cpu)"
+        return "quant.cpp(backend=cpu)"
 
 
 __all__ = [
-    "TurboQuant",
-    "TurboQuantContext",
-    "TurboQuantError",
+    "quant.cpp",
+    "quant.cppContext",
+    "quant.cppError",
     "quantize_keys",
     "quantize_values",
     "dequantize_keys",

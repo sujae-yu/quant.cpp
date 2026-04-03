@@ -3,7 +3,7 @@
 # long_context_bench.sh — Long Context KV Cache Memory Benchmark
 #
 # Measures KV cache memory usage at various context lengths, comparing
-# TurboQuant (compressed Q4 KV) vs theoretical FP16 KV (llama.cpp default).
+# quant.cpp (compressed Q4 KV) vs theoretical FP16 KV (llama.cpp default).
 #
 # Usage:
 #   bash bench/long_context_bench.sh [model.tqm] [kv_type]
@@ -21,7 +21,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_DIR="$PROJECT_DIR/build"
-TQ_RUN="$BUILD_DIR/tq_run"
+TQ_RUN="$BUILD_DIR/quant"
 
 # Default arguments
 MODEL="${1:-gemma3-4b.tqm}"
@@ -32,16 +32,16 @@ CSV_OUT="$SCRIPT_DIR/long_context_results.csv"
 CONTEXT_LENGTHS=(512 1024 2048 4096)
 
 # --------------------------------------------------------
-# Ensure tq_run is built
+# Ensure quant is built
 # --------------------------------------------------------
 if [ ! -f "$TQ_RUN" ]; then
-    echo "Building tq_run..."
+    echo "Building quant..."
     cmake -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release "$PROJECT_DIR" > /dev/null 2>&1
-    cmake --build "$BUILD_DIR" --target tq_run -j"$(sysctl -n hw.ncpu 2>/dev/null || nproc)" > /dev/null 2>&1
+    cmake --build "$BUILD_DIR" --target quant -j"$(sysctl -n hw.ncpu 2>/dev/null || nproc)" > /dev/null 2>&1
 fi
 
 if [ ! -f "$TQ_RUN" ]; then
-    echo "ERROR: Failed to build tq_run" >&2
+    echo "ERROR: Failed to build quant" >&2
     exit 1
 fi
 
@@ -132,7 +132,7 @@ esac
 
 BLOCKS_PER_HEAD=$(( (HEAD_DIM + BLOCK_SIZE - 1) / BLOCK_SIZE ))
 
-# TurboQuant Q4: both keys AND values quantized to same type
+# quant.cpp Q4: both keys AND values quantized to same type
 # = 2 (K+V) * n_layers * n_kv_heads * blocks_per_head * type_size
 if [ "$KV_TYPE" = "fp32" ]; then
     Q4_PER_TOKEN=$(( 2 * N_LAYERS * N_KV_HEADS * HEAD_DIM * 4 ))
@@ -141,7 +141,7 @@ else
 fi
 
 echo "Per-token KV (FP16 / llama.cpp):  $(echo "scale=2; $FP16_PER_TOKEN / 1024" | bc) KB"
-echo "Per-token KV (Q4 / TurboQuant):   $(echo "scale=2; $Q4_PER_TOKEN / 1024" | bc) KB"
+echo "Per-token KV (Q4 / quant.cpp):   $(echo "scale=2; $Q4_PER_TOKEN / 1024" | bc) KB"
 OVERALL_RATIO=$(echo "scale=2; $FP16_PER_TOKEN / $Q4_PER_TOKEN" | bc)
 echo "Compression ratio:                ${OVERALL_RATIO}x"
 echo ""
@@ -171,14 +171,14 @@ generate_prompt() {
 echo "context_length,compressed_kv_bytes,fp16_kv_bytes,compressed_kv_mb,fp16_kv_mb,compression_ratio,memory_saved_mb" > "$CSV_OUT"
 
 # Column labels
-COL_Q4="Q4 (TurboQuant)"
+COL_Q4="Q4 (quant.cpp)"
 COL_FP16="FP16 (llama.cpp)"
 
 # --------------------------------------------------------
 # Print table header
 # --------------------------------------------------------
 printf "\n%-15s  %18s  %18s  %8s  %15s\n" \
-    "Context Length" "Q4 TurboQuant" "FP16 llama.cpp" "Ratio" "Memory Saved"
+    "Context Length" "Q4 quant.cpp" "FP16 llama.cpp" "Ratio" "Memory Saved"
 printf "%-15s  %18s  %18s  %8s  %15s\n" \
     "---------------" "------------------" "------------------" "--------" "---------------"
 

@@ -32,6 +32,6 @@ tokenizers==0.22.2
 torch==2.11.0
 tqdm==4.67.3
 transformers==5.4.0
--e git+https://github.com/quantumaikr/TurboQuant.cpp.git@e8bface7e6967dae1260bd3bdf80662cfa3ba1be#egg=turboquant&subdirectory=bindings/python
+-e git+https://github.com/quantumaikr/quant.cpp.git@e8bface7e6967dae1260bd3bdf80662cfa3ba1be#egg=turboquant&subdirectory=bindings/python
 typer==0.24.1
 typing_extensions==4.15.0

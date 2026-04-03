@@ -1,7 +1,7 @@
 #!/bin/bash
 # cow_bench.sh — Copy-on-Write page cache memory savings benchmark
 #
-# Demonstrates the CoW mechanism in TurboQuant's paged KV cache:
+# Demonstrates the CoW mechanism in quant.cpp's paged KV cache:
 # When multiple sequences share a common prefix (e.g., system prompt),
 # the shared prefix blocks are reference-counted, not duplicated.
 #

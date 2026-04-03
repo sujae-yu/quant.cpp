@@ -1,16 +1,16 @@
-# TurboQuant.cpp: Practical 1-bit KV Cache Compression for LLM Inference
+# quant.cpp: Practical 1-bit KV Cache Compression for LLM Inference
 
 ## Abstract
 
-TurboQuant.cpp is a self-contained C implementation of TurboQuant (ICLR 2026) for KV cache compression in large language model inference. The library implements randomized Hadamard transforms, Lloyd-Max codebooks, and quantized Johnson-Lindenstrauss sign hashing to compress KV cache keys to as few as 1 bit per element. On models ranging from Gemma 270M to Qwen 35B MoE, 1-bit key compression produces byte-identical greedy output compared to uncompressed baselines. Combined with Q4 value quantization, the system achieves 4.9x total K+V compression with +0.03% perplexity degradation on Gemma 4B. The implementation is 28K lines of C with zero external dependencies, loads GGUF models directly, and includes 31 test suites verified under AddressSanitizer.
+quant.cpp is a self-contained C implementation of quant.cpp (ICLR 2026) for KV cache compression in large language model inference. The library implements randomized Hadamard transforms, Lloyd-Max codebooks, and quantized Johnson-Lindenstrauss sign hashing to compress KV cache keys to as few as 1 bit per element. On models ranging from Gemma 270M to Qwen 35B MoE, 1-bit key compression produces byte-identical greedy output compared to uncompressed baselines. Combined with Q4 value quantization, the system achieves 4.9x total K+V compression with +0.03% perplexity degradation on Gemma 4B. The implementation is 28K lines of C with zero external dependencies, loads GGUF models directly, and includes 31 test suites verified under AddressSanitizer.
 
 ## 1. Introduction
 
 KV cache memory grows linearly with sequence length, batch size, and model depth, making it the primary memory bottleneck for long-context LLM inference. At 32K context length, a 4B-parameter model requires over 4 GB for FP16 KV storage per layer stack.
 
-Standard quantization methods (uniform, NF4) minimize reconstruction MSE. However, the KV cache is consumed exclusively through inner products during attention. The TurboQuant paper (Zandieh et al., ICLR 2026) demonstrates that MSE-optimal quantizers introduce systematic bias in inner product estimation, and proposes an alternative two-stage approach that is provably unbiased at any bit-width.
+Standard quantization methods (uniform, NF4) minimize reconstruction MSE. However, the KV cache is consumed exclusively through inner products during attention. The quant.cpp paper (Zandieh et al., ICLR 2026) demonstrates that MSE-optimal quantizers introduce systematic bias in inner product estimation, and proposes an alternative two-stage approach that is provably unbiased at any bit-width.
 
-This work implements and verifies TurboQuant on real models up to 35B parameters, providing a practical inference engine with no Python or framework dependencies.
+This work implements and verifies quant.cpp on real models up to 35B parameters, providing a practical inference engine with no Python or framework dependencies.
 
 ## 2. Method
 
@@ -30,7 +30,7 @@ The implementation comprises 28K lines of C/C++/Metal with zero external depende
 
 **Architectures.** Three model families: Gemma 3 (sliding window, GeGLU, dual RoPE), Qwen3.5 (DeltaNet + self-attention hybrid, GQA), and Qwen2-MoE (256 experts, top-8 routing, shared expert).
 
-**Quantization types.** 11 KV cache types including uniform 4b/2b, PolarQuant 3b/4b, QJL 1b, TurboQuant 1b/3b/4b, and mixed configurations. Value quantization supports Q4 (per-block scale + packed nibbles) and Q2 (Lloyd-Max codebook).
+**Quantization types.** 11 KV cache types including uniform 4b/2b, PolarQuant 3b/4b, QJL 1b, quant.cpp 1b/3b/4b, and mixed configurations. Value quantization supports Q4 (per-block scale + packed nibbles) and Q2 (Lloyd-Max codebook).
 
 **Compute backends.** CPU generic (C reference), CPU NEON (vectorized Hadamard butterfly, Hamming distance via `vcntq_u8`, Q4 dequant via `vzip_u8`), Metal (verified on Apple Silicon), and CUDA/Vulkan/ROCm (compile-tested, not hardware-verified).
 
@@ -95,7 +95,7 @@ Byte-identical means the greedy-decoded token sequence matches the uncompressed 
 
 ## 5. llama.cpp Integration
 
-A self-contained patch adds TurboQuant KV cache support to llama.cpp:
+A self-contained patch adds quant.cpp KV cache support to llama.cpp:
 
 - **4 files, 874 lines**: `ggml-turbo-quant.h`, `ggml-turbo-quant.c`, `tq_kv_cache.cpp`, `test_turbo_quant_kv.cpp`
 - **Usage**: `--cache-type-k tq_kv_1b` (drop-in flag)
@@ -103,7 +103,7 @@ A self-contained patch adds TurboQuant KV cache support to llama.cpp:
 - Includes 7 standalone integration tests
 - Results match the standalone engine: 1-bit cosine = 0.634 (= 2/pi)
 
-The patch registers a custom GGML type and intercepts KV cache allocation to use TurboQuant's quantize/attention kernels.
+The patch registers a custom GGML type and intercepts KV cache allocation to use quant.cpp's quantize/attention kernels.
 
 ## 6. Limitations and Future Work
 
@@ -121,14 +121,14 @@ The patch registers a custom GGML type and intercepts KV cache allocation to use
 
 ## 7. Conclusion
 
-TurboQuant.cpp demonstrates that 1-bit KV cache key compression can produce output identical to uncompressed baselines on models from 270M to 35B parameters. Combined with Q4 value quantization, total K+V compression reaches 4.9x with negligible quality loss (+0.03% PPL). The theoretical 2/pi cosine limit and unbiasedness properties predicted by the TurboQuant paper are confirmed empirically.
+quant.cpp demonstrates that 1-bit KV cache key compression can produce output identical to uncompressed baselines on models from 270M to 35B parameters. Combined with Q4 value quantization, total K+V compression reaches 4.9x with negligible quality loss (+0.03% PPL). The theoretical 2/pi cosine limit and unbiasedness properties predicted by the quant.cpp paper are confirmed empirically.
 
 The implementation is practical: it loads standard GGUF models, requires no calibration data for the default configuration, and integrates with llama.cpp via a 874-line patch. All code is open source under Apache 2.0.
 
-**Repository:** https://github.com/quantumaikr/TurboQuant.cpp
+**Repository:** https://github.com/quantumaikr/quant.cpp
 
 **References:**
 
-- Zandieh et al., "TurboQuant: Online KV Cache Quantization via Unbiased Inner Product Preserving Transform," ICLR 2026
+- Zandieh et al., "quant.cpp: Online KV Cache Quantization via Unbiased Inner Product Preserving Transform," ICLR 2026
 - Zandieh et al., "QJL: 1-Bit Quantized JL Transform for KV Cache Quantization with Zero Overhead," AAAI 2025
 - Xu et al., "PolarQuant: Polar Coordinate Quantization for KV Cache Compression," AISTATS 2026

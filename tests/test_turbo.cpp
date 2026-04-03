@@ -9,7 +9,7 @@ void tq_turbo_attention_ref(const float* query, const void* kv,
 #include <cmath>
 #include <vector>
 
-TEST(TurboQuant, RoundtripBasic) {
+TEST(quant.cpp, RoundtripBasic) {
     std::vector<float> input(TQ_BK);
     for (int i = 0; i < TQ_BK; i++) input[i] = sinf(i * 0.1f);
 
@@ -29,7 +29,7 @@ TEST(TurboQuant, RoundtripBasic) {
     EXPECT_LT(mse, 1.0); // Bounded MSE
 }
 
-TEST(TurboQuant, AttentionAccuracy) {
+TEST(quant.cpp, AttentionAccuracy) {
     std::vector<float> key(128), query(128);
     for (int i = 0; i < 128; i++) {
         key[i] = sinf(i * 0.05f);
@@ -50,12 +50,12 @@ TEST(TurboQuant, AttentionAccuracy) {
     EXPECT_NEAR(quant_score, fp32_score, fabsf(fp32_score) * 0.5f + 1.0f);
 }
 
-TEST(TurboQuant, BlockSize) {
+TEST(quant.cpp, BlockSize) {
     EXPECT_EQ(sizeof(block_tq_turbo),
               sizeof(block_tq_polar) + sizeof(block_tq_qjl));
 }
 
-TEST(TurboQuant, CompositeStructure) {
+TEST(quant.cpp, CompositeStructure) {
     // Verify the turbo block contains both polar and QJL parts
     block_tq_turbo block;
     memset(&block, 0, sizeof(block));

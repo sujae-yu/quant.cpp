@@ -1,6 +1,6 @@
 ---
 name: develop
-description: "TurboQuant.cpp의 다음 WBS 항목을 자율적으로 구현한다. Karpathy 루프 패턴: score → implement → score → commit/revert. '개발해줘', '다음 항목 구현', '다음 WBS', 'develop', 특정 모듈명(polar, qjl 등) 언급 시 사용."
+description: "quant.cpp의 다음 WBS 항목을 자율적으로 구현한다. Karpathy 루프 패턴: score → implement → score → commit/revert. '개발해줘', '다음 항목 구현', '다음 WBS', 'develop', 특정 모듈명(polar, qjl 등) 언급 시 사용."
 argument-hint: "모듈명 (예: polar, qjl, cache) 또는 빈칸 (자동 선택)"
 ---
 

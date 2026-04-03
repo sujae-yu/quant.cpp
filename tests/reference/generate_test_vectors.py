@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate binary test vectors for TurboQuant.cpp cross-platform verification.
+Generate binary test vectors for quant.cpp cross-platform verification.
 
 For each quantization type, quantizes a deterministic input and saves:
   - Input float32 array
@@ -238,7 +238,7 @@ def main():
     output_dir = os.path.join(project_root, 'spec', 'test_vectors')
     os.makedirs(output_dir, exist_ok=True)
 
-    print("=== Generating TurboQuant Test Vectors ===\n")
+    print("=== Generating quant.cpp Test Vectors ===\n")
 
     head_dim = 128
     n_vectors = 4

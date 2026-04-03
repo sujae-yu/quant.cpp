@@ -1,4 +1,4 @@
-# TurboQuant.cpp — Product Requirements Document v0.1
+# quant.cpp — Product Requirements Document v0.1
 
 **Version**: 0.1
 **Date**: 2026-03-29
@@ -8,9 +8,9 @@
 
 ## 1. Executive Summary
 
-TurboQuant.cpp는 LLM 추론 시 KV 캐시를 3비트 수준으로 압축하여, 동일한 하드웨어에서 5배 이상 긴 컨텍스트를 처리할 수 있게 하는 **프레임워크 무관 C/C++ 라이브러리**이다.
+quant.cpp는 LLM 추론 시 KV 캐시를 3비트 수준으로 압축하여, 동일한 하드웨어에서 5배 이상 긴 컨텍스트를 처리할 수 있게 하는 **프레임워크 무관 C/C++ 라이브러리**이다.
 
-**핵심 가치**: 논문으로 증명된 극한 KV 캐시 압축(TurboQuant, PolarQuant, QJL)을 GPU(CUDA), CPU(AVX2/NEON/SVE), MPS(Apple Metal) 어디서든 즉시 사용 가능한 프로덕션급 라이브러리로 제공한다.
+**핵심 가치**: 논문으로 증명된 극한 KV 캐시 압축(quant.cpp, PolarQuant, QJL)을 GPU(CUDA), CPU(AVX2/NEON/SVE), MPS(Apple Metal) 어디서든 즉시 사용 가능한 프로덕션급 라이브러리로 제공한다.
 
 ---
 
@@ -144,7 +144,7 @@ LLM의 KV 캐시는 컨텍스트 길이에 비례하여 VRAM을 소비한다.
 | FR-2.5 | Hamming distance 기반 attention score 계산 | P0 |
 | FR-2.6 | Norm-weighted score 재구성: `scl * norm_k * inner_prod` | P0 |
 
-#### FR-3: TurboQuant Composite
+#### FR-3: quant.cpp Composite
 
 | ID | 요구사항 | 우선순위 |
 |----|---------|---------|
@@ -358,8 +358,8 @@ LLM의 KV 캐시는 컨텍스트 길이에 비례하여 VRAM을 소비한다.
 | 0 | `TQ_POLAR_3B` | 3 (θ:2+ρ:1) | - | 3.25 | PolarQuant | 128 |
 | 1 | `TQ_POLAR_4B` | 4 (θ:2+ρ:2) | - | 4.50 | PolarQuant | 128 |
 | 2 | `TQ_QJL_1B` | 1 | - | 1.xx | QJL sign hash | 256 |
-| 3 | `TQ_TURBO_3B` | 3 (Polar 2b + QJL 1b) | - | 3.xx | TurboQuant | 128 |
-| 4 | `TQ_TURBO_4B` | 4 (Polar 3b + QJL 1b) | - | 4.xx | TurboQuant | 128 |
+| 3 | `TQ_TURBO_3B` | 3 (Polar 2b + QJL 1b) | - | 3.xx | quant.cpp | 128 |
+| 4 | `TQ_TURBO_4B` | 4 (Polar 3b + QJL 1b) | - | 4.xx | quant.cpp | 128 |
 | 5 | `TQ_UNIFORM_4B` | 4 | - | 4.50 | Min-Max Uniform | 128 |
 | 6 | `TQ_UNIFORM_2B` | 2 | - | 2.25 | Min-Max Uniform | 128 |
 
@@ -446,8 +446,8 @@ add_subdirectory(turboquant)
 target_link_libraries(my_app turboquant::turboquant)
 
 # 방식 2: find_package
-find_package(TurboQuant REQUIRED)
-target_link_libraries(my_app TurboQuant::TurboQuant)
+find_package(quant.cpp REQUIRED)
+target_link_libraries(my_app quant.cpp::quant.cpp)
 ```
 
 ### 11.2 Build Options
@@ -475,7 +475,7 @@ target_link_libraries(my_app TurboQuant::TurboQuant)
 |--------|------|------|------|
 | GPU 커널 성능이 연구 구현 대비 부족 | 중 | 고 | QJL/PolarQuant CUDA 코드를 최대한 직접 포팅. 프로파일링 기반 반복 최적화 |
 | 특정 모델 아키텍처에서 품질 저하 | 중 | 중 | Adaptive 전략으로 fallback. 모델별 최적 설정 프리셋 제공 |
-| llama.cpp 메인 브랜치가 자체 TurboQuant 통합 | 낮 | 고 | 독립 라이브러리이므로 llama.cpp의 의존성이 되는 것이 이상적 시나리오 |
+| llama.cpp 메인 브랜치가 자체 quant.cpp 통합 | 낮 | 고 | 독립 라이브러리이므로 llama.cpp의 의존성이 되는 것이 이상적 시나리오 |
 | Metal 셰이더 최적화 난이도 | 중 | 중 | llama.cpp Metal 코드 패턴 참조. 초기에는 CPU NEON이 Apple Silicon 대안 |
 | API 설계 변경으로 하위 호환 깨짐 | 중 | 중 | v0.x 동안은 불안정 명시. v1.0에서 API 동결 |
 
@@ -528,7 +528,7 @@ target_link_libraries(my_app TurboQuant::TurboQuant)
 | **KV 캐시** | Transformer attention의 Key, Value 텐서를 저장하는 메모리 영역 |
 | **PolarQuant** | 벡터를 극좌표(ρ, θ)로 변환하여 양자화하는 기법 |
 | **QJL** | Johnson-Lindenstrauss 변환 후 1비트 부호 양자화하는 기법 |
-| **TurboQuant** | PolarQuant(1단계) + QJL(2단계 잔여 보정)의 결합 기법 |
+| **quant.cpp** | PolarQuant(1단계) + QJL(2단계 잔여 보정)의 결합 기법 |
 | **Progressive Compression** | 토큰의 나이에 따라 점진적으로 압축률을 높이는 전략 |
 | **Type Traits** | 양자화 타입별 함수 포인터와 메타데이터를 담는 조회 테이블 |
 | **Fused Kernel** | 여러 연산(양자화, 캐시 기록, attention)을 하나의 GPU 커널로 합친 것 |

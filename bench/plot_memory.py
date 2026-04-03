@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-plot_memory.py -- KV Cache Memory Usage: TurboQuant vs FP16 (llama.cpp)
+plot_memory.py -- KV Cache Memory Usage: quant.cpp vs FP16 (llama.cpp)
 
 Reads the CSV output from long_context_bench.sh and generates:
   - A line chart (PNG) if matplotlib is available
@@ -43,7 +43,7 @@ def plot_matplotlib(ctx_lengths, compressed_mb, fp16_mb, output_path):
     ax.plot(ctx_lengths, fp16_mb, "o-", color="#e74c3c", linewidth=2.5,
             markersize=8, label="FP16 KV (llama.cpp)", zorder=3)
     ax.plot(ctx_lengths, compressed_mb, "s-", color="#2ecc71", linewidth=2.5,
-            markersize=8, label="Q4 KV (TurboQuant)", zorder=3)
+            markersize=8, label="Q4 KV (quant.cpp)", zorder=3)
 
     # Fill the gap between them
     ax.fill_between(ctx_lengths, compressed_mb, fp16_mb,
@@ -63,7 +63,7 @@ def plot_matplotlib(ctx_lengths, compressed_mb, fp16_mb, output_path):
 
     ax.set_xlabel("Context Length (tokens)", fontsize=13)
     ax.set_ylabel("KV Cache Memory (MB)", fontsize=13)
-    ax.set_title("KV Cache Memory: TurboQuant Q4 vs FP16 (llama.cpp)\nGemma 3 4B — 34 layers, 4 KV heads, head_dim=256",
+    ax.set_title("KV Cache Memory: quant.cpp Q4 vs FP16 (llama.cpp)\nGemma 3 4B — 34 layers, 4 KV heads, head_dim=256",
                  fontsize=14, fontweight="bold")
 
     ax.legend(fontsize=12, loc="upper left")
@@ -86,7 +86,7 @@ def plot_ascii(ctx_lengths, compressed_mb, fp16_mb):
     max_val = max(fp16_mb) if fp16_mb else 1.0
 
     print("\n" + "=" * (WIDTH + 30))
-    print("  KV Cache Memory: TurboQuant Q4 vs FP16 (llama.cpp)")
+    print("  KV Cache Memory: quant.cpp Q4 vs FP16 (llama.cpp)")
     print("  Gemma 3 4B -- 34 layers, 4 KV heads, head_dim=256")
     print("=" * (WIDTH + 30))
     print()

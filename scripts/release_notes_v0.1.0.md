@@ -1,4 +1,4 @@
-## TurboQuant.cpp v0.1.0 — First Release
+## quant.cpp v0.1.0 — First Release
 
 Multi-architecture LLM inference engine in pure C with KV cache compression.
 
@@ -25,20 +25,20 @@ Multi-architecture LLM inference engine in pure C with KV cache compression.
 ```
 Gemma 3 4B at 32K context:
   llama.cpp (FP16 KV):    4,352 MB
-  TurboQuant (Q4 KV):     1,156 MB  ← 3.8x compression
+  quant.cpp (Q4 KV):     1,156 MB  ← 3.8x compression
 ```
 
 ### Quick Start
 
 ```bash
-git clone https://github.com/quantumaikr/TurboQuant.cpp && cd TurboQuant.cpp
+git clone https://github.com/quantumaikr/quant.cpp && cd quant.cpp
 bash scripts/quickstart.sh "What is deep learning?"
 ```
 
 ### What's Inside
 
 - 9,000+ lines of pure C — complete inference engine
-- 8 quantization types: Uniform, Mixed, PolarQuant, QJL, TurboQuant
+- 8 quantization types: Uniform, Mixed, PolarQuant, QJL, quant.cpp
 - Architecture dispatch: Qwen3.5 (DeltaNet + Attention) + Gemma 3 (Sliding Window + GQA)
 - Q4 weight quantization with NEON 2-row batching + thread pool
 - Integer Q4×Q8 attention via ARM vdotq_s32

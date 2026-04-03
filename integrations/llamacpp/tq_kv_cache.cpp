@@ -1,11 +1,11 @@
 /**
- * TurboQuant <-> llama.cpp Integration
+ * quant.cpp <-> llama.cpp Integration
  *
- * This file provides the glue between TurboQuant's quantization types
+ * This file provides the glue between quant.cpp's quantization types
  * and llama.cpp's GGML type system.
  *
  * Integration steps for llama.cpp users:
- * 1. Add TurboQuant as a subdirectory in CMakeLists.txt
+ * 1. Add quant.cpp as a subdirectory in CMakeLists.txt
  * 2. #include "integrations/llamacpp/tq_kv_cache.cpp"
  * 3. Call tq_ggml_register_types() during initialization
  * 4. Use --kv-cache-type turbo3 CLI option
@@ -22,7 +22,7 @@ extern "C" {
 #include <cstdlib>
 
 /* ============================================================
- * GGML type IDs for TurboQuant types
+ * GGML type IDs for quant.cpp types
  *
  * Standard GGML uses IDs 0-40 (as of the current ggml.h).
  * We use IDs starting at 256 to avoid any conflicts with
@@ -370,7 +370,7 @@ tq_status tq_ggml_register_types(void) {
     }
 
     g_tq_registered = 1;
-    fprintf(stderr, "[TurboQuant] Registered %d GGML types (IDs %d..%d)\n",
+    fprintf(stderr, "[quant.cpp] Registered %d GGML types (IDs %d..%d)\n",
             (int)TQ_GGML_NUM_TYPES, GGML_TYPE_TQ_BASE,
             GGML_TYPE_TQ_BASE + (int)TQ_GGML_NUM_TYPES - 1);
 
@@ -381,7 +381,7 @@ tq_status tq_ggml_register_types(void) {
  * CLI option parsing helper
  *
  * Parses --kv-cache-type argument and returns the corresponding
- * TurboQuant type. Returns TQ_TYPE_COUNT on unrecognized input.
+ * quant.cpp type. Returns TQ_TYPE_COUNT on unrecognized input.
  * ============================================================ */
 
 tq_type tq_parse_kv_cache_type(const char* arg) {
@@ -437,9 +437,9 @@ tq_type tq_parse_kv_cache_type(const char* arg) {
     return TQ_TYPE_COUNT;
 }
 
-/* Print all available TurboQuant KV cache types */
+/* Print all available quant.cpp KV cache types */
 void tq_print_kv_cache_types(void) {
-    fprintf(stderr, "Available TurboQuant KV cache types:\n");
+    fprintf(stderr, "Available quant.cpp KV cache types:\n");
     for (int i = 0; i < TQ_TYPE_COUNT; i++) {
         float bpe = tq_type_bpe((tq_type)i);
         fprintf(stderr, "  %-14s  %.1f bpe  %.1fx compression\n",
@@ -451,19 +451,19 @@ void tq_print_kv_cache_types(void) {
 /* ============================================================
  * KV cache integration helpers
  *
- * These wrap TurboQuant's context-based API for use within
+ * These wrap quant.cpp's context-based API for use within
  * llama.cpp's KV cache management code.
  * ============================================================ */
 
 /**
- * Create a TurboQuant context suitable for llama.cpp integration.
+ * Create a quant.cpp context suitable for llama.cpp integration.
  * Caller must free with tq_free().
  */
 tq_context_t* tq_llamacpp_create_context(void) {
     tq_context_t* ctx = nullptr;
     tq_status status = tq_init(&ctx, TQ_BACKEND_AUTO);
     if (status != TQ_OK) {
-        fprintf(stderr, "[TurboQuant] Failed to create context: %s\n",
+        fprintf(stderr, "[quant.cpp] Failed to create context: %s\n",
                 tq_status_string(status));
         return nullptr;
     }
@@ -473,11 +473,11 @@ tq_context_t* tq_llamacpp_create_context(void) {
 /**
  * Quantize a batch of key vectors into the KV cache.
  *
- * @param ctx        TurboQuant context
+ * @param ctx        quant.cpp context
  * @param keys       Input FP32 keys [n_tokens x head_dim]
  * @param n_tokens   Number of tokens to quantize
  * @param head_dim   Dimension per attention head
- * @param type       TurboQuant quantization type
+ * @param type       quant.cpp quantization type
  * @param out        Output buffer (pre-allocated by llama.cpp cache manager)
  * @param out_bytes  Size of output buffer
  * @return           TQ_OK on success
@@ -493,7 +493,7 @@ tq_status tq_llamacpp_quantize_keys(tq_context_t* ctx,
 /**
  * Quantize a batch of value vectors into the KV cache.
  *
- * @param ctx        TurboQuant context
+ * @param ctx        quant.cpp context
  * @param values     Input FP32 values [n_tokens x head_dim]
  * @param n_tokens   Number of tokens
  * @param head_dim   Dimension per head
@@ -513,7 +513,7 @@ tq_status tq_llamacpp_quantize_values(tq_context_t* ctx,
 /**
  * Compute attention scores from quantized KV cache.
  *
- * @param ctx       TurboQuant context
+ * @param ctx       quant.cpp context
  * @param query     Query vector [head_dim]
  * @param kv_cache  Quantized key cache
  * @param seq_len   Sequence length (cached tokens)
@@ -536,7 +536,7 @@ tq_status tq_llamacpp_attention(tq_context_t* ctx,
  * Useful for llama.cpp's memory estimation in --kv-cache-type mode.
  *
  * @param head_dim   Dimension per head
- * @param key_type   TurboQuant key quantization type
+ * @param key_type   quant.cpp key quantization type
  * @param value_bits Value quantization bits (2 or 4), 0 for no value quant
  * @return           Bytes per token per head (key + value)
  */
@@ -566,7 +566,7 @@ void tq_llamacpp_print_config(tq_type key_type, int value_bits,
     size_t fp16_total = fp16_per_token * (size_t)n_heads * (size_t)max_seq_len;
     size_t tq_total   = tq_per_token   * (size_t)n_heads * (size_t)max_seq_len;
 
-    fprintf(stderr, "[TurboQuant] KV cache config:\n");
+    fprintf(stderr, "[quant.cpp] KV cache config:\n");
     fprintf(stderr, "  Key type:        %s\n", tq_type_name(key_type));
     fprintf(stderr, "  Value bits:      %d\n", value_bits > 0 ? value_bits : 16);
     fprintf(stderr, "  Heads:           %d x %d\n", n_heads, head_dim);

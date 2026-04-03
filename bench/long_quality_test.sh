@@ -1,5 +1,5 @@
 #!/bin/bash
-# TurboQuant.cpp — Long Context Quality Test
+# quant.cpp — Long Context Quality Test
 #
 # Runs generation at 200, 500, 1000 tokens and compares:
 #   - uniform_4b (baseline)
@@ -12,12 +12,12 @@
 # Usage:
 #   bash bench/long_quality_test.sh <model.tqm>
 #
-# Requirements: built tq_run binary in build/
+# Requirements: built quant binary in build/
 
 set -e
 
 MODEL="${1:-model.tqm}"
-TQ_RUN="./build/tq_run"
+TQ_RUN="./build/quant"
 THREADS=6
 RESULTS_DIR="bench/long_quality_results"
 
@@ -37,7 +37,7 @@ TOKEN_COUNTS="200 500 1000"
 PROMPT="Explain the history of computing from the earliest mechanical calculators to modern artificial intelligence. Include key inventions, people, and breakthroughs along the way."
 
 echo "============================================================"
-echo "  TurboQuant Long Context Quality Test"
+echo "  quant.cpp Long Context Quality Test"
 echo "============================================================"
 echo ""
 echo "  Model:        $MODEL"

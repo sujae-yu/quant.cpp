@@ -1,7 +1,7 @@
 /**
- * TurboQuant.cpp -- Memory Usage Benchmark
+ * quant.cpp -- Memory Usage Benchmark
  *
- * Measures KV cache memory consumption for FP32, FP16, and each TurboQuant
+ * Measures KV cache memory consumption for FP32, FP16, and each quant.cpp
  * quantization type across various sequence lengths (1K, 4K, 16K, 64K).
  *
  * Output format (machine-readable):
@@ -65,7 +65,7 @@ static size_t fp16_memory(int seq_len) {
 }
 
 /**
- * Compute KV cache memory for a TurboQuant type.
+ * Compute KV cache memory for a quant.cpp type.
  * Keys: tq_quantize_keys_size(seq_len * num_heads, head_dim, type)
  * Values: tq_quantize_values_size(seq_len * num_heads, head_dim, bits)
  *         or FP16 if value_bits == 0
@@ -99,7 +99,7 @@ static const char* format_bytes(size_t bytes) {
 }
 
 int main() {
-    printf("# TurboQuant Memory Benchmark\n");
+    printf("# quant.cpp Memory Benchmark\n");
     printf("# HEAD_DIM=%d, NUM_HEADS=%d\n", HEAD_DIM, NUM_HEADS);
     printf("# Model config: similar to Llama-3-8B (per layer)\n\n");
 

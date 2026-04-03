@@ -1,4 +1,4 @@
-# TurboQuant.cpp v1.2 PRD — From Research to Adoption
+# quant.cpp v1.2 PRD — From Research to Adoption
 
 **Version**: 1.2
 **Date**: 2026-04-03
@@ -18,14 +18,14 @@
 
 ## Problem
 
-TurboQuant is a proven algorithm trapped in a standalone engine. The community can't use it without building from source and abandoning their existing tools. To reach 1000+ stars, the algorithm must live inside tools people already use.
+quant.cpp is a proven algorithm trapped in a standalone engine. The community can't use it without building from source and abandoning their existing tools. To reach 1000+ stars, the algorithm must live inside tools people already use.
 
 ## Objectives
 
 | # | Objective | Success Metric | Priority |
 |---|-----------|---------------|----------|
 | O1 | llama.cpp integration works end-to-end | `--cache-type-k tq_1b` produces correct output in llama.cpp fork | P0 |
-| O2 | Standard benchmark proves the claim | WikiText-2 PPL: TurboQuant 1b ≤ llama.cpp Q4 KV | P0 |
+| O2 | Standard benchmark proves the claim | WikiText-2 PPL: quant.cpp 1b ≤ llama.cpp Q4 KV | P0 |
 | O3 | Killer demo that goes viral | 128K context on 16GB Mac, GIF/video posted | P1 |
 | O4 | One-command experience | `docker run` or `pip install` → working demo | P1 |
 | O5 | Academic credibility | arXiv paper with standard benchmarks | P2 |
@@ -41,7 +41,7 @@ TurboQuant is a proven algorithm trapped in a standalone engine. The community c
 
 ## Phase 1: llama.cpp Fork (Days 1-3)
 
-**Goal**: TurboQuant KV working inside llama.cpp, not our engine.
+**Goal**: quant.cpp KV working inside llama.cpp, not our engine.
 
 1. Fork llama.cpp, apply our integration patch
 2. Add GGML_TYPE_TQ_KV_1B to ggml.h
@@ -50,7 +50,7 @@ TurboQuant is a proven algorithm trapped in a standalone engine. The community c
 5. Build and run: `./llama-cli -m llama3-8b.gguf --cache-type-k tq_1b -p "Hello"`
 6. Verify: PPL matches baseline on WikiText-2
 
-**Deliverable**: GitHub repo `quantumaikr/llama.cpp` fork with TurboQuant KV
+**Deliverable**: GitHub repo `quantumaikr/llama.cpp` fork with quant.cpp KV
 
 ## Phase 2: Standard Benchmarks (Days 3-5)
 
@@ -60,8 +60,8 @@ TurboQuant is a proven algorithm trapped in a standalone engine. The community c
    - llama.cpp FP16 KV (baseline)
    - llama.cpp Q4_0 KV
    - llama.cpp Q8_0 KV
-   - TurboQuant 1-bit KV
-   - TurboQuant 1-bit K + Q4 V
+   - quant.cpp 1-bit KV
+   - quant.cpp 1-bit K + Q4 V
 
 2. Memory measurement at 32K context:
    - RSS for each configuration

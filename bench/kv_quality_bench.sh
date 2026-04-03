@@ -1,7 +1,7 @@
 #!/bin/bash
 # KV Cache Quality Benchmark — Reproducible verification
 #
-# Tests TurboQuant KV cache quality at short (100 tokens) and longer (200+) contexts.
+# Tests quant.cpp KV cache quality at short (100 tokens) and longer (200+) contexts.
 # Short context: typically byte-identical to uniform baseline.
 # Longer context: outputs diverge but remain coherent (expected behavior).
 #
@@ -9,12 +9,12 @@
 #
 # Run: bash bench/kv_quality_bench.sh <model.tqm>
 #
-# Requirements: built tq_run binary in build/
+# Requirements: built quant binary in build/
 
 set -e
 
 MODEL="${1:-model.tqm}"
-TQ_RUN="./build/tq_run"
+TQ_RUN="./build/quant"
 THREADS=6
 RESULTS_DIR="bench/kv_quality_results"
 
@@ -53,7 +53,7 @@ FAIL=0
 DIVERGED=0
 
 echo "============================================================"
-echo "  TurboQuant KV Cache Quality Benchmark"
+echo "  quant.cpp KV Cache Quality Benchmark"
 echo "============================================================"
 echo ""
 echo "Model:    $MODEL"

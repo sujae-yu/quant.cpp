@@ -1,4 +1,4 @@
-# TurboQuant.cpp — PRD v0.9: llama.cpp 속도 돌파
+# quant.cpp — PRD v0.9: llama.cpp 속도 돌파
 
 **Target**: 현재 15 tok/s → **40+ tok/s** (llama.cpp 수준)
 

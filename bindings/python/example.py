@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-TurboQuant.cpp -- CLI Wrapper Example
+quant.cpp -- CLI Wrapper Example
 
 Demonstrates the subprocess-based Python bindings that call the quant binary.
 No C FFI, no NumPy, no shared library -- just a model file and the quant binary.
@@ -20,7 +20,7 @@ import os
 # Allow running from project root or bindings/python/
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from turboquant_cli import TurboQuant
+from turboquant_cli import quant.cpp
 
 
 def main():
@@ -41,7 +41,7 @@ def main():
     # Initialize
     print(f"Loading model: {model_path}")
     print(f"KV cache type: {kv_type}")
-    tq = TurboQuant(model_path, kv_type=kv_type)
+    tq = quant.cpp(model_path, kv_type=kv_type)
     print(tq)
     print()
 

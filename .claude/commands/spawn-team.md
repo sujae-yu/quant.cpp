@@ -24,7 +24,7 @@ Do NOT spawn workers. Tell the user: "Foundation phase should be done with `/dev
 
 #### Phase: algorithms (score 0.05 ~ 0.30)
 ```bash
-clawteam team spawn-team tq-alg -d "TurboQuant core algorithms"
+clawteam team spawn-team tq-alg -d "quant.cpp core algorithms"
 
 clawteam spawn --team tq-alg --agent-name polar --workspace --repo . \
   --task "Implement PolarQuant algorithm. Read CLAUDE.md for full context. Read refs/PolarQuant/models/modeling_llama_polar.py lines 135-157 and refs/PolarQuant/models/kernel4group.py lines 14-81 for the algorithm. Create src/core/tq_polar.c with tq_polar_quantize_ref(), tq_polar_dequantize_ref(), tq_polar_attention_ref(). Create tests/test_polar.cpp with Google Test. Run bash score.sh --quick to verify. ONLY modify: src/core/tq_polar.*, tests/test_polar.*"
@@ -38,10 +38,10 @@ clawteam spawn --team tq-alg --agent-name uniform --workspace --repo . \
 
 #### Phase: advanced (score 0.30 ~ 0.60)
 ```bash
-clawteam team spawn-team tq-adv -d "TurboQuant advanced features"
+clawteam team spawn-team tq-adv -d "quant.cpp advanced features"
 
 clawteam spawn --team tq-adv --agent-name turbo --workspace --repo . \
-  --task "Implement TurboQuant composite (PolarQuant + QJL). Read CLAUDE.md. Create src/core/tq_turbo.c combining polar stage 1 + qjl residual stage 2. Create tests/test_turbo.cpp. ONLY modify: src/core/tq_turbo.*, tests/test_turbo.*"
+  --task "Implement quant.cpp composite (PolarQuant + QJL). Read CLAUDE.md. Create src/core/tq_turbo.c combining polar stage 1 + qjl residual stage 2. Create tests/test_turbo.cpp. ONLY modify: src/core/tq_turbo.*, tests/test_turbo.*"
 
 clawteam spawn --team tq-adv --agent-name cache --workspace --repo . \
   --task "Implement paged cache and progressive compression. Read CLAUDE.md. Read refs/vllm/csrc/cache_kernels.cu for patterns. Create src/cache/tq_paged_cache.c and src/cache/tq_progressive.c with tests. ONLY modify: src/cache/**, tests/test_paged_cache.*, tests/test_progressive.*"

@@ -28,7 +28,7 @@ extern "C" {
 void tq_uniform_4b_quantize_ref(const float* src, void* dst, int n);
 void tq_uniform_4b_dequantize_ref(const void* src, float* dst, int n);
 
-/* TurboQuant KV 1-bit */
+/* quant.cpp KV 1-bit */
 void tq_turbo_kv_1b_quantize_ref(const float* src, void* dst, int n);
 void tq_turbo_kv_1b_attention_ref(const float* query, const void* kv,
                                     float* scores, int seq_len, int head_dim);

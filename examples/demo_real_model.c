@@ -1,5 +1,5 @@
 /**
- * TurboQuant.cpp — Real Model KV Cache Compression Demo
+ * quant.cpp — Real Model KV Cache Compression Demo
  *
  * Simulates KV cache compression for actual LLM architectures:
  *   - Qwen3.5-0.5B  (24 layers, 14 KV heads, head_dim=64)
@@ -168,7 +168,7 @@ int main(int argc, char** argv) {
 
     printf("\n");
     printf("╔══════════════════════════════════════════════════════════════╗\n");
-    printf("║         TurboQuant.cpp — Real Model Demo v%s           ║\n", TQ_VERSION_STRING);
+    printf("║         quant.cpp — Real Model Demo v%s           ║\n", TQ_VERSION_STRING);
     printf("║         KV Cache Compression for LLM Inference              ║\n");
     printf("╚══════════════════════════════════════════════════════════════╝\n");
     printf("\n");

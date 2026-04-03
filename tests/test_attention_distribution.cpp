@@ -1,9 +1,9 @@
 /**
  * test_attention_distribution.cpp -- Attention score distribution preservation
  *
- * Proves that TurboQuant KV cache compression preserves the full attention
+ * Proves that quant.cpp KV cache compression preserves the full attention
  * score distribution, not just argmax. Also proves compression is non-trivial
- * (random K breaks attention immediately) and shows TurboQuant's advantage
+ * (random K breaks attention immediately) and shows quant.cpp's advantage
  * over uniform at the same effective bit-width.
  *
  * Metrics:
@@ -162,7 +162,7 @@ protected:
 /* ============================================================
  * Task 2: Attention Score Distribution Comparison
  *
- * Shows that TurboQuant preserves attention score RANKING and
+ * Shows that quant.cpp preserves attention score RANKING and
  * distribution, not just argmax.
  * ============================================================ */
 
@@ -257,12 +257,12 @@ TEST_F(AttentionDistribution, TurboKV1BPreservesDistribution) {
 }
 
 /* ============================================================
- * Task 3: K=Random Baseline (proves TurboQuant is non-trivial)
+ * Task 3: K=Random Baseline (proves quant.cpp is non-trivial)
  *
  * Replacing keys with random values should immediately break
- * attention scores. If TurboQuant gave identical results with
+ * attention scores. If quant.cpp gave identical results with
  * random K, it would mean "K doesn't matter". This test proves
- * that K absolutely matters and TurboQuant preserves the right
+ * that K absolutely matters and quant.cpp preserves the right
  * structure.
  * ============================================================ */
 
@@ -296,7 +296,7 @@ TEST_F(AttentionDistribution, RandomKeysBreakAttention) {
     EXPECT_LT(std::abs(spearman_random), 0.7)
         << "Random keys unexpectedly rank-correlated";
 
-    /* Now verify that TurboQuant has MUCH higher correlation */
+    /* Now verify that quant.cpp has MUCH higher correlation */
     std::vector<block_tq_turbo_kv_3b> kv_blocks(SEQ_LEN);
     for (int s = 0; s < SEQ_LEN; s++) {
         tq_turbo_kv_3b_quantize_ref(keys[s].data(), &kv_blocks[s], DIM);
@@ -308,9 +308,9 @@ TEST_F(AttentionDistribution, RandomKeysBreakAttention) {
     double cos_tkv = cosine_similarity(fp32_scores.data(), tkv3_scores.data(), SEQ_LEN);
     printf("  turbo_kv_3b cosine=%.4f vs random cosine=%.4f\n", cos_tkv, cos_random);
 
-    /* TurboQuant must be significantly better than random */
+    /* quant.cpp must be significantly better than random */
     EXPECT_GT(cos_tkv, std::abs(cos_random) + 0.3)
-        << "TurboQuant not significantly better than random keys";
+        << "quant.cpp not significantly better than random keys";
 }
 
 TEST_F(AttentionDistribution, RandomKeys1BBreakAttention) {
@@ -353,11 +353,11 @@ TEST_F(AttentionDistribution, RandomKeys1BBreakAttention) {
 }
 
 /* ============================================================
- * Task 4: Same-bit Quality Comparison (TurboQuant vs Uniform)
+ * Task 4: Same-bit Quality Comparison (quant.cpp vs Uniform)
  *
- * Compares TurboQuant 3-bit (2-bit codebook + 1-bit QJL) against
+ * Compares quant.cpp 3-bit (2-bit codebook + 1-bit QJL) against
  * uniform 2-bit (just top/bottom 4 bins). At the same effective
- * "low-bit" compression, TurboQuant should produce better attention
+ * "low-bit" compression, quant.cpp should produce better attention
  * scores thanks to RHT + Lloyd-Max + QJL correction.
  * ============================================================ */
 
@@ -377,7 +377,7 @@ TEST_F(AttentionDistribution, TurboKV3BvsUniform2B_SameBitWidth) {
         u2_scores[s] = dot;
     }
 
-    /* --- TurboQuant 3-bit attention scores (via native attention) --- */
+    /* --- quant.cpp 3-bit attention scores (via native attention) --- */
     std::vector<block_tq_turbo_kv_3b> kv_blocks(SEQ_LEN);
     for (int s = 0; s < SEQ_LEN; s++) {
         tq_turbo_kv_3b_quantize_ref(keys[s].data(), &kv_blocks[s], DIM);
@@ -399,10 +399,10 @@ TEST_F(AttentionDistribution, TurboKV3BvsUniform2B_SameBitWidth) {
            cos_u2, spearman_u2, mse_u2);
     printf("  turbo_kv_3b:  cosine=%.4f, spearman=%.4f, mse=%.4f\n",
            cos_tkv3, spearman_tkv3, mse_tkv3);
-    printf("  TurboQuant advantage: cosine +%.4f, spearman +%.4f\n",
+    printf("  quant.cpp advantage: cosine +%.4f, spearman +%.4f\n",
            cos_tkv3 - cos_u2, spearman_tkv3 - spearman_u2);
 
-    /* TurboQuant 3-bit should match or beat uniform 2-bit on cosine.
+    /* quant.cpp 3-bit should match or beat uniform 2-bit on cosine.
      * The QJL residual and RHT provide inner product estimation that
      * uniform quantization cannot achieve at the same bit budget. */
     EXPECT_GT(cos_tkv3, 0.70)
@@ -416,7 +416,7 @@ TEST_F(AttentionDistribution, TurboKV3BvsUniform2B_SameBitWidth) {
 /* ============================================================
  * Task 4 extra: 4-bit comparison (Uniform 4-bit vs TurboKV 3-bit)
  *
- * Shows that TurboQuant with fewer bits can match or approach
+ * Shows that quant.cpp with fewer bits can match or approach
  * uniform with more bits.
  * ============================================================ */
 

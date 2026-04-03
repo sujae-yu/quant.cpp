@@ -1,6 +1,6 @@
 # Release Notes
 
-All notable changes to TurboQuant.cpp are documented here.
+All notable changes to quant.cpp are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
@@ -16,7 +16,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 #### Real-Model Validation (Phase A)
 - **Perplexity pipeline** (`--ppl <file>`): Teacher-forced PPL measurement. Gemma 4B results: 1-bit K + Q4 V PPL = 36.00 vs FP16 PPL = 35.99 — **+0.03% degradation** (effectively lossless).
-- **Formal unbiasedness** (`tests/test_unbiased.cpp`): 100K random vector pairs prove all TurboQuant types have < 0.2% relative bias. The "unbiased inner product" claim is empirically verified.
+- **Formal unbiasedness** (`tests/test_unbiased.cpp`): 100K random vector pairs prove all quant.cpp types have < 0.2% relative bias. The "unbiased inner product" claim is empirically verified.
 - **Activation profiling** (`--profile-kv`): Per-layer pre/post-RHT distribution statistics. RHT reduces kurtosis from 10-99 to 3.9-7.9 and eliminates skewness. Honest finding: post-RHT is not perfectly Gaussian.
 - **Memory bandwidth benchmark** (`--bench-memory`): tok/s vs context length across KV types.
 
@@ -121,7 +121,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Highlights
 
-**Initial release** — pure C inference engine with TurboQuant KV cache compression. 1-bit keys, 10.7x key compression, byte-identical greedy output at 100 tokens.
+**Initial release** — pure C inference engine with quant.cpp KV cache compression. 1-bit keys, 10.7x key compression, byte-identical greedy output at 100 tokens.
 
 ### Added
 
@@ -133,13 +133,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - TQM binary format: pre-quantized mmap, instant loading.
 
 #### KV Cache Quantization (11 types)
-- **TurboQuant KV 1-bit**: Sign-only after RHT. XOR + popcount attention (NEON `vcntq_u8`).
-- **TurboQuant KV 3-bit**: 2-bit Lloyd-Max codebook + 1-bit QJL residual.
-- **TurboQuant KV 4-bit**: 3-bit codebook + 1-bit QJL.
+- **quant.cpp KV 1-bit**: Sign-only after RHT. XOR + popcount attention (NEON `vcntq_u8`).
+- **quant.cpp KV 3-bit**: 2-bit Lloyd-Max codebook + 1-bit QJL residual.
+- **quant.cpp KV 4-bit**: 3-bit codebook + 1-bit QJL.
 - **Uniform 4-bit / 2-bit**: Standard min-max quantization.
 - **PolarQuant**: Polar coordinate (theta + radius) quantization.
 - **QJL**: Quantized Johnson-Lindenstrauss sign hash.
-- **Mixed / TurboQuant base**: Combined polar + QJL.
+- **Mixed / quant.cpp base**: Combined polar + QJL.
 
 #### Weight Quantization
 - Q4 weight quantization (4-bit per-block).

@@ -1,5 +1,5 @@
 /**
- * TurboQuant.cpp -- Throughput Benchmark
+ * quant.cpp -- Throughput Benchmark
  *
  * Measures tokens/second for different quantization types across batch sizes.
  * Simulates an inference-like workload: quantize keys, then run attention.
@@ -228,7 +228,7 @@ int main() {
     for (size_t i = 0; i < input_keys.size(); i++) input_keys[i] = rand_float();
     for (size_t i = 0; i < queries.size(); i++) queries[i] = rand_float();
 
-    printf("# TurboQuant Throughput Benchmark\n");
+    printf("# quant.cpp Throughput Benchmark\n");
     printf("# HEAD_DIM=%d, SEQ_LEN=%d, N_ITERS=%d\n", HEAD_DIM, SEQ_LEN, N_ITERS);
 #ifdef __ARM_NEON
     printf("# NEON: enabled\n");

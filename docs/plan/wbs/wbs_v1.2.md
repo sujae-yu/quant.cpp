@@ -1,4 +1,4 @@
-# TurboQuant.cpp — Work Breakdown Structure v1.2
+# quant.cpp — Work Breakdown Structure v1.2
 
 **Version**: 1.2
 **Date**: 2026-04-03
@@ -10,7 +10,7 @@
 
 ### 1.1 Fork Setup (~2h)
 - [ ] Fork ggerganov/llama.cpp to quantumaikr/llama.cpp
-- [ ] Clone fork locally alongside TurboQuant.cpp
+- [ ] Clone fork locally alongside quant.cpp
 - [ ] Build baseline llama.cpp: `cmake -B build && cmake --build build`
 - [ ] Verify baseline works: `./build/bin/llama-cli -m model.gguf -p "Hello"`
 
@@ -67,7 +67,7 @@
 | FP16 KV (baseline) | 256 bytes | ? |
 | llama.cpp Q8_0 KV | 128 bytes | ? |
 | llama.cpp Q4_0 KV | 64 bytes | ? |
-| **TurboQuant 1-bit K** | **24 bytes** | **?** |
+| **quant.cpp 1-bit K** | **24 bytes** | **?** |
 
 - [ ] Measure memory: `vmstat` or `/proc/self/status` during inference
 - [ ] Create comparison chart (ASCII or markdown)
@@ -96,7 +96,7 @@
 - [ ] Create `scripts/demo_long_context.sh`:
   ```bash
   # Shows: load book → ask question → get answer → show memory
-  ./build/tq_run model.gguf \
+  ./build/quant model.gguf \
     --ctx 65536 -k turbo_kv_1b -v q4 \
     -p "$(cat book.txt) \n\nSummarize the key themes:" \
     -n 200 -M

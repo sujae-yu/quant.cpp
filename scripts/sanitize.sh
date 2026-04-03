@@ -1,5 +1,5 @@
 #!/bin/bash
-# TurboQuant.cpp — Address Sanitizer + Undefined Behavior Sanitizer validation
+# quant.cpp — Address Sanitizer + Undefined Behavior Sanitizer validation
 #
 # Builds with -fsanitize=address,undefined, runs all tests, and optionally
 # runs a short inference to catch memory errors.
@@ -19,7 +19,7 @@ MODEL="${1:-}"
 NCPU=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)
 
 echo "============================================================"
-echo "  TurboQuant.cpp — Sanitizer Validation"
+echo "  quant.cpp — Sanitizer Validation"
 echo "============================================================"
 echo ""
 echo "  Build dir:  $BUILD_DIR"
@@ -69,7 +69,7 @@ echo "  All tests passed under sanitizers."
 if [ -n "$MODEL" ] && [ -f "$MODEL" ]; then
     echo ""
     echo "[bonus] Running short inference under sanitizers..."
-    TQ_RUN="$BUILD_DIR/tq_run"
+    TQ_RUN="$BUILD_DIR/quant"
     if [ -f "$TQ_RUN" ]; then
         ASAN_OPTIONS="detect_leaks=1:halt_on_error=1" \
         UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1" \

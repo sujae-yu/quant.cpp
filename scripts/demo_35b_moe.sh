@@ -1,9 +1,9 @@
 #!/bin/bash
 # ============================================================
-# TurboQuant.cpp — Qwen3.5-35B-A3B MoE Demo (16GB Mac)
+# quant.cpp — Qwen3.5-35B-A3B MoE Demo (16GB Mac)
 #
 # Demonstrates running a 35B MoE model on 16GB RAM with
-# TurboQuant KV cache compression for extended context.
+# quant.cpp KV cache compression for extended context.
 #
 # Requirements:
 #   - Mac with Apple Silicon (M1/M2/M3/M4), 16GB+ RAM
@@ -22,13 +22,13 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 echo -e "${CYAN}============================================================${NC}"
-echo -e "${CYAN}  TurboQuant.cpp — 35B MoE Demo on 16GB Mac${NC}"
+echo -e "${CYAN}  quant.cpp — 35B MoE Demo on 16GB Mac${NC}"
 echo -e "${CYAN}============================================================${NC}"
 echo ""
 
 # Build if needed
-if [ ! -f build/tq_run ]; then
-    echo "Building TurboQuant..."
+if [ ! -f build/quant ]; then
+    echo "Building quant.cpp..."
     cmake -B build -DCMAKE_BUILD_TYPE=Release 2>&1 | tail -1
     cmake --build build -j$(sysctl -n hw.ncpu 2>/dev/null || nproc) 2>&1 | tail -1
 fi
@@ -40,15 +40,15 @@ if [ ! -f "$SMALL_MODEL" ]; then
 fi
 
 # === Demo 1: KV Compression Quality ===
-echo -e "\n${GREEN}[Demo 1] TurboQuant KV Compression — Zero Quality Loss${NC}"
-echo "Comparing output with FP32 vs TurboQuant 3-bit KV + Q2 V cache:"
+echo -e "\n${GREEN}[Demo 1] quant.cpp KV Compression — Zero Quality Loss${NC}"
+echo "Comparing output with FP32 vs quant.cpp 3-bit KV + Q2 V cache:"
 echo ""
 
 echo -e "  ${CYAN}FP32 KV (baseline):${NC}"
-./build/tq_run "$SMALL_MODEL" -p "The capital of France is" -n 15 -k fp32 2>&1 | grep -A1 "^---" | head -2 | sed 's/^/    /'
+./build/quant "$SMALL_MODEL" -p "The capital of France is" -n 15 -k fp32 2>&1 | grep -A1 "^---" | head -2 | sed 's/^/    /'
 
-echo -e "  ${CYAN}TurboQuant 3b K + Q2 V (7.4x compression):${NC}"
-./build/tq_run "$SMALL_MODEL" -p "The capital of France is" -n 15 -k turbo_kv_3b -V 2 2>&1 | grep -A1 "^---" | head -2 | sed 's/^/    /'
+echo -e "  ${CYAN}quant.cpp 3b K + Q2 V (7.4x compression):${NC}"
+./build/quant "$SMALL_MODEL" -p "The capital of France is" -n 15 -k turbo_kv_3b -V 2 2>&1 | grep -A1 "^---" | head -2 | sed 's/^/    /'
 
 echo ""
 echo "  Result: Byte-identical output at 7.4x KV compression!"
@@ -68,14 +68,14 @@ echo "  │  32,768 tok  │  5.00 GB     │   276 MB     │  18.6x    │"
 echo "  │ 131,072 tok  │ 20.00 GB     │  1.08 GB     │  18.6x    │"
 echo "  └──────────────┴──────────────┴──────────────┴───────────┘"
 echo ""
-echo "  Without TurboQuant: max ~32K context (5GB KV fills 16GB RAM)"
-echo "  With TurboQuant:    131K context (1GB KV, 11GB headroom)"
+echo "  Without quant.cpp: max ~32K context (5GB KV fills 16GB RAM)"
+echo "  With quant.cpp:    131K context (1GB KV, 11GB headroom)"
 
 # === Demo 3: 35B MoE Inference ===
 if [ -f "$MODEL" ]; then
     echo -e "\n${GREEN}[Demo 3] 35B MoE Inference on 16GB Mac${NC}"
     echo "  Loading 35B-A3B model (9.9GB, mmap'd)..."
-    ./build/tq_run "$MODEL" -p "Hello" -n 5 -k turbo_kv_3b 2>&1 | tail -5
+    ./build/quant "$MODEL" -p "Hello" -n 5 -k turbo_kv_3b 2>&1 | tail -5
     echo ""
     echo "  RSS: ~4.7GB (model weights demand-paged from SSD)"
 else
@@ -84,6 +84,6 @@ else
 fi
 
 echo -e "\n${CYAN}============================================================${NC}"
-echo -e "${CYAN}  TurboQuant.cpp — 18.6x KV compression, zero quality loss${NC}"
-echo -e "${CYAN}  https://github.com/quantmaikr/TurboQuant.cpp${NC}"
+echo -e "${CYAN}  quant.cpp — 18.6x KV compression, zero quality loss${NC}"
+echo -e "${CYAN}  https://github.com/quantmaikr/quant.cpp${NC}"
 echo -e "${CYAN}============================================================${NC}"

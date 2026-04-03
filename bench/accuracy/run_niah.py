@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-TurboQuant.cpp -- Needle-in-a-Haystack (NIAH) Benchmark
+quant.cpp -- Needle-in-a-Haystack (NIAH) Benchmark
 
-This script evaluates whether TurboQuant KV cache quantization preserves
+This script evaluates whether quant.cpp KV cache quantization preserves
 the model's ability to retrieve specific information ("needles") placed
 at various positions within long contexts ("haystacks").
 
@@ -128,7 +128,7 @@ def generate_mock_results(context_lengths: List[int]) -> Dict:
 
     Simulates realistic accuracy patterns:
     - FP16: near-perfect at all lengths
-    - TurboQuant 3b/4b: near-perfect, slight degradation at very long contexts
+    - quant.cpp 3b/4b: near-perfect, slight degradation at very long contexts
     - Polar 4b: good, minor degradation
     - Uniform 4b: moderate degradation at long contexts
     - QJL 1b: noticeable degradation, especially at long contexts
@@ -200,7 +200,7 @@ def run_real_benchmark(model_name: str, context_lengths: List[int],
                        output_dir: str) -> Dict:
     """Run the real NIAH benchmark with model inference.
 
-    Requires: GPU, transformers library, TurboQuant Python bindings.
+    Requires: GPU, transformers library, quant.cpp Python bindings.
     """
     try:
         from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -349,7 +349,7 @@ def save_results(results: Dict, output_dir: str) -> str:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="TurboQuant Needle-in-a-Haystack Benchmark"
+        description="quant.cpp Needle-in-a-Haystack Benchmark"
     )
     parser.add_argument(
         "--model", type=str, default="meta-llama/Llama-3-8B",
@@ -389,7 +389,7 @@ def main():
         turbo3 = results["summary"].get("turbo_3b", {})
         min_acc = turbo3.get("min_accuracy", 1.0)
         if min_acc < 0.80:
-            print(f"\nWARNING: TurboQuant 3b min accuracy ({min_acc:.0%}) "
+            print(f"\nWARNING: quant.cpp 3b min accuracy ({min_acc:.0%}) "
                   f"below 80% threshold")
             return 1
     return 0
