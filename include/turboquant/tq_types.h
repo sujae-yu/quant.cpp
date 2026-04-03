@@ -174,8 +174,8 @@ typedef struct {
     tq_type          residual_type;  /* pairing for composite types */
 } tq_type_traits_t;
 
-/* Global traits table — initialized by tq_init() */
-extern const tq_type_traits_t TQ_TRAITS[TQ_TYPE_COUNT];
+/* Global traits table — GPU backends (Vulkan/Metal) override at runtime */
+extern tq_type_traits_t TQ_TRAITS[TQ_TYPE_COUNT];
 
 /* ============================================================
  * Cache block header (for paged cache)

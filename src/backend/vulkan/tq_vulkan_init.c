@@ -463,11 +463,37 @@ int tq_init_vulkan_backend(void) {
     if (tq_vk_create_pipeline_layout() != 0)   return -1;
     if (tq_vk_create_pipelines() != 0)         return -1;
 
-    printf("TQ Vulkan: Initialized on %s (subgroup size %u)\n",
+    fprintf(stderr, "quant.cpp Vulkan: Initialized on %s (subgroup size %u)\n",
            g_vk_state.device_name, g_vk_state.subgroup_size);
 
     g_vk_state.initialized = 1;
+
+    /* Override TQ_TRAITS with Vulkan-accelerated quantize/attention functions.
+     * This makes KV cache operations automatically use GPU when available. */
+    tq_vulkan_override_traits();
+
     return 0;
+}
+
+/* Override CPU traits with Vulkan GPU functions where available */
+void tq_vulkan_override_traits(void) {
+    extern tq_type_traits_t TQ_TRAITS[];
+    for (int i = 0; i < TQ_TYPE_COUNT; i++) {
+        void* vk_quant = tq_vulkan_get_quantize_fn(i);
+        void* vk_attn  = tq_vulkan_get_attention_fn(i);
+        if (vk_quant) {
+            void (*fn)(const float*, void*, int);
+            memcpy(&fn, &vk_quant, sizeof(fn));
+            TQ_TRAITS[i].quantize = fn;
+            fprintf(stderr, "  Vulkan: GPU-accelerated quantize for %s\n", TQ_TRAITS[i].name);
+        }
+        if (vk_attn) {
+            void (*fn)(const float*, const void*, float*, int, int);
+            memcpy(&fn, &vk_attn, sizeof(fn));
+            TQ_TRAITS[i].attention = fn;
+            fprintf(stderr, "  Vulkan: GPU-accelerated attention for %s\n", TQ_TRAITS[i].name);
+        }
+    }
 }
 
 void tq_shutdown_vulkan_backend(void) {

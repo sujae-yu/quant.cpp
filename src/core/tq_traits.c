@@ -58,7 +58,8 @@ extern void tq_turbo_kv_2b_dequantize_ref(const void* src, float* dst, int n);
 extern void tq_turbo_kv_2b_attention_ref(const float* query, const void* kv,
                                           float* scores, int seq_len, int head_dim);
 
-const tq_type_traits_t TQ_TRAITS[TQ_TYPE_COUNT] = {
+/* Non-const to allow runtime GPU backend override (Vulkan/Metal) */
+tq_type_traits_t TQ_TRAITS[TQ_TYPE_COUNT] = {
     [TQ_TYPE_POLAR_3B] = {
         .name       = "polar_3b",
         .block_size = TQ_BK,

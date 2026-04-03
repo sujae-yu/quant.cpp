@@ -270,6 +270,16 @@ int main(int argc, char** argv) {
         tq_quantize_weights(model);
     }
 
+    /* GPU backend detection and initialization */
+#ifdef TQ_BUILD_VULKAN
+    {
+        extern int tq_init_vulkan_backend(void);
+        if (tq_init_vulkan_backend() == 0) {
+            fprintf(stderr, "Vulkan backend: ready (KV cache quantization on GPU)\n");
+        }
+    }
+#endif
+
     if (info_only) {
         tq_free_model(model);
         return 0;
