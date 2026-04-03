@@ -2881,6 +2881,11 @@ tq_model_t* tq_load_gguf(const char* path) {
                                tq_gguf_get_f32(gguf, GGUF_KEY("rope.local.freq_base"),
                                tq_gguf_get_f32(gguf, GGUF_KEY("rope.freq_base"), 10000.0f)));
     c->final_logit_softcap = tq_gguf_get_f32(gguf, GGUF_KEY("final_logit_softcapping"), 0.0f);
+    c->attn_logit_softcap = tq_gguf_get_f32(gguf, GGUF_KEY("attn_logit_softcapping"), 0.0f);
+    /* Gemma 2/3/4 use attention softcap but it may not be in metadata — hardcode */
+    if (c->model_type == 1 && c->attn_logit_softcap == 0.0f) {
+        c->attn_logit_softcap = 50.0f;
+    }
 
     /* Cap context for memory safety on small machines.
      * GGUF models often claim 262K context but we cap at 4096 by default.
@@ -3548,6 +3553,17 @@ tq_model_t* tq_load_gguf(const char* path) {
         model->output_norm = dequant_tensor_fp32(onorm_t);
         if (c->model_type == 1 && !gemma_norms_adjusted) {
             for (int i = 0; i < c->hidden_dim; i++) model->output_norm[i] += 1.0f;
+        }
+    }
+
+    /* Learned RoPE frequencies (Gemma 4): pre-computed inv_freq values */
+    {
+        const tq_gguf_tensor_t* rope_t = find_gguf_tensor(gguf, "rope_freqs.weight");
+        if (rope_t) {
+            model->rope_freqs = dequant_tensor_fp32(rope_t);
+            model->rope_freqs_len = (int)rope_t->shape[0];
+            fprintf(stderr, "tq_load_gguf: loaded learned RoPE frequencies (%d values)\n",
+                    model->rope_freqs_len);
         }
     }
 

@@ -143,6 +143,12 @@ tq_state_t* tq_create_state_ex(const tq_model_config_t* config, tq_type kv_type,
     int max_seq = config->max_seq_len;
     int n_layers = config->n_layers;
 
+    /* For hybrid attention (Gemma 4), full layers have larger kv_dim.
+     * Allocate K/V buffers and KV cache with the MAX of sliding and full kv_dim. */
+    int full_kv_dim = (config->full_n_kv_heads > 0 && config->full_head_dim > 0)
+        ? config->full_n_kv_heads * config->full_head_dim : kv_dim;
+    int max_kv_dim = (full_kv_dim > kv_dim) ? full_kv_dim : kv_dim;
+
     tq_state_t* s = (tq_state_t*)calloc(1, sizeof(tq_state_t));
     if (!s) return NULL;
 
@@ -171,15 +177,15 @@ tq_state_t* tq_create_state_ex(const tq_model_config_t* config, tq_type kv_type,
     s->xb     = (float*)calloc((size_t)max_dim, sizeof(float));
     s->xb2    = (float*)calloc((size_t)max_dim, sizeof(float));
     s->q      = (float*)calloc((size_t)max_q_dim, sizeof(float));
-    s->k      = (float*)calloc((size_t)kv_dim, sizeof(float));
-    s->v      = (float*)calloc((size_t)kv_dim, sizeof(float));
+    s->k      = (float*)calloc((size_t)max_kv_dim, sizeof(float));
+    s->v      = (float*)calloc((size_t)max_kv_dim, sizeof(float));
     s->att    = (float*)calloc((size_t)n_heads * max_seq, sizeof(float));
     s->hb     = (float*)calloc((size_t)inter_dim, sizeof(float));
     s->hb2    = (float*)calloc((size_t)inter_dim, sizeof(float));
     s->logits = (float*)calloc((size_t)config->vocab_size, sizeof(float));
 
-    /* KV cache for self_attn layers */
-    size_t kv_layer_size = (size_t)max_seq * kv_dim;
+    /* KV cache for self_attn layers — use max_kv_dim for hybrid attention compatibility */
+    size_t kv_layer_size = (size_t)max_seq * max_kv_dim;
     s->key_cache   = (float*)calloc((size_t)n_layers * kv_layer_size, sizeof(float));
 
     /* Value cache quantization: Q4 or Q2 for aggressive V compression.
@@ -188,8 +194,8 @@ tq_state_t* tq_create_state_ex(const tq_model_config_t* config, tq_type kv_type,
      * Q2: 8 packed bytes + 1 float scale per block of 32 = 12 bytes/32 values */
     s->value_quant_bits = value_quant_bits;
     if (value_quant_bits == 4 || value_quant_bits == 2) {
-        /* Quantized V cache */
-        int n_blocks_per_pos = (kv_dim + 31) / 32; /* blocks per position (all heads) */
+        /* Quantized V cache — use max_kv_dim for hybrid attention compatibility */
+        int n_blocks_per_pos = (max_kv_dim + 31) / 32; /* blocks per position (all heads) */
         size_t packed_per_block = (value_quant_bits == 4) ? 16 : 8;
         s->value_stride_qs = (size_t)n_blocks_per_pos * packed_per_block;
         s->value_stride_scales = (size_t)n_blocks_per_pos;
@@ -883,8 +889,12 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
 
     int kv_dim = n_kv_heads * head_dim;
     int kv_mul = n_heads / n_kv_heads;
-    /* KV cache stride uses the global (sliding) config for uniform allocation */
-    int cache_kv_dim = c->n_kv_heads * c->head_dim;
+    /* KV cache stride uses the MAX of sliding and full kv_dim for uniform allocation.
+     * This ensures full attention layers (with larger kv_dim) don't overflow the cache. */
+    int sliding_kv_dim = c->n_kv_heads * c->head_dim;
+    int full_kv_dim_cache = (c->full_n_kv_heads > 0 && c->full_head_dim > 0)
+        ? c->full_n_kv_heads * c->full_head_dim : sliding_kv_dim;
+    int cache_kv_dim = (full_kv_dim_cache > sliding_kv_dim) ? full_kv_dim_cache : sliding_kv_dim;
     size_t kv_layer_stride = (size_t)c->max_seq_len * cache_kv_dim;
 
     /* Pre-quantize activation to Q8 once for all Q2/Q4 projections in this layer.
@@ -1222,8 +1232,10 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
      * Others: scale = 1/sqrt(head_dim) */
     float attn_scale_dim = (float)head_dim;
     if (c->use_qk_norm && c->model_type == 1 && c->full_head_dim > 0 && !c->is_moe) {
-        /* Gemma 4 dense (E2B): attention_scale = 1.0 (QK-norm handles scaling) */
-        attn_scale_dim = 1.0f; /* will compute 1/sqrt(1) = 1.0 */
+        /* Gemma 4: QK-norm normalizes Q,K per head, but we still need 1/sqrt(head_dim)
+         * scaling. QK-norm ensures ||Q||=||K||~sqrt(head_dim) after norm weights,
+         * so the dot product scales as head_dim without explicit scaling. */
+        attn_scale_dim = (float)head_dim;
     } else if (c->query_pre_attn_scalar > 0.0f) {
         attn_scale_dim = c->query_pre_attn_scalar;
         if (c->full_head_dim > 0 && model->layer_is_sliding && !model->layer_is_sliding[l]) {
@@ -1436,6 +1448,15 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
                     score += qh[d] * kt[d];
                 }
                 atth[t] = score * inv_scale;
+            }
+        }
+
+        /* Attention logit soft-capping (Gemma 2/3/4): cap * tanh(score / cap) */
+        if (c->attn_logit_softcap > 0.0f) {
+            float cap = c->attn_logit_softcap;
+            float inv_cap = 1.0f / cap;
+            for (int t = attn_start; t < seq_len; t++) {
+                atth[t] = cap * tanhf(atth[t] * inv_cap);
             }
         }
 
@@ -1789,7 +1810,7 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
      *   1. per_layer_token_embd[token] (dequant from Q5_K) → reshape [n_layers, ple_dim]
      *   2. per_layer_model_proj @ embed_raw (FP32 matmul) → reshape [n_layers, ple_dim]
      *   3. Combine with RMS-norm and averaging. */
-    if (model->ple_dim > 0 && model->ple_embedding && model->ple_proj) {
+    if (model->ple_dim > 0 && model->ple_embedding && model->ple_proj && !getenv("TQ_NO_PLE")) {
         int ple_dim = model->ple_dim;
         int n_layers = c->n_layers;
         int total_ple = n_layers * ple_dim;  /* e.g., 35 * 256 = 8960 */
@@ -2033,12 +2054,13 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
         }
 
         /* Gemma 4 PLE: apply per-layer embedding after FFN, before layer_output_scale.
+         * Can be disabled with TQ_NO_PLE=1 for debugging.
          * 1. gate_out = gelu(inp_gate @ hidden_state) → [ple_dim]
          * 2. mixed = gate_out * ple_input[l] → elementwise [ple_dim]
          * 3. proj_out = proj @ mixed → [hidden_dim]
          * 4. normed = rms_norm(proj_out, post_norm) → [hidden_dim]
          * 5. hidden_state = hidden_state + normed */
-        if (model->ple_dim > 0 && s->ple_buf && layer->ple_gate && layer->ple_proj && layer->ple_norm) {
+        if (model->ple_dim > 0 && s->ple_buf && layer->ple_gate && layer->ple_proj && layer->ple_norm && !getenv("TQ_NO_PLE")) {
             int ple_dim = model->ple_dim;
             float ple_gate_out[256];  /* ple_dim <= 256 */
             float ple_mixed[256];

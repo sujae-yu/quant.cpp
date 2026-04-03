@@ -58,6 +58,7 @@ typedef struct {
     int full_n_heads;        /* n_heads for full layers (e.g., 8 vs sliding 16) */
     int full_n_kv_heads;     /* n_kv_heads for full layers (e.g., 2 vs sliding 8) */
     float final_logit_softcap; /* logit soft-capping: logits = cap * tanh(logits/cap), 0=disabled */
+    float attn_logit_softcap;  /* attention score soft-capping (Gemma): 0=disabled, typically 50.0 */
     int* per_layer_inter_dim;  /* [n_layers] per-layer intermediate_dim (NULL = use intermediate_dim) */
 } tq_model_config_t;
 
@@ -213,6 +214,10 @@ typedef struct {
 
     /* Gemma3 sliding window support */
     int* layer_is_sliding;    /* [n_layers] per-layer flag: 1=sliding, 0=global (NULL if not used) */
+
+    /* Learned RoPE frequencies (Gemma 4) — NULL if using computed frequencies */
+    float* rope_freqs;        /* [rope_dim/2] learned inv_freq values (F32) */
+    int rope_freqs_len;       /* length of rope_freqs array (rope_dim/2) */
 
     /* Gemma 4 Per-Layer Embedding (PLE) — NULL if not used */
     const void* ple_embedding;/* [n_layers * ple_dim, vocab_size] GGUF quantized (e.g. Q5_K) */
