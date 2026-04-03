@@ -198,8 +198,9 @@ static int tq_vk_select_device(void) {
     /* Store device properties */
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(g_vk_state.physical_device, &props);
-    strncpy(g_vk_state.device_name, props.deviceName,
-            sizeof(g_vk_state.device_name) - 1);
+    memset(g_vk_state.device_name, 0, sizeof(g_vk_state.device_name));
+    memcpy(g_vk_state.device_name, props.deviceName,
+           sizeof(g_vk_state.device_name) - 1);
 
     /* Query subgroup properties (Vulkan 1.1) */
     VkPhysicalDeviceSubgroupProperties subgroup_props = {0};
