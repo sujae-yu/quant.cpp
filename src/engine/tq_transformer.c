@@ -289,6 +289,10 @@ tq_state_t* tq_create_state_ex(const tq_model_config_t* config, tq_type kv_type,
      * attn_entropy, entropy_accum, v_highres_window, value_highres_fp16
      * are initialized to 0/NULL by calloc. */
 
+    /* PLE buffer: allocated lazily in tq_forward when model->ple_dim > 0.
+     * We don't know ple_dim at state creation time (model not loaded yet).
+     * ple_buf is initialized to NULL by calloc. */
+
     /* Verify critical allocations */
     int value_cache_ok;
     if (s->value_quant_bits == 4 || s->value_quant_bits == 2) {
@@ -345,6 +349,7 @@ void tq_free_state(tq_state_t* state) {
     free(state->value_highres_fp16);
     free(state->profile_stats);
     free(state->profile_accum);
+    free(state->ple_buf);
     if (state->moe_state) {
         tq_moe_free_state((tq_moe_state_t*)state->moe_state);
     }
@@ -1036,6 +1041,14 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
         /* Use cache_kv_dim for position stride (cache allocated with sliding dims).
          * Full layers write fewer floats (kv_dim < cache_kv_dim) but at correct stride. */
         memcpy(key_cache_layer + (size_t)pos * cache_kv_dim, s->k, kv_dim * sizeof(float));
+    } else if (s->delta_kv_enabled) {
+        /* Mixed-precision delta: I-frames stored in FP32 key_cache for high-precision
+         * reference points. P-frames stored as 2-bit deltas in quant_key_cache.
+         * This avoids the quality disaster of 2-bit absolute quantization on I-frames. */
+        int iframe_int_fp32 = s->delta_iframe_interval > 0 ? s->delta_iframe_interval : 64;
+        if (pos % iframe_int_fp32 == 0) {
+            memcpy(key_cache_layer + (size_t)pos * cache_kv_dim, s->k, kv_dim * sizeof(float));
+        }
     }
 
     /* KV profiling: accumulate pre/post-RHT statistics for this layer's keys */
@@ -1134,53 +1147,42 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
                 + (size_t)pos * cache_n_kv_heads * s->quant_head_stride
                 + (size_t)kh * s->quant_head_stride;
 
-            if (s->delta_kv_enabled && pos > 0) {
-                /* Delta compression with periodic I-frames.
-                 * I-frames store absolute keys to bound accumulated drift.
-                 * P-frames store delta = key[t] - reconstruct(key[t-1]). */
-                int iframe_int = s->delta_iframe_interval > 0 ? s->delta_iframe_interval : 16;
+            if (s->delta_kv_enabled) {
+                /* Mixed-precision delta compression with periodic I-frames.
+                 * I-frames: stored in FP32 key_cache (perfect precision reference).
+                 * P-frames: store delta = key[t] - reconstruct(key[t-1]) in quant cache.
+                 * This avoids 2-bit absolute quantization on I-frames (PPL 300+). */
+                int iframe_int = s->delta_iframe_interval > 0 ? s->delta_iframe_interval : 64;
                 int is_iframe = (pos % iframe_int == 0);
 
                 if (is_iframe) {
-                    /* I-frame: quantize absolute key (drift reset) */
-                    traits->quantize(key_src, quant_dst, head_dim);
+                    /* I-frame: FP32 is already stored above. No quant needed.
+                     * Zero out the quant slot so accidental reads are harmless. */
+                    memset(quant_dst, 0, (size_t)s->quant_head_stride);
                 } else {
-                    /* P-frame: quantize delta from previous position's reconstruction */
-                    const uint8_t* prev_quant = (const uint8_t*)s->quant_key_cache
-                        + (size_t)l * s->quant_kv_stride
-                        + (size_t)(pos - 1) * cache_n_kv_heads * s->quant_head_stride
-                        + (size_t)kh * s->quant_head_stride;
-                    float prev_recon[512];
-                    traits->dequantize(prev_quant, prev_recon, head_dim);
-
-                    /* If previous was an I-frame, prev_recon is absolute.
-                     * If previous was a P-frame, prev_recon is the delta.
-                     * We need the full reconstruction of the previous key.
-                     * Since we can't easily track this here, we reconstruct
-                     * from the last I-frame. */
+                    /* P-frame: compute delta from previous position's reconstruction.
+                     * Reconstruction starts from the last I-frame (FP32) and accumulates
+                     * quantized deltas for subsequent P-frames. */
                     int last_iframe = (pos / iframe_int) * iframe_int;
-                    if (pos - 1 > last_iframe) {
-                        /* Reconstruct key[pos-1] from last I-frame through deltas */
-                        const uint8_t* iframe_src = (const uint8_t*)s->quant_key_cache
+
+                    /* Read I-frame from FP32 key_cache */
+                    const float* iframe_key = key_cache_layer
+                        + (size_t)last_iframe * cache_kv_dim + kh * head_dim;
+                    float prev_recon[512];
+                    memcpy(prev_recon, iframe_key, (size_t)head_dim * sizeof(float));
+
+                    /* Accumulate deltas from last_iframe+1 to pos-1 */
+                    float tmp[512];
+                    for (int ti = last_iframe + 1; ti <= pos - 1; ti++) {
+                        const uint8_t* delta_src = (const uint8_t*)s->quant_key_cache
                             + (size_t)l * s->quant_kv_stride
-                            + (size_t)last_iframe * cache_n_kv_heads * s->quant_head_stride
+                            + (size_t)ti * cache_n_kv_heads * s->quant_head_stride
                             + (size_t)kh * s->quant_head_stride;
-                        float recon[512];
-                        traits->dequantize(iframe_src, recon, head_dim);
-                        float tmp[512];
-                        for (int ti = last_iframe + 1; ti <= pos - 1; ti++) {
-                            const uint8_t* delta_src = (const uint8_t*)s->quant_key_cache
-                                + (size_t)l * s->quant_kv_stride
-                                + (size_t)ti * cache_n_kv_heads * s->quant_head_stride
-                                + (size_t)kh * s->quant_head_stride;
-                            traits->dequantize(delta_src, tmp, head_dim);
-                            for (int d = 0; d < head_dim; d++) {
-                                recon[d] += tmp[d];
-                            }
+                        traits->dequantize(delta_src, tmp, head_dim);
+                        for (int d = 0; d < head_dim; d++) {
+                            prev_recon[d] += tmp[d];
                         }
-                        memcpy(prev_recon, recon, (size_t)head_dim * sizeof(float));
                     }
-                    /* else: pos-1 == last_iframe, prev_recon from dequant is correct */
 
                     float delta_buf[512];
                     for (int d = 0; d < head_dim; d++) {
@@ -1189,7 +1191,7 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
                     traits->quantize(delta_buf, quant_dst, head_dim);
                 }
             } else {
-                /* First position (I-frame) or non-delta mode: quantize absolute key */
+                /* Non-delta mode: quantize absolute key */
                 traits->quantize(key_src, quant_dst, head_dim);
             }
         }
@@ -1205,12 +1207,16 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
      * TODO: fix Hamming attention or implement proper QJL sketch attention. */
     int int_attn_threshold = INT_MAX; /* effectively disabled */
 
-    /* Attention scaling: Gemma uses 1/sqrt(query_pre_attn_scalar), others use 1/sqrt(head_dim).
-     * For Gemma 4 hybrid: full layers use full_head_dim for scaling (metadata scalar is for sliding). */
+    /* Attention scaling:
+     * Gemma 4 with QK-norm: scale = 1.0 (no 1/sqrt(head_dim) needed)
+     * Gemma 3 with query_pre_attn_scalar: scale = 1/sqrt(scalar)
+     * Others: scale = 1/sqrt(head_dim) */
     float attn_scale_dim = (float)head_dim;
-    if (c->query_pre_attn_scalar > 0.0f) {
+    if (c->use_qk_norm && c->model_type == 1 && c->full_head_dim > 0 && !c->is_moe) {
+        /* Gemma 4 dense (E2B): attention_scale = 1.0 (QK-norm handles scaling) */
+        attn_scale_dim = 1.0f; /* will compute 1/sqrt(1) = 1.0 */
+    } else if (c->query_pre_attn_scalar > 0.0f) {
         attn_scale_dim = c->query_pre_attn_scalar;
-        /* Override for full attention layers: scale with full head_dim */
         if (c->full_head_dim > 0 && model->layer_is_sliding && !model->layer_is_sliding[l]) {
             attn_scale_dim = (float)c->full_head_dim;
         }
@@ -1276,23 +1282,20 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
              * This bounds drift to at most iframe_int steps. */
             const tq_type_traits_t* traits = &TQ_TRAITS[s->kv_quant_type];
             float inv_scale = 1.0f / sqrtf(attn_scale_dim);
-            int iframe_int = s->delta_iframe_interval > 0 ? s->delta_iframe_interval : 16;
+            int iframe_int = s->delta_iframe_interval > 0 ? s->delta_iframe_interval : 64;
             float recon_key[512];
             float dequant_buf[512];
 
             for (int t = 0; t < attn_start; t++) atth[t] = -1e30f;
 
             for (int t = attn_start; t < seq_len; t++) {
-                const uint8_t* quant_src = (const uint8_t*)s->quant_key_cache
-                    + (size_t)l * s->quant_kv_stride
-                    + (size_t)t * cache_n_kv_heads * s->quant_head_stride
-                    + (size_t)kv_h * s->quant_head_stride;
-
                 if (t % iframe_int == 0) {
-                    /* I-frame: dequantize directly */
-                    traits->dequantize(quant_src, recon_key, head_dim);
+                    /* I-frame: read from FP32 key_cache (perfect precision) */
+                    const float* iframe_key = key_cache_layer
+                        + (size_t)t * cache_kv_dim + kv_h * head_dim;
+                    memcpy(recon_key, iframe_key, (size_t)head_dim * sizeof(float));
                 } else {
-                    /* P-frame: need reconstruction from last I-frame */
+                    /* P-frame: reconstruct from FP32 I-frame + quantized deltas */
                     int last_iframe = (t / iframe_int) * iframe_int;
 
                     /* If we're processing sequentially from last I-frame, recon_key
@@ -1300,17 +1303,19 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
                      * was processed in this loop). Otherwise, reconstruct from scratch. */
                     if (t - 1 >= attn_start && t - 1 >= last_iframe) {
                         /* recon_key holds recon[t-1], just add delta[t] */
+                        const uint8_t* quant_src = (const uint8_t*)s->quant_key_cache
+                            + (size_t)l * s->quant_kv_stride
+                            + (size_t)t * cache_n_kv_heads * s->quant_head_stride
+                            + (size_t)kv_h * s->quant_head_stride;
                         traits->dequantize(quant_src, dequant_buf, head_dim);
                         for (int d = 0; d < head_dim; d++) {
                             recon_key[d] += dequant_buf[d];
                         }
                     } else {
-                        /* Reconstruct from last I-frame */
-                        const uint8_t* iframe_src = (const uint8_t*)s->quant_key_cache
-                            + (size_t)l * s->quant_kv_stride
-                            + (size_t)last_iframe * cache_n_kv_heads * s->quant_head_stride
-                            + (size_t)kv_h * s->quant_head_stride;
-                        traits->dequantize(iframe_src, recon_key, head_dim);
+                        /* Reconstruct from FP32 I-frame */
+                        const float* iframe_key = key_cache_layer
+                            + (size_t)last_iframe * cache_kv_dim + kv_h * head_dim;
+                        memcpy(recon_key, iframe_key, (size_t)head_dim * sizeof(float));
                         for (int ti = last_iframe + 1; ti <= t; ti++) {
                             const uint8_t* delta_src = (const uint8_t*)s->quant_key_cache
                                 + (size_t)l * s->quant_kv_stride
@@ -1731,7 +1736,7 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
                dim * sizeof(float));
     }
 
-    /* Gemma3: scale embeddings by sqrt(hidden_dim) */
+    /* Gemma: scale embeddings by sqrt(hidden_dim) */
     if (c->model_type == 1) {
         float scale = sqrtf((float)dim);
         for (int i = 0; i < dim; i++) {
@@ -1744,6 +1749,66 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
         fprintf(stderr, "[DEBUG] embed[0:8] = ");
         for (int i = 0; i < 8 && i < dim; i++) fprintf(stderr, "%.4f ", s->x[i]);
         fprintf(stderr, "\n");
+    }
+
+    /* PLE pre-computation: once per token, before the layer loop.
+     * Computes ple_input[l] for each layer l from:
+     *   1. per_layer_token_embd[token] (dequant from Q5_K) → reshape [n_layers, ple_dim]
+     *   2. per_layer_model_proj @ embed_raw (FP32 matmul) → reshape [n_layers, ple_dim]
+     *   3. Combine with RMS-norm and averaging. */
+    if (model->ple_dim > 0 && model->ple_embedding && model->ple_proj) {
+        int ple_dim = model->ple_dim;
+        int n_layers = c->n_layers;
+        int total_ple = n_layers * ple_dim;  /* e.g., 35 * 256 = 8960 */
+
+        /* Lazy allocation of ple_buf */
+        if (!s->ple_buf) {
+            s->ple_buf = (float*)calloc((size_t)total_ple, sizeof(float));
+        }
+
+        /* Step A: Dequant per_layer_token_embd[token] → temp_embd[8960]
+         * The embedding tensor is [total_ple, vocab_size] in GGUF row-major,
+         * so one token's data is at row offset = token * row_bytes. */
+        float temp_embd[8960];  /* stack buffer, total_ple <= 8960 */
+        {
+            size_t type_size = tq_ggml_type_size(model->ple_embedding_type);
+            int blck = tq_ggml_type_blck(model->ple_embedding_type);
+            if (blck <= 0) blck = 1;
+            size_t row_bytes = ((size_t)total_ple / (size_t)blck) * type_size;
+            const uint8_t* row_ptr = (const uint8_t*)model->ple_embedding + (size_t)token * row_bytes;
+            tq_dequant_row_gguf(model->ple_embedding_type, row_ptr, temp_embd, total_ple);
+        }
+
+        /* Scale by sqrt(ple_dim) = sqrt(256) = 16.0 */
+        float ple_scale = sqrtf((float)ple_dim);
+        for (int i = 0; i < total_ple; i++) {
+            temp_embd[i] *= ple_scale;
+        }
+
+        /* Step B: per_layer_model_proj @ embed_raw → temp_proj[8960]
+         * ple_proj is [total_ple, hidden_dim] FP32 (rows=8960, cols=1536).
+         * We need: for each output row d in [0, total_ple): dot(ple_proj[d,:], s->x[:])
+         * Note: s->x already has the scaled embedding from above. */
+        float temp_proj[8960];
+        tq_matmul(temp_proj, s->x, model->ple_proj, total_ple, dim);
+
+        /* Scale by 1/sqrt(hidden_dim) */
+        float inv_sqrt_dim = 1.0f / sqrtf((float)dim);
+        for (int i = 0; i < total_ple; i++) {
+            temp_proj[i] *= inv_sqrt_dim;
+        }
+
+        /* Step C: RMS-norm each 256-dim slice of temp_proj using ple_proj_norm */
+        for (int l = 0; l < n_layers; l++) {
+            float* slice = temp_proj + l * ple_dim;
+            tq_rmsnorm(slice, slice, model->ple_proj_norm, ple_dim, c->rms_norm_eps);
+        }
+
+        /* Step D: ple_input[l] = (temp_embd[l] + temp_proj[l]) / sqrt(2) */
+        float inv_sqrt2 = 1.0f / sqrtf(2.0f);
+        for (int i = 0; i < total_ple; i++) {
+            s->ple_buf[i] = (temp_embd[i] + temp_proj[i]) * inv_sqrt2;
+        }
     }
 
     /* Step 2: Transformer layers */
@@ -1781,12 +1846,7 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
                 }
                 /* Apply post_attention_layernorm to xb2 */
                 tq_rmsnorm(s->xb2, s->xb2, layer->post_attn_norm, dim, c->rms_norm_eps);
-                /* Apply layer_output_scale if present (Gemma 4) */
-                float los = layer->layer_output_scale;
-                if (los != 0.0f && los != 1.0f) {
-                    for (int i = 0; i < dim; i++) s->xb2[i] *= los;
-                }
-                /* Re-add normalized+scaled output */
+                /* Re-add normalized output */
                 tq_add(s->x, s->x, s->xb2, dim);
             }
         }
@@ -1816,11 +1876,6 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
                     tq_rmsnorm(s->xb2, s->xb2, moe_post_norm, dim, c->rms_norm_eps);
             }
 
-            /* Apply layer_output_scale (Gemma 4) */
-            float los = layer->layer_output_scale;
-            if (los != 0.0f && los != 1.0f) {
-                for (int i = 0; i < dim; i++) s->xb2[i] *= los;
-            }
             tq_add(s->x, s->x, s->xb2, dim);
             did_moe = 1;
         }
@@ -1846,6 +1901,9 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
             }
             tq_rmsnorm(s->xb, s->x, ffn_norm_w, dim, c->rms_norm_eps);
 
+            /* Per-layer intermediate dim (Gemma 4 E2B has variable FFN dim) */
+            int inter = c->per_layer_inter_dim ? c->per_layer_inter_dim[l] : c->intermediate_dim;
+
             /* Pre-quantize xb for gate+up Q2/Q4 projections (same input, 2 matmuls) */
             TQ_PROF_START(_tp);
             if (layer->w_gate_q4 && layer->w_gate_q2) {
@@ -1853,45 +1911,44 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
                 tq_quantize_row_q8(s->xb, s->xb_q8, s->xb_q8s, dim);
                 /* Q4 matmul */
                 tq_matmul_q4_preq(s->hb, layer->w_gate_q4, layer->w_gate_q4s,
-                                   s->xb_q8, s->xb_q8s, c->intermediate_dim, dim);
+                                   s->xb_q8, s->xb_q8s, inter, dim);
                 tq_matmul_q4_preq(s->hb2, layer->w_up_q4, layer->w_up_q4s,
-                                   s->xb_q8, s->xb_q8s, c->intermediate_dim, dim);
+                                   s->xb_q8, s->xb_q8s, inter, dim);
                 /* Add Q2 residual correction (reuse xb2 as temp — safe here,
                  * xb2 is only needed after FFN completes) */
                 tq_matmul_q2_preq(s->xb2, layer->w_gate_q2, layer->w_gate_q2s,
-                                   s->xb_q8, s->xb_q8s, c->intermediate_dim, dim);
-                for (int i = 0; i < c->intermediate_dim; i++) s->hb[i] += s->xb2[i];
+                                   s->xb_q8, s->xb_q8s, inter, dim);
+                for (int i = 0; i < inter; i++) s->hb[i] += s->xb2[i];
                 tq_matmul_q2_preq(s->xb2, layer->w_up_q2, layer->w_up_q2s,
-                                   s->xb_q8, s->xb_q8s, c->intermediate_dim, dim);
-                for (int i = 0; i < c->intermediate_dim; i++) s->hb2[i] += s->xb2[i];
+                                   s->xb_q8, s->xb_q8s, inter, dim);
+                for (int i = 0; i < inter; i++) s->hb2[i] += s->xb2[i];
             } else if (layer->w_gate_q2 && !layer->w_gate_q4) {
                 tq_quantize_row_q8(s->xb, s->xb_q8, s->xb_q8s, dim);
                 TQ_MATMUL_Q2_OR_1BIT(s->hb, s->xb, layer->w_gate_q2, layer->w_gate_q2s,
-                                      s->xb_q8, s->xb_q8s, c->intermediate_dim, dim, model->use_1bit_weights);
+                                      s->xb_q8, s->xb_q8s, inter, dim, model->use_1bit_weights);
                 TQ_MATMUL_Q2_OR_1BIT(s->hb2, s->xb, layer->w_up_q2, layer->w_up_q2s,
-                                      s->xb_q8, s->xb_q8s, c->intermediate_dim, dim, model->use_1bit_weights);
+                                      s->xb_q8, s->xb_q8s, inter, dim, model->use_1bit_weights);
             } else if (layer->w_gate_q4) {
                 tq_quantize_row_q8(s->xb, s->xb_q8, s->xb_q8s, dim);
                 tq_matmul_q4_preq(s->hb, layer->w_gate_q4, layer->w_gate_q4s,
-                                   s->xb_q8, s->xb_q8s, c->intermediate_dim, dim);
+                                   s->xb_q8, s->xb_q8s, inter, dim);
                 tq_matmul_q4_preq(s->hb2, layer->w_up_q4, layer->w_up_q4s,
-                                   s->xb_q8, s->xb_q8s, c->intermediate_dim, dim);
+                                   s->xb_q8, s->xb_q8s, inter, dim);
             } else if (layer->gguf_w_gate) {
-                /* Batch gate+up into one GPU command buffer (2 matmuls, 1 dispatch) */
                 tq_metal_batch_begin_if_available();
-                tq_matmul_gguf(s->hb, s->xb, layer->gguf_w_gate, layer->gguf_w_gate_type, c->intermediate_dim, dim);
-                tq_matmul_gguf(s->hb2, s->xb, layer->gguf_w_up, layer->gguf_w_up_type, c->intermediate_dim, dim);
+                tq_matmul_gguf(s->hb, s->xb, layer->gguf_w_gate, layer->gguf_w_gate_type, inter, dim);
+                tq_matmul_gguf(s->hb2, s->xb, layer->gguf_w_up, layer->gguf_w_up_type, inter, dim);
                 tq_metal_batch_flush_if_available();
             } else {
                 if (layer->w_gate_q8) {
-                    tq_matmul_q8(s->hb, s->xb, layer->w_gate_q8, layer->w_gate_q8s, c->intermediate_dim, dim);
+                    tq_matmul_q8(s->hb, s->xb, layer->w_gate_q8, layer->w_gate_q8s, inter, dim);
                 } else {
-                    tq_matmul(s->hb, s->xb, layer->w_gate, c->intermediate_dim, dim);
+                    tq_matmul(s->hb, s->xb, layer->w_gate, inter, dim);
                 }
                 if (layer->w_up_q8) {
-                    tq_matmul_q8(s->hb2, s->xb, layer->w_up_q8, layer->w_up_q8s, c->intermediate_dim, dim);
+                    tq_matmul_q8(s->hb2, s->xb, layer->w_up_q8, layer->w_up_q8s, inter, dim);
                 } else {
-                    tq_matmul(s->hb2, s->xb, layer->w_up, c->intermediate_dim, dim);
+                    tq_matmul(s->hb2, s->xb, layer->w_up, inter, dim);
                 }
             }
 
@@ -1899,23 +1956,23 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
 
             /* Activation: GeGLU for Gemma3, SwiGLU for others */
             if (is_gemma3) {
-                tq_gelu_tanh(s->hb, c->intermediate_dim);
+                tq_gelu_tanh(s->hb, inter);
             } else {
-                tq_silu(s->hb, c->intermediate_dim);
+                tq_silu(s->hb, inter);
             }
-            tq_mul(s->hb, s->hb, s->hb2, c->intermediate_dim);
+            tq_mul(s->hb, s->hb, s->hb2, inter);
 
             TQ_PROF_START(_tp);
             if (layer->w_down_q2) {
-                TQ_MATMUL_Q2_OR_1BIT_FP32(s->xb2, s->hb, layer->w_down_q2, layer->w_down_q2s, dim, c->intermediate_dim, model->use_1bit_weights);
+                TQ_MATMUL_Q2_OR_1BIT_FP32(s->xb2, s->hb, layer->w_down_q2, layer->w_down_q2s, dim, inter, model->use_1bit_weights);
             } else if (layer->w_down_q4) {
-                tq_matmul_q4(s->xb2, s->hb, layer->w_down_q4, layer->w_down_q4s, dim, c->intermediate_dim);
+                tq_matmul_q4(s->xb2, s->hb, layer->w_down_q4, layer->w_down_q4s, dim, inter);
             } else if (layer->w_down_q8) {
-                tq_matmul_q8(s->xb2, s->hb, layer->w_down_q8, layer->w_down_q8s, dim, c->intermediate_dim);
+                tq_matmul_q8(s->xb2, s->hb, layer->w_down_q8, layer->w_down_q8s, dim, inter);
             } else if (layer->gguf_w_down) {
-                tq_matmul_gguf(s->xb2, s->hb, layer->gguf_w_down, layer->gguf_w_down_type, dim, c->intermediate_dim);
+                tq_matmul_gguf(s->xb2, s->hb, layer->gguf_w_down, layer->gguf_w_down_type, dim, inter);
             } else {
-                tq_matmul(s->xb2, s->hb, layer->w_down, dim, c->intermediate_dim);
+                tq_matmul(s->xb2, s->hb, layer->w_down, dim, inter);
             }
             TQ_PROF_STOP(_tp, matmul_ns);
 
@@ -1930,14 +1987,60 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
                     tq_rmsnorm(s->xb2, s->xb2, dense_post_norm, dim, c->rms_norm_eps);
             }
 
-            /* Apply layer_output_scale (Gemma 4) */
-            {
-                float los = layer->layer_output_scale;
-                if (los != 0.0f && los != 1.0f) {
-                    for (int i = 0; i < dim; i++) s->xb2[i] *= los;
-                }
-            }
             tq_add(s->x, s->x, s->xb2, dim);
+        }
+
+        /* Gemma 4 PLE: apply per-layer embedding after FFN, before layer_output_scale.
+         * 1. gate_out = gelu(inp_gate @ hidden_state) → [ple_dim]
+         * 2. mixed = gate_out * ple_input[l] → elementwise [ple_dim]
+         * 3. proj_out = proj @ mixed → [hidden_dim]
+         * 4. normed = rms_norm(proj_out, post_norm) → [hidden_dim]
+         * 5. hidden_state = hidden_state + normed */
+        if (model->ple_dim > 0 && s->ple_buf && layer->ple_gate && layer->ple_proj && layer->ple_norm) {
+            int ple_dim = model->ple_dim;
+            float ple_gate_out[256];  /* ple_dim <= 256 */
+            float ple_mixed[256];
+            float ple_proj_out[2048]; /* hidden_dim <= 2048 (Gemma 4 E2B: 1536) */
+
+            /* gate_out = inp_gate @ hidden_state → [ple_dim]
+             * inp_gate is [hidden_dim, ple_dim] F32 type */
+            if (layer->ple_gate_type == TQ_GGML_TYPE_F32) {
+                tq_matmul(ple_gate_out, s->x, (const float*)layer->ple_gate, ple_dim, dim);
+            } else {
+                tq_matmul_gguf(ple_gate_out, s->x, layer->ple_gate, layer->ple_gate_type, ple_dim, dim);
+            }
+
+            /* Apply GELU-tanh activation */
+            tq_gelu_tanh(ple_gate_out, ple_dim);
+
+            /* mixed = gate_out * ple_input[l] (elementwise) */
+            float* ple_input_l = s->ple_buf + l * ple_dim;
+            for (int i = 0; i < ple_dim; i++) {
+                ple_mixed[i] = ple_gate_out[i] * ple_input_l[i];
+            }
+
+            /* proj_out = proj @ mixed → [hidden_dim]
+             * proj is [ple_dim, hidden_dim] — output is hidden_dim rows, input is ple_dim */
+            if (layer->ple_proj_type == TQ_GGML_TYPE_F32) {
+                tq_matmul(ple_proj_out, ple_mixed, (const float*)layer->ple_proj, dim, ple_dim);
+            } else {
+                tq_matmul_gguf(ple_proj_out, ple_mixed, layer->ple_proj, layer->ple_proj_type, dim, ple_dim);
+            }
+
+            /* normed = rms_norm(proj_out, post_norm) */
+            tq_rmsnorm(ple_proj_out, ple_proj_out, layer->ple_norm, dim, c->rms_norm_eps);
+
+            /* hidden_state += normed */
+            tq_add(s->x, s->x, ple_proj_out, dim);
+        }
+
+        /* Gemma 4: apply layer_output_scale ONCE at end of layer (after all residuals).
+         * This scales the accumulated hidden state relative to the residual stream. */
+        if (layer->layer_output_scale != 0.0f) {
+            float los = layer->layer_output_scale;
+            for (int i = 0; i < dim; i++) {
+                s->x[i] *= los;
+            }
         }
 
         /* Debug: print layer output */
@@ -1974,13 +2077,18 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
     TQ_PROF_STOP(_tp, matmul_ns);
 
     /* Final logit soft-capping: logits = cap * tanh(logits / cap) */
-    if (c->final_logit_softcap > 0.0f) {
+    /* Note: logit soft-capping disabled for now — Gemma 4 GGUF models have
+     * large norm weights (by design) that produce logits >> cap, destroying
+     * the ranking. TODO: investigate if soft-capping needs different handling
+     * or if it should only apply after attention, not final logits. */
+    if (c->final_logit_softcap > 0.0f && !getenv("TQ_NO_SOFTCAP")) {
         float cap = c->final_logit_softcap;
         float inv_cap = 1.0f / cap;
         for (int i = 0; i < c->vocab_size; i++) {
             s->logits[i] = cap * tanhf(s->logits[i] * inv_cap);
         }
     }
+
 
     /* Increment profile token count if profiling is active */
     if (s->profile_kv) {

@@ -166,6 +166,7 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
         return -1;
     }
     state->delta_kv_enabled = config->delta_kv;
+    state->delta_iframe_interval = config->delta_iframe_interval;
     /* Delta KV requires pure self-attention models. Hybrid models (DeltaNet)
      * have non-contiguous attention layers that cause NaN in delta accumulation. */
     if (state->delta_kv_enabled && model->config.delta_n_heads > 0) {
@@ -201,9 +202,12 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
     int n_prompt = 0;
 
     if (tokenizer && prompt) {
-        /* Qwen3.5 uses chat template — don't prepend BOS for raw text completion.
-         * Gemma3 (model_type=1) uses BOS=2. */
-        int add_bos = (model->config.model_type == 1) ? 1 : 0;
+        /* Gemma 3: prepend BOS=2. Gemma 4 (n_layers > 30): no BOS (add_bos_token=false).
+         * Qwen3.5: no BOS. */
+        int add_bos = 0;
+        if (model->config.model_type == 1 && model->config.n_layers <= 30) {
+            add_bos = 1; /* Gemma 3 only */
+        }
         n_prompt = tq_encode(tokenizer, prompt, prompt_tokens, 4096, add_bos);
     } else {
         /* No tokenizer: use BOS only (Gemma=2, Qwen=skip) */

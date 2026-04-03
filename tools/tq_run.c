@@ -127,6 +127,7 @@ int main(int argc, char** argv) {
     int bench_prefill = 0;
     int override_ctx = 0;  /* 0 = use model default (capped at 4096) */
     int delta_kv = 0;      /* 1 = delta KV compression (store key deltas) */
+    int delta_iframe_int = 0; /* I-frame interval for delta KV (0 = auto = 64) */
 
     for (int i = 1; i < argc; i++) {
         if (argv[i][0] != '-') {
@@ -207,6 +208,8 @@ int main(int argc, char** argv) {
             override_ctx = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--delta") == 0 || strcmp(argv[i], "-D") == 0) {
             delta_kv = 1;
+        } else if (strcmp(argv[i], "--iframe") == 0 && i + 1 < argc) {
+            delta_iframe_int = atoi(argv[++i]);
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             return 0;
@@ -351,13 +354,15 @@ int main(int argc, char** argv) {
             return 1;
         }
         state->delta_kv_enabled = delta_kv;
+        state->delta_iframe_interval = delta_iframe_int;
         /* Disable delta for hybrid DeltaNet models (causes NaN) */
         if (state->delta_kv_enabled && c->delta_n_heads > 0) {
             fprintf(stderr, "Warning: delta KV disabled for hybrid DeltaNet model\n");
             state->delta_kv_enabled = 0;
         }
         if (state->delta_kv_enabled) {
-            fprintf(stderr, "Delta KV compression: ENABLED (storing key deltas)\n");
+            int ifi = delta_iframe_int > 0 ? delta_iframe_int : 64;
+            fprintf(stderr, "Delta KV compression: ENABLED (mixed-precision, I-frame=%d)\n", ifi);
         }
 
         /* Teacher-forced forward: accumulate negative log-likelihood */
@@ -409,7 +414,13 @@ int main(int argc, char** argv) {
         fprintf(stderr, "File:         %s\n", ppl_file);
         fprintf(stderr, "Tokens:       %d (evaluated %d)\n", n_tokens, n_eval);
         fprintf(stderr, "KV type:      %s\n", kv_type < TQ_TYPE_COUNT ? tq_type_name(kv_type) : "fp32");
-        fprintf(stderr, "Delta KV:     %s\n", delta_kv ? "ON" : "OFF");
+        fprintf(stderr, "Delta KV:     %s%s\n", delta_kv ? "ON (mixed-precision)" : "OFF",
+                delta_kv && delta_iframe_int > 0 ? "" : "");
+        if (delta_kv) {
+            int ifi = delta_iframe_int > 0 ? delta_iframe_int : 64;
+            fprintf(stderr, "I-frame int:  %d (FP32 I-frames, %d-bit P-frames)\n",
+                    ifi, kv_type == TQ_UNIFORM_2B ? 2 : 4);
+        }
         fprintf(stderr, "V quant:      %s\n", value_quant_bits == 4 ? "Q4" : (value_quant_bits == 2 ? "Q2" : "FP16"));
         fprintf(stderr, "Avg NLL:      %.6f\n", avg_nll);
         fprintf(stderr, "Perplexity:   %.4f\n", perplexity);

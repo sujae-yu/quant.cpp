@@ -58,6 +58,7 @@ typedef struct {
     int full_n_heads;        /* n_heads for full layers (e.g., 8 vs sliding 16) */
     int full_n_kv_heads;     /* n_kv_heads for full layers (e.g., 2 vs sliding 8) */
     float final_logit_softcap; /* logit soft-capping: logits = cap * tanh(logits/cap), 0=disabled */
+    int* per_layer_inter_dim;  /* [n_layers] per-layer intermediate_dim (NULL = use intermediate_dim) */
 } tq_model_config_t;
 
 /* ============================================================
@@ -83,6 +84,13 @@ typedef struct {
     float* post_ffn_norm_1;  /* [hidden_dim] post_ffw_norm_1 (MoE output) */
     float* pre_ffn_norm_2;   /* [hidden_dim] pre_ffw_norm_2 (dense FFN input) */
     float* post_ffn_norm_2;  /* [hidden_dim] post_ffw_norm_2 (dense FFN output) */
+
+    /* Gemma 4 PLE (Per-Layer Embedding) per-layer weights */
+    const void* ple_gate;     /* [hidden_dim, ple_dim] gate projection (GGUF quantized) */
+    int ple_gate_type;
+    const void* ple_proj;     /* [ple_dim, hidden_dim] output projection (GGUF quantized) */
+    int ple_proj_type;
+    float* ple_norm;          /* [hidden_dim] PLE output norm weight */
 
     /* Gemma 4 layer output scaling */
     float layer_output_scale; /* scalar applied to residual output (0.0 = disabled) */
@@ -206,6 +214,13 @@ typedef struct {
     /* Gemma3 sliding window support */
     int* layer_is_sliding;    /* [n_layers] per-layer flag: 1=sliding, 0=global (NULL if not used) */
 
+    /* Gemma 4 Per-Layer Embedding (PLE) — NULL if not used */
+    const void* ple_embedding;/* [n_layers * ple_dim, vocab_size] GGUF quantized (e.g. Q5_K) */
+    int ple_embedding_type;   /* tq_ggml_dtype of ple_embedding (for runtime dequant) */
+    float* ple_proj;          /* [hidden_dim, n_layers * ple_dim] FP32 (dequanted from BF16 at load) */
+    float* ple_proj_norm;     /* [ple_dim] projection norm weight (F32) */
+    int ple_dim;              /* per-layer embedding dim (e.g., 256), 0 if PLE not used */
+
     /* Q4 output weight (lm_head) — runtime quantized for fast logit projection */
     uint8_t* output_qs;       /* [vocab_size * n_blocks * 16] Q4 packed nibbles */
     float* output_scales;     /* [vocab_size * n_blocks] Q4 block scales */
@@ -323,12 +338,15 @@ typedef struct {
     size_t quant_kv_stride;  /* bytes per layer in quant_key_cache */
     size_t quant_head_stride;/* bytes per head per position */
 
+    /* PLE (Per-Layer Embedding) precomputed input: [n_layers * ple_dim] */
+    float* ple_buf;
+
     /* Delta KV compression: store key[t] - reconstruct(key[t-1]) instead of key[t].
      * At attention time, reconstruct keys sequentially by accumulating deltas.
      * This reduces quantization range by ~30%, enabling 2-bit to match 4-bit quality.
      * Periodic I-frames (absolute keys) bound accumulated drift error. */
     int delta_kv_enabled;    /* 1 = delta compression mode for keys */
-    int delta_iframe_interval; /* I-frame every N positions (0 = auto = 16) */
+    int delta_iframe_interval; /* I-frame every N positions (0 = auto = 64) */
 } tq_state_t;
 
 /* ============================================================
@@ -342,6 +360,7 @@ typedef struct {
     int value_quant_bits;/* V cache quantization: 0=FP16/FP32(default), 4=Q4, 2=Q2 */
     int v_highres_window;/* recent N tokens get FP16 V even when V is quantized (0=disabled) */
     int delta_kv;        /* 1 = delta KV compression (store key deltas) */
+    int delta_iframe_interval; /* I-frame interval for delta KV (0 = auto = 64) */
     int n_threads;
     float rep_penalty;    /* repetition penalty (default: 1.1, 1.0 = disabled) */
     int rep_window;       /* how many recent tokens to penalize (default: 32) */

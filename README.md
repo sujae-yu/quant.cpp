@@ -99,8 +99,34 @@ ctest --test-dir build   # 33/33 should pass
 | **SmolLM2-1.7B** | Llama | 1.7B | GGUF Q8_0 | 24 tok/s | PPL -1.6% ✓ |
 | **Qwen3.5-0.8B** | Qwen3.5 | 752M | TQM / GGUF | 35 tok/s | PPL +0.9% ✓ |
 | **Gemma 3 270M** | Gemma 3 | 270M | TQM | 176 tok/s | 4-bit K ✓ |
+| **Gemma 4 E2B** | Gemma 4 | 2B | GGUF Q4_K_M | 7.2 tok/s | WIP |
+| **Gemma 4 26B-A4B** | Gemma 4 MoE | 26B (4B active) | GGUF IQ2_XXS | ~1 tok/s | WIP |
 
-**4 architectures:** Llama, Gemma 3, Qwen3.5 (DeltaNet), Qwen2-MoE.
+**5 architectures:** Llama, Gemma 3/4, Qwen3.5 (DeltaNet), Qwen2-MoE.
+
+### Gemma 4 Support (New)
+
+Day-1 support for Google's latest Gemma 4 family (released 2026-04-03):
+
+| Feature | Status |
+|---------|--------|
+| Hybrid sliding/full attention (per-layer head_dim) | ✅ Implemented |
+| Per-Layer Embedding (PLE) injection | ✅ Implemented |
+| Variable FFN dim per layer | ✅ Implemented |
+| MoE with fused gate+up experts (26B-A4B) | ✅ Implemented |
+| K=V attention (full layers, 26B-A4B) | ✅ Implemented |
+| Gemma 4 norm convention (weight-based, no +1) | ✅ Auto-detected |
+| Layer output scaling | ✅ Implemented |
+| Final logit soft-capping | ✅ Implemented |
+| Coherent text generation | 🔧 Improving |
+
+```bash
+# Gemma 4 E2B (2B dense, ~3GB GGUF)
+./tq_run gemma-4-E2B-it-Q4_K_M.gguf -p "Hello!" -n 50
+
+# Gemma 4 26B-A4B MoE (IQ2_XXS, ~9GB GGUF)
+./tq_run gemma-4-26B-A4B-it-UD-IQ2_XXS.gguf -p "Hello!" -n 20
+```
 
 ---
 
