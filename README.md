@@ -111,7 +111,7 @@ Cross-model (4b K + Q4 V): SmolLM2 1.7B (-1.6%), Qwen3.5 0.8B (+0.9%), Qwen3.5 4
 | Qwen3.5-4B | Qwen3.5 (DeltaNet) | 4B | PPL verified |
 | Qwen3.5-35B-A3B | Qwen2-MoE | 35B (3B active) | Working |
 | Gemma 3 270M | Gemma 3 | 270M | Working |
-| Gemma 4 E2B | Gemma 4 | 2B | WIP |
+| Gemma 4 E2B | Gemma 4 | 2B | Experimental (non-standard GGUF) |
 
 Architectures: Llama/Qwen3.5 (shared path), Gemma 3/4 (sliding + full attention), Qwen2-MoE.
 
