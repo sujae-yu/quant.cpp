@@ -1926,15 +1926,22 @@ static size_t calc_q4_buffer_size(const tq_model_t* model) {
     int delta_z_dim = c->delta_n_heads * c->delta_value_head_dim;
     int delta_dn = c->delta_n_heads;
 
+    int full_q_dim = (c->full_n_heads > 0 && c->full_head_dim > 0)
+        ? c->full_n_heads * c->full_head_dim : q_dim;
+
     for (int l = 0; l < c->n_layers; l++) {
         const tq_layer_weights_t* layer = &model->layers[l];
-        int lkv = (model->layer_is_sliding && !model->layer_is_sliding[l]) ? full_kv_dim : kv_dim;
+        int is_full = (model->layer_is_sliding && !model->layer_is_sliding[l]);
+        int lkv = is_full ? full_kv_dim : kv_dim;
+        int lq = is_full ? full_q_dim : q_dim;
+        int lqg = qg_dim; /* with gate: lq*2, without: lq */
+        if (is_full) lqg = c->attn_output_gate ? lq * 2 : lq;
 
         /* Self-attention weights */
         if (layer->wq) {
             int nb = (dim + 31) / 32;
-            total += (size_t)qg_dim * nb * 16;   /* packed Q4 data */
-            total += (size_t)qg_dim * nb * 4;     /* float scales */
+            total += (size_t)lqg * nb * 16;   /* packed Q4 data */
+            total += (size_t)lqg * nb * 4;     /* float scales */
         }
         if (layer->wk) {
             int nb = (dim + 31) / 32;
@@ -1947,7 +1954,7 @@ static size_t calc_q4_buffer_size(const tq_model_t* model) {
             total += (size_t)lkv * nb * 4;
         }
         if (layer->wo) {
-            int nb = (q_dim + 31) / 32;
+            int nb = (lq + 31) / 32;
             total += (size_t)dim * nb * 16;
             total += (size_t)dim * nb * 4;
         }
@@ -2026,12 +2033,18 @@ void tq_quantize_weights_q4(tq_model_t* model) {
     }
     size_t used = 0;
 
+    int full_q_dim = (c->full_n_heads > 0 && c->full_head_dim > 0)
+        ? c->full_n_heads * c->full_head_dim : q_dim;
+
     for (int l = 0; l < c->n_layers; l++) {
         tq_layer_weights_t* layer = &model->layers[l];
-        int lkv = (model->layer_is_sliding && !model->layer_is_sliding[l]) ? full_kv_dim : kv_dim;
+        int is_full = (model->layer_is_sliding && !model->layer_is_sliding[l]);
+        int lkv = is_full ? full_kv_dim : kv_dim;
+        int lq = is_full ? full_q_dim : q_dim;
+        int lqg = c->attn_output_gate ? lq * 2 : lq;
 
         /* Self-attention */
-        quantize_matrix_q4(layer->wq, qg_dim, dim,
+        quantize_matrix_q4(layer->wq, lqg, dim,
                             &layer->wq_q4, &layer->wq_q4s, &buf, &used);
         if (layer->wq_q4) layer->wq = NULL;
 
@@ -2043,7 +2056,7 @@ void tq_quantize_weights_q4(tq_model_t* model) {
                             &layer->wv_q4, &layer->wv_q4s, &buf, &used);
         if (layer->wv_q4) layer->wv = NULL;
 
-        quantize_matrix_q4(layer->wo, dim, q_dim,
+        quantize_matrix_q4(layer->wo, dim, lq,
                             &layer->wo_q4, &layer->wo_q4s, &buf, &used);
         if (layer->wo_q4) layer->wo = NULL;
 
@@ -2841,6 +2854,7 @@ tq_model_t* tq_load_gguf(const char* path) {
     c->rope_local_base_freq = tq_gguf_get_f32(gguf, GGUF_KEY("rope.freq_base_swa"),
                                tq_gguf_get_f32(gguf, GGUF_KEY("rope.local.freq_base"),
                                tq_gguf_get_f32(gguf, GGUF_KEY("rope.freq_base"), 10000.0f)));
+    c->final_logit_softcap = tq_gguf_get_f32(gguf, GGUF_KEY("final_logit_softcapping"), 0.0f);
 
     /* Cap context for memory safety on small machines.
      * GGUF models often claim 262K context but we cap at 4096 by default.
@@ -3039,6 +3053,26 @@ tq_model_t* tq_load_gguf(const char* path) {
             for (int i = 0; i < c->hidden_dim; i++) layer->pre_ffn_norm[i] += 1.0f;
         }
 
+        /* Gemma 4 dual-FFN extra norms */
+        snprintf(tname, sizeof(tname), "blk.%d.post_ffw_norm_1.weight", l);
+        t = find_gguf_tensor(gguf, tname);
+        if (t) {
+            layer->post_ffn_norm_1 = dequant_tensor_fp32(t);
+            for (int i = 0; i < c->hidden_dim; i++) layer->post_ffn_norm_1[i] += 1.0f;
+        }
+        snprintf(tname, sizeof(tname), "blk.%d.pre_ffw_norm_2.weight", l);
+        t = find_gguf_tensor(gguf, tname);
+        if (t) {
+            layer->pre_ffn_norm_2 = dequant_tensor_fp32(t);
+            for (int i = 0; i < c->hidden_dim; i++) layer->pre_ffn_norm_2[i] += 1.0f;
+        }
+        snprintf(tname, sizeof(tname), "blk.%d.post_ffw_norm_2.weight", l);
+        t = find_gguf_tensor(gguf, tname);
+        if (t) {
+            layer->post_ffn_norm_2 = dequant_tensor_fp32(t);
+            for (int i = 0; i < c->hidden_dim; i++) layer->post_ffn_norm_2[i] += 1.0f;
+        }
+
         /* Gemma 4: layer_output_scale (scalar per layer) */
         snprintf(tname, sizeof(tname), "blk.%d.layer_output_scale.weight", l);
         t = find_gguf_tensor(gguf, tname);
@@ -3214,6 +3248,13 @@ tq_model_t* tq_load_gguf(const char* path) {
 
                 /* Router weights (small, always dequant to FP32) */
                 moe->router_weight = dequant_tensor_fp32(t);
+
+                /* Router input scale (Gemma 4): per-feature scaling before routing */
+                snprintf(tname, sizeof(tname), "blk.%d.ffn_gate_inp.scale", l);
+                t = find_gguf_tensor(gguf, tname);
+                if (t && t->type == TQ_GGML_TYPE_F32) {
+                    moe->router_input_scale = (const float*)t->data;
+                }
 
                 /* Expert weights: shape [num_experts, expert_dim, hidden_dim]
                  * For GGUF, these are stored as 3D tensors. Each expert's
@@ -3394,8 +3435,9 @@ tq_model_t* tq_load_gguf(const char* path) {
                         c->full_n_kv_heads = c->n_kv_heads;
                     }
                 }
-                /* Q dim is n_heads * head_dim (NOT hidden_dim). It's constant across layers. */
-                c->full_n_heads = (c->n_heads * c->head_dim) / c->full_head_dim;
+                /* n_heads is constant across layers (16 for Gemma 4).
+                 * Full layers: same n_heads but larger head_dim → Q dim doubles. */
+                c->full_n_heads = c->n_heads;
                 fprintf(stderr, "tq_load_gguf: Gemma hybrid — %d sliding (hd=%d, kv=%d) + "
                         "%d full (hd=%d, kv=%d, heads=%d) attention layers\n",
                         n_sliding, c->head_dim, c->n_kv_heads,
@@ -3479,15 +3521,18 @@ tq_model_t* tq_load_gguf(const char* path) {
         size_t est_fp32 = 0;
         for (int l = 0; l < c->n_layers; l++) {
             const tq_layer_weights_t* layer = &model->layers[l];
-            int lkv = (model->layer_is_sliding && !model->layer_is_sliding[l]) ? full_kv_dim : kv_dim;
+            int is_full_l = (model->layer_is_sliding && !model->layer_is_sliding[l]);
+            int lkv = is_full_l ? full_kv_dim : kv_dim;
+            int lq = is_full_l ? (c->full_n_heads * c->full_head_dim) : q_dim;
+            int lqg = c->attn_output_gate ? lq * 2 : lq;
             if (layer->gguf_wq)
-                est_fp32 += (size_t)qg_dim * dim * sizeof(float);
+                est_fp32 += (size_t)lqg * dim * sizeof(float);
             if (layer->gguf_wk)
                 est_fp32 += (size_t)lkv * dim * sizeof(float);
             if (layer->gguf_wv)
                 est_fp32 += (size_t)lkv * dim * sizeof(float);
             if (layer->gguf_wo)
-                est_fp32 += (size_t)dim * q_dim * sizeof(float);
+                est_fp32 += (size_t)dim * lq * sizeof(float);
             /* Dense FFN weights (not present in MoE layers) */
             if (layer->gguf_w_gate)
                 est_fp32 += (size_t)inter * dim * sizeof(float);
@@ -3509,6 +3554,11 @@ tq_model_t* tq_load_gguf(const char* path) {
         }
 
         const size_t MAX_FP32_BYTES = (size_t)16 * 1024 * 1024 * 1024ULL; /* 16 GB */
+        /* TQ_NO_Q4=1 disables Q4 recompression → use direct GGUF dequant for better quality */
+        if (getenv("TQ_NO_Q4")) {
+            fprintf(stderr, "tq_load_gguf: TQ_NO_Q4 set — skipping Q4 conversion, using GGUF on-the-fly dequant\n");
+            goto skip_q4_conversion;
+        }
         int has_gguf_weights = 0;
         for (int l = 0; l < c->n_layers && !has_gguf_weights; l++) {
             if (model->layers[l].gguf_wq || model->layers[l].gguf_w_gate
@@ -3532,8 +3582,11 @@ tq_model_t* tq_load_gguf(const char* path) {
                 tq_layer_weights_t* layer = &model->layers[l];
 
                 /* Self-attention weights: dequant GGUF -> FP32 */
+                int is_full = (model->layer_is_sliding && !model->layer_is_sliding[l]);
+                int lq = is_full ? (c->full_n_heads * c->full_head_dim) : q_dim;
+                int lqg = c->attn_output_gate ? lq * 2 : lq;
                 if (layer->gguf_wq) {
-                    int n = qg_dim * dim;
+                    int n = lqg * dim;
                     float* fp = (float*)malloc((size_t)n * sizeof(float));
                     if (fp) {
                         tq_dequant_row_gguf(layer->gguf_wq_type, layer->gguf_wq, fp, n);
@@ -3565,7 +3618,7 @@ tq_model_t* tq_load_gguf(const char* path) {
                     }
                 }
                 if (layer->gguf_wo) {
-                    int n = dim * q_dim;
+                    int n = dim * lq;
                     float* fp = (float*)malloc((size_t)n * sizeof(float));
                     if (fp) {
                         tq_dequant_row_gguf(layer->gguf_wo_type, layer->gguf_wo, fp, n);
@@ -3673,6 +3726,7 @@ tq_model_t* tq_load_gguf(const char* path) {
             fprintf(stderr, "tq_load_gguf: Q4 conversion complete — fast matmul path active\n");
         }
 
+skip_q4_conversion: ;
         /* ============================================================
          * MoE shared expert Q4 conversion + LRU cache init
          *

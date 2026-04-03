@@ -57,6 +57,7 @@ typedef struct {
     int full_head_dim;       /* head_dim for full attention layers (e.g., 512 vs sliding 256) */
     int full_n_heads;        /* n_heads for full layers (e.g., 8 vs sliding 16) */
     int full_n_kv_heads;     /* n_kv_heads for full layers (e.g., 2 vs sliding 8) */
+    float final_logit_softcap; /* logit soft-capping: logits = cap * tanh(logits/cap), 0=disabled */
 } tq_model_config_t;
 
 /* ============================================================
@@ -76,9 +77,12 @@ typedef struct {
     float* k_norm;        /* [head_dim] QK-norm for keys */
 
     /* Gemma3/4 extra norms (NULL for Qwen3.5) */
-    float* post_attn_norm;   /* [hidden_dim] post_attention_layernorm (Gemma3 only) */
-    float* pre_ffn_norm;     /* [hidden_dim] pre_feedforward_layernorm (Gemma3 only) */
-    float* post_ffn_norm;    /* [hidden_dim] post_feedforward_layernorm (Gemma3 only) */
+    float* post_attn_norm;   /* [hidden_dim] post_attention_layernorm */
+    float* pre_ffn_norm;     /* [hidden_dim] pre_feedforward_layernorm (MoE FFN) */
+    float* post_ffn_norm;    /* [hidden_dim] post_feedforward_layernorm */
+    float* post_ffn_norm_1;  /* [hidden_dim] post_ffw_norm_1 (MoE output) */
+    float* pre_ffn_norm_2;   /* [hidden_dim] pre_ffw_norm_2 (dense FFN input) */
+    float* post_ffn_norm_2;  /* [hidden_dim] post_ffw_norm_2 (dense FFN output) */
 
     /* Gemma 4 layer output scaling */
     float layer_output_scale; /* scalar applied to residual output (0.0 = disabled) */

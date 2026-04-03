@@ -642,8 +642,16 @@ void tq_moe_forward(const tq_moe_layer_t* layer,
     int num_active = config->num_active;
     int expert_dim = config->expert_intermediate_dim;
 
-    /* Step 1: Route — select top-K experts */
-    tq_moe_route(input, layer->router_weight,
+    /* Step 1: Route — select top-K experts.
+     * Gemma 4: apply per-feature input scaling before routing. */
+    const float* route_input = input;
+    float scaled_input_buf[4096]; /* stack buffer for scaled input */
+    if (layer->router_input_scale && hidden_dim <= 4096) {
+        for (int i = 0; i < hidden_dim; i++)
+            scaled_input_buf[i] = input[i] * layer->router_input_scale[i];
+        route_input = scaled_input_buf;
+    }
+    tq_moe_route(route_input, layer->router_weight,
                  config->num_experts, num_active, hidden_dim,
                  state->top_experts, state->expert_weights);
 

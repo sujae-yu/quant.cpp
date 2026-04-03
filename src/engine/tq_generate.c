@@ -262,16 +262,18 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
 
     /* EOS token IDs — check common values.
      * Qwen3.5: eos = 248044 (<|endoftext|>), also 248046 (<|im_end|>)
+     * Gemma3: eos = 1
+     * Gemma4: eos = 106 (<end_of_turn>)
      * LLaMA: eos = 2 */
-    /* EOS tokens — Gemma=1, Qwen=248044/248046 */
-    int eos_token1 = 1;       /* Gemma <eos>, also common default */
+    int eos_token1 = 1;       /* Gemma3 <eos>, also common default */
     int eos_token2 = 248044;  /* Qwen <|endoftext|> */
     int eos_token3 = 248046;  /* Qwen <|im_end|> */
+    int eos_token4 = 106;     /* Gemma4 <end_of_turn> */
 
     /* Generate loop */
     while (generated < config->max_tokens) {
         if (next_token == eos_token1 || next_token == eos_token2 ||
-            next_token == eos_token3) break;
+            next_token == eos_token3 || next_token == eos_token4) break;
         if (pos >= model->config.max_seq_len) break;
 
         /* Decode token to text */

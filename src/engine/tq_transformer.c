@@ -154,19 +154,23 @@ tq_state_t* tq_create_state_ex(const tq_model_config_t* config, tq_type kv_type,
      * the max of both for workspace.
      * When attn_output_gate is enabled, q_proj outputs 2x for Q + gate. */
     int q_dim = n_heads * config->head_dim;
-    int q_proj_dim = config->attn_output_gate ? q_dim * 2 : q_dim;
+    /* Gemma 4 hybrid: full layers have larger Q dim (n_heads * full_head_dim) */
+    int full_q_dim = (config->full_head_dim > 0 && config->full_n_heads > 0)
+        ? config->full_n_heads * config->full_head_dim : q_dim;
+    int max_q_dim = (full_q_dim > q_dim) ? full_q_dim : q_dim;
+    int q_proj_dim = config->attn_output_gate ? max_q_dim * 2 : max_q_dim;
     int delta_nkv = config->delta_n_kv_heads > 0 ? config->delta_n_kv_heads : config->delta_n_heads;
     int delta_qkv_dim = delta_nkv * config->delta_key_head_dim * 2 + config->delta_n_heads * config->delta_value_head_dim;
     int delta_z_dim = config->delta_n_heads * config->delta_value_head_dim;
     int max_dim = dim;
-    if (q_dim > max_dim) max_dim = q_dim;
+    if (max_q_dim > max_dim) max_dim = max_q_dim;
     if (q_proj_dim > max_dim) max_dim = q_proj_dim;
     if (delta_qkv_dim > max_dim) max_dim = delta_qkv_dim;
 
     s->x      = (float*)calloc((size_t)dim, sizeof(float));
     s->xb     = (float*)calloc((size_t)max_dim, sizeof(float));
     s->xb2    = (float*)calloc((size_t)max_dim, sizeof(float));
-    s->q      = (float*)calloc((size_t)q_dim, sizeof(float));
+    s->q      = (float*)calloc((size_t)max_q_dim, sizeof(float));
     s->k      = (float*)calloc((size_t)kv_dim, sizeof(float));
     s->v      = (float*)calloc((size_t)kv_dim, sizeof(float));
     s->att    = (float*)calloc((size_t)n_heads * max_seq, sizeof(float));
@@ -945,7 +949,13 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
     } else {
         tq_matmul(s->k, s->xb, layer->wk, kv_dim, dim);
     }
-    if (layer->wv_q2) {
+    /* V projection: if V weights are absent (Gemma 4 K=V), copy K to V */
+    int has_v_weights = (layer->wv_q2 || layer->wv_q4 || layer->wv_q8 ||
+                         layer->gguf_wv || layer->wv);
+    if (!has_v_weights) {
+        /* K=V: value is same as key (attention_k_eq_v) */
+        memcpy(s->v, s->k, kv_dim * sizeof(float));
+    } else if (layer->wv_q2) {
         TQ_MATMUL_Q2_OR_1BIT(s->v, s->xb, layer->wv_q2, layer->wv_q2s, s->xb_q8, s->xb_q8s, kv_dim, dim, model->use_1bit_weights);
     } else if (layer->wv_q4) {
         tq_matmul_q4q2_preq(s->v, layer->wv_q4, layer->wv_q4s, layer->wv_q2, layer->wv_q2s, s->xb_q8, s->xb_q8s, kv_dim, dim);
@@ -1669,6 +1679,19 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
         tq_matmul(s->xb2, s->xb, layer->wo, dim, n_heads * head_dim);
     TQ_PROF_STOP(_tp, matmul_ns);
 
+    /* Debug: check attention output magnitude for full layers */
+    if (getenv("TQ_DEBUG") && model->layer_is_sliding && !model->layer_is_sliding[l]) {
+        float max_q = 0, max_k = 0, max_xb2 = 0;
+        for (int i = 0; i < n_heads * head_dim; i++)
+            if (fabsf(s->q[i]) > max_q) max_q = fabsf(s->q[i]);
+        for (int i = 0; i < kv_dim; i++)
+            if (fabsf(s->k[i]) > max_k) max_k = fabsf(s->k[i]);
+        for (int i = 0; i < dim; i++)
+            if (fabsf(s->xb2[i]) > max_xb2) max_xb2 = fabsf(s->xb2[i]);
+        fprintf(stderr, "[DEBUG] L%d full: hd=%d nh=%d kvh=%d kv=%d |Q|=%.2f |K|=%.2f |O|=%.2f\n",
+                l, head_dim, n_heads, n_kv_heads, kv_dim, max_q, max_k, max_xb2);
+    }
+
     /* Residual */
     tq_add(s->x, s->x, s->xb2, dim);
 }
@@ -1791,8 +1814,12 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
                            s->xb, s->xb2, dim, l);
             TQ_PROF_STOP(_tp, moe_ns);
 
-            if (is_gemma3 && layer->post_ffn_norm)
-                tq_rmsnorm(s->xb2, s->xb2, layer->post_ffn_norm, dim, c->rms_norm_eps);
+            /* Gemma 4: MoE output uses post_ffw_norm_1, else fallback to post_ffn_norm */
+            if (is_gemma3) {
+                float* moe_post_norm = layer->post_ffn_norm_1 ? layer->post_ffn_norm_1 : layer->post_ffn_norm;
+                if (moe_post_norm)
+                    tq_rmsnorm(s->xb2, s->xb2, moe_post_norm, dim, c->rms_norm_eps);
+            }
 
             /* Apply layer_output_scale (Gemma 4) */
             float los = layer->layer_output_scale;
@@ -1816,7 +1843,10 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
              * Gemma3 uses pre_feedforward_layernorm.
              * Qwen3.5 uses post_attention_layernorm (stored as ffn_norm). */
             float* ffn_norm_w = layer->ffn_norm;
-            if (is_gemma3 && layer->pre_ffn_norm) {
+            if (did_moe && layer->pre_ffn_norm_2) {
+                /* Gemma 4: dense FFN uses pre_ffw_norm_2 as input norm */
+                ffn_norm_w = layer->pre_ffn_norm_2;
+            } else if (is_gemma3 && layer->pre_ffn_norm) {
                 ffn_norm_w = layer->pre_ffn_norm;
             }
             tq_rmsnorm(s->xb, s->x, ffn_norm_w, dim, c->rms_norm_eps);
@@ -1894,11 +1924,15 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
             }
             TQ_PROF_STOP(_tp, matmul_ns);
 
-            /* Gemma3: apply post_feedforward_layernorm to FFN output before residual */
-            if (is_gemma3 && layer->post_ffn_norm && !did_moe) {
-                /* For Gemma 4 dual-FFN, post_ffn_norm was already used for MoE.
-                 * Dense FFN post-norm would need post_ffw_norm_2 (not yet loaded). */
-                tq_rmsnorm(s->xb2, s->xb2, layer->post_ffn_norm, dim, c->rms_norm_eps);
+            /* Gemma: apply post-FFN norm. For dual-FFN, use post_ffw_norm_2 for dense. */
+            if (is_gemma3) {
+                float* dense_post_norm = NULL;
+                if (did_moe && layer->post_ffn_norm_2)
+                    dense_post_norm = layer->post_ffn_norm_2;
+                else if (layer->post_ffn_norm)
+                    dense_post_norm = layer->post_ffn_norm;
+                if (dense_post_norm)
+                    tq_rmsnorm(s->xb2, s->xb2, dense_post_norm, dim, c->rms_norm_eps);
             }
 
             /* Apply layer_output_scale (Gemma 4) */
@@ -1943,6 +1977,15 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
         tq_matmul(s->logits, s->x, model->output_weight, c->vocab_size, dim);
     }
     TQ_PROF_STOP(_tp, matmul_ns);
+
+    /* Final logit soft-capping: logits = cap * tanh(logits / cap) */
+    if (c->final_logit_softcap > 0.0f) {
+        float cap = c->final_logit_softcap;
+        float inv_cap = 1.0f / cap;
+        for (int i = 0; i < c->vocab_size; i++) {
+            s->logits[i] = cap * tanhf(s->logits[i] * inv_cap);
+        }
+    }
 
     /* Increment profile token count if profiling is active */
     if (s->profile_kv) {

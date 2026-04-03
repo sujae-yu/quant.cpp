@@ -248,6 +248,7 @@ typedef struct {
 /* MoE layer (per transformer layer) */
 typedef struct {
     float*               router_weight;  /* [num_experts, hidden_dim] FP32 */
+    const float*         router_input_scale; /* [hidden_dim] per-feature router input scale (NULL if not used) */
     tq_expert_weights_t* experts;        /* [num_experts] */
     tq_expert_weights_t  shared_expert;  /* always-active expert */
     float*               shared_gate;    /* [hidden_dim] shared expert gate (optional) */
