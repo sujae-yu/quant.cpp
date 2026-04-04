@@ -1691,9 +1691,38 @@ void tq_matmul_gguf(float* out, const float* x,
                     const void* weight, tq_ggml_dtype weight_type,
                     int out_dim, int in_dim)
 {
-    /* Per-matmul Metal dispatch DISABLED — slower than CPU fused dot
-     * due to dispatch overhead. MoE uses tq_metal_moe_forward() instead
-     * which batches all experts in 3 dispatches per layer. */
+    /* Metal GPU dispatch for supported GGUF types.
+     *
+     * Two modes:
+     *   1. Batch mode: when tq_metal_batch_begin_if_available() was called
+     *      by the transformer, all matmuls encode into one command buffer.
+     *      Dispatch overhead is amortized across the batch.
+     *   2. Immediate mode: for large matmuls (out_dim >= 512), the GPU
+     *      throughput beats CPU even with per-call dispatch overhead.
+     *      Small matmuls stay on CPU where fused dot is faster.
+     *
+     * Returns 0 on success, -1 if type unsupported or Metal unavailable.
+     * On -1, falls through to CPU path below. */
+#ifdef TQ_HAS_METAL
+    {
+        extern int tq_metal_available(void);
+        extern int tq_metal_matmul_gguf(float*, const float*, const void*,
+                                        tq_ggml_dtype, int, int);
+        extern int tq_metal_batch_active(void);
+
+        if (tq_metal_available()) {
+            /* In batch mode, always dispatch to GPU (overhead is amortized).
+             * In immediate mode, only for large matrices where GPU wins. */
+            int use_gpu = tq_metal_batch_active() || (out_dim >= 512);
+            if (use_gpu) {
+                int rc = tq_metal_matmul_gguf(out, x, weight, weight_type,
+                                              out_dim, in_dim);
+                if (rc == 0) return; /* GPU handled it */
+                /* rc == -1: unsupported type, fall through to CPU */
+            }
+        }
+    }
+#endif
 
     const size_t block_bytes = tq_ggml_type_size(weight_type);
     const int    block_elems = tq_ggml_type_blck(weight_type);
