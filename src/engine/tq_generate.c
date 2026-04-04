@@ -297,6 +297,9 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
         2,       /* LLaMA 2 </s> */
         106,     /* Gemma4 <end_of_turn> */
         128001,  /* LLaMA 3 <|end_of_text|> */
+        128006,  /* LLaMA 3 <|start_header_id|> (new turn = stop) */
+        128007,  /* LLaMA 3 <|end_header_id|> */
+        128008,  /* LLaMA 3 <|start_of_role|> */
         128009,  /* LLaMA 3 <|eot_id|> */
         248044,  /* Qwen <|endoftext|> */
         248046,  /* Qwen <|im_end|> */
@@ -318,13 +321,47 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
 
             /* Skip special/thinking tokens that shouldn't appear in output.
              * Qwen3.5: <think>...</think>
-             * Gemma 4: thought, <channel|>, <tool|>, <mask>, <unused*> */
+             * Gemma 4: thought, <channel|>, <tool|>, <mask>, <unused*>
+             * LLaMA 3: <|start_header_id|>, <|reserved_special_token_*|> */
+            int should_stop = 0;
             if (piece) {
                 if (strstr(piece, "<think>") || strstr(piece, "</think>") ||
-                    strstr(piece, "thought") || strstr(piece, "<channel|>") ||
-                    strstr(piece, "<tool|>") || strstr(piece, "<mask>") ||
+                    strstr(piece, "<channel|>") || strstr(piece, "<tool|>") ||
+                    strstr(piece, "<mask>") ||
                     strstr(piece, "<unused") || strstr(piece, "<|think")) {
                     piece = "";
+                }
+                /* Gemma 4 "thought" token: only filter if it's the EXACT piece
+                 * (not a substring of normal text like "thoughtful") */
+                if (piece[0] != '\0' && strcmp(piece, "thought") == 0) {
+                    piece = "";
+                }
+                /* Stop generation on turn-boundary tokens (LLaMA 3 / Qwen only).
+                 * Gemma uses token ID-based EOS (106), not text-based detection. */
+                if (strstr(piece, "<|start_header_id|>") ||
+                    strstr(piece, "<|eot_id|>") ||
+                    strstr(piece, "<|im_end|>")) {
+                    should_stop = 1;
+                    piece = "";
+                }
+                /* Filter reserved special tokens */
+                if (strstr(piece, "<|reserved_special_token") ||
+                    strstr(piece, "<1st>") || strstr(piece, "<2nd>") || strstr(piece, "<3rd>")) {
+                    piece = "";
+                }
+            }
+            if (should_stop) break;
+
+            /* Also check accumulated output for turn markers that span multiple tokens */
+            if (output && output_pos > 5) {
+                const char* tail = output + (output_pos > 20 ? output_pos - 20 : 0);
+                if (strstr(tail, "<|start_header") || strstr(tail, "<|eot_id") ||
+                    strstr(tail, "<end_of_turn") || strstr(tail, "<|im_end")) {
+                    /* Trim the marker from output */
+                    char* marker = strstr(output + (output_pos > 30 ? output_pos - 30 : 0), "<|");
+                    if (!marker) marker = strstr(output + (output_pos > 30 ? output_pos - 30 : 0), "<end");
+                    if (marker) { *marker = '\0'; output_pos = (int)(marker - output); }
+                    break;
                 }
             }
 

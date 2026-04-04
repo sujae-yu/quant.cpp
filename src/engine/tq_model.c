@@ -2917,8 +2917,10 @@ tq_model_t* tq_load_gguf(const char* path) {
     /* For hybrid sliding/full attention (Gemma 3/4 only):
      * Override head_dim from first layer's K tensor shape (sliding layer),
      * since sliding layers are the majority and determine KV cache layout.
-     * NOTE: only for Gemma family — Llama/Qwen use uniform head_dim. */
-    if (c->model_type == 1 && c->sliding_window > 0) {
+     * NOTE: only for Gemma family — Llama/Qwen use uniform head_dim.
+     * Use arch string directly since model_type hasn't been set yet. */
+    int is_gemma_arch = (strstr(gguf->arch, "gemma") != NULL);
+    if (is_gemma_arch && c->sliding_window > 0) {
         const tq_gguf_tensor_t* k0 = tq_gguf_find_tensor(gguf, "blk.0.attn_k.weight");
         if (k0 && k0->n_dims >= 2) {
             int k_out = (int)k0->shape[1];
