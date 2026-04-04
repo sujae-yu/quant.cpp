@@ -191,7 +191,15 @@ GGUF format. Load any llama.cpp-compatible model file.
 
 **How is this different from llama.cpp?**
 
-llama.cpp is a full-featured inference framework (250K+ LOC). quant.cpp is a minimal engine (33K LOC) you can read, modify, and embed in your own C/C++ project. On KV compression specifically: llama.cpp Q4_0 gives PPL +10.6% on SmolLM2 1.7B; quant.cpp gives +0.0%.
+llama.cpp is a full-featured inference framework (250K+ LOC). quant.cpp is a minimal engine (33K LOC) you can read, modify, and embed in your own C/C++ project.
+
+**llama.cpp/ollama already has Q4 KV quantization. How is yours better?**
+
+Both use 4 bits per element, but quality differs significantly. On SmolLM2 1.7B:
+- llama.cpp Q4_0 KV: PPL **+10.6%** (noticeable degradation)
+- quant.cpp 4-bit K: PPL **+0.0%** (lossless)
+
+The difference: llama.cpp applies the same quantization scheme to both K and V. quant.cpp quantizes K and V independently with type-appropriate methods. Additionally, quant.cpp offers delta compression — encoding the difference between adjacent keys instead of absolute values — which pushes to 3-bit at only +1.3% PPL. llama.cpp has no equivalent.
 
 **Can I embed this in my app?**
 

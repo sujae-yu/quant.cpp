@@ -197,7 +197,15 @@ GGUF 포맷. llama.cpp 호환 모델 파일을 그대로 사용합니다.
 
 **llama.cpp와 뭐가 다른가요?**
 
-llama.cpp는 전체 기능을 갖춘 추론 프레임워크 (250K+ LOC). quant.cpp는 읽고, 수정하고, 내 프로젝트에 넣을 수 있는 미니멀 엔진 (33K LOC). KV 압축 차이: llama.cpp Q4_0은 SmolLM2 1.7B에서 PPL +10.6%. quant.cpp 4-bit K는 PPL +0.0%.
+llama.cpp는 전체 기능을 갖춘 추론 프레임워크 (250K+ LOC). quant.cpp는 읽고, 수정하고, 내 프로젝트에 넣을 수 있는 미니멀 엔진 (33K LOC).
+
+**llama.cpp/ollama에도 Q4 KV 양자화가 있는데, 뭐가 다른가요?**
+
+둘 다 4-bit이지만 품질 차이가 큽니다. SmolLM2 1.7B 기준:
+- llama.cpp Q4_0 KV: PPL **+10.6%** (눈에 띄는 저하)
+- quant.cpp 4-bit K: PPL **+0.0%** (무손실)
+
+차이점: llama.cpp는 K와 V에 같은 양자화를 적용합니다. quant.cpp는 K와 V를 각각 최적 방식으로 독립 양자화합니다. 추가로 quant.cpp만의 delta 압축이 있습니다 — 인접 key의 차이만 저장하여 3-bit까지 내리면서 PPL +1.3%만 상승. llama.cpp에는 이 기능이 없습니다.
 
 **내 앱에 임베딩할 수 있나요?**
 
