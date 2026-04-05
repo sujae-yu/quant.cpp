@@ -430,7 +430,7 @@ int tq_init_metal_backend(void) {
         tq_pipe_matmul_q8_0 = makePipe(@"matmul_q8_0");
         tq_pipe_matmul_q4_k = makePipe(@"matmul_q4_k");
         tq_pipe_matmul_tq_q4 = makePipe(@"matmul_tq_q4");
-        tq_pipe_matmul_tq_q4_repacked = makePipe(@"matmul_tq_q4_repacked");
+        tq_pipe_matmul_tq_q4_repacked = makePipe(@"matmul_tq_q4_fast");
 
         /* Create compute pipelines — element-wise ops */
         tq_pipe_rmsnorm         = makePipe(@"rmsnorm");
@@ -1739,43 +1739,31 @@ static void encode_q4_matmul(id<MTLComputeCommandEncoder> enc,
     const int TILE = 32;
     int n_tiles = (out_dim + TILE - 1) / TILE;
 
-    /* Try repacked path: look up in cache, lazy-repack on miss */
-    if (tq_pipe_matmul_tq_q4_repacked) {
-        id<MTLBuffer> rp_qs = nil, rp_sc = nil;
-        /* Cache lookup */
-        for (int i = 0; i < g_repack_count; i++) {
-            if (g_repack_cache[i].key == w_qs && g_repack_cache[i].out_dim == out_dim) {
-                rp_qs = g_repack_cache[i].qs;
-                rp_sc = g_repack_cache[i].sc;
-                break;
-            }
-        }
-        /* Cache miss: repack and store */
-        if (!rp_qs && g_repack_count < TQ_REPACK_CACHE_SIZE) {
-            tq_metal_repack_q4(w_qs, w_scales, &rp_qs, &rp_sc, out_dim, in_dim);
-            if (rp_qs && rp_sc) {
-                g_repack_cache[g_repack_count] = (typeof(g_repack_cache[0])){
-                    .key = w_qs, .qs = rp_qs, .sc = rp_sc,
-                    .out_dim = out_dim, .in_dim = in_dim
-                };
-                g_repack_count++;
-            }
-        }
-        if (rp_qs && rp_sc) {
+    /* Fast Q4 kernel: llama.cpp-inspired uint16 mask trick + SIMD-group.
+     * No repacking needed — reads original row-major Q4 layout.
+     * 2 SIMD-groups per threadgroup, each processes 1 output row. */
+    if (tq_pipe_matmul_tq_q4_repacked) {  /* reusing pipeline slot for fast kernel */
+        size_t qs_size = (size_t)out_dim * n_blocks * 16;
+        size_t sc_size = (size_t)out_dim * n_blocks * sizeof(float);
+        id<MTLBuffer> w_qs_buf = tq_get_weight_buffer(w_qs, qs_size);
+        id<MTLBuffer> w_sc_buf = tq_get_weight_buffer(w_scales, sc_size);
+        if (w_qs_buf && w_sc_buf) {
             id<MTLBuffer> indim_buf  = tq_get_dim_buffer((uint32_t)in_dim);
             id<MTLBuffer> outdim_buf = tq_get_dim_buffer((uint32_t)out_dim);
 
             [enc setComputePipelineState:tq_pipe_matmul_tq_q4_repacked];
-            [enc setBuffer:input_buf offset:0 atIndex:0];
+            [enc setBuffer:input_buf  offset:0 atIndex:0];
             [enc setBuffer:output_buf offset:0 atIndex:1];
-            [enc setBuffer:rp_qs     offset:0 atIndex:2];
-            [enc setBuffer:rp_sc     offset:0 atIndex:3];
-            [enc setBuffer:indim_buf offset:0 atIndex:4];
+            [enc setBuffer:w_qs_buf   offset:0 atIndex:2];
+            [enc setBuffer:w_sc_buf   offset:0 atIndex:3];
+            [enc setBuffer:indim_buf  offset:0 atIndex:4];
             [enc setBuffer:outdim_buf offset:0 atIndex:5];
 
-            /* One threadgroup per tile (32 rows), 32 threads per group */
-            MTLSize grid  = MTLSizeMake((NSUInteger)n_tiles, 1, 1);
-            MTLSize group = MTLSizeMake(TILE, 1, 1);
+            /* n_tiles threadgroups, 2 SIMD-groups (64 threads) per group */
+            int n_rows_per_tg = 2;  /* NSG in kernel */
+            int n_tg = (out_dim + n_rows_per_tg - 1) / n_rows_per_tg;
+            MTLSize grid  = MTLSizeMake((NSUInteger)n_tg, 1, 1);
+            MTLSize group = MTLSizeMake(64, 1, 1);  /* 2 × 32 threads */
             [enc dispatchThreadgroups:grid threadsPerThreadgroup:group];
             [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
             return;

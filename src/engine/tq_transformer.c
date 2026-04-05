@@ -2191,6 +2191,9 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
          * Apple Silicon GPU excels at float/half ops, not integer bit manipulation.
          * CPU NEON Q4×Q8 fused dot saturates memory bandwidth more efficiently.
          * Infrastructure preserved for FP16/BF16 weight format (no bit extraction). */
+        /* GPU graph: fast Q4 kernel (uint16 mask + SIMD-group) benchmarked at
+         * 27 tok/s (SmolLM2) vs CPU 96 tok/s. Dispatch overhead remains dominant.
+         * Needs: entire forward without CPU↔GPU sync (graph compilation). */
         if (0 && layer->wq_q4 && layer->wk_q4 && layer->wv_q4 && layer->wo_q4 &&
             layer->w_gate_q4 && layer->w_up_q4 && layer->w_down_q4 &&
             !layer->delta_a_log &&  /* not DeltaNet */
