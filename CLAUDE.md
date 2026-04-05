@@ -3,7 +3,7 @@
 ## Project Overview
 
 quant.cpp is a minimal C inference engine for local LLM with KV cache compression.
-33K LOC, pure C, zero dependencies. Supports 5 architectures via GGUF.
+55K LOC, pure C, zero dependencies. Supports 5 architectures via GGUF.
 Killer feature: delta KV compression — 3-bit keys with PPL -3.2% vs FP32.
 
 ## Architecture

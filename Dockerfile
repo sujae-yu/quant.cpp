@@ -15,7 +15,9 @@ RUN cmake -B build \
         -DCMAKE_EXE_LINKER_FLAGS="-static" \
         -DTQ_BUILD_TESTS=OFF \
         -DTQ_BUILD_BENCH=OFF \
-    && cmake --build build -j$(nproc) --target quant
+        -DTQ_BUILD_SERVER=ON \
+    && cmake --build build -j$(nproc) --target quant \
+    && cmake --build build -j$(nproc) --target quant-server
 
 # ---- Runtime stage ----
 FROM alpine:3.20
@@ -25,13 +27,14 @@ LABEL org.opencontainers.image.title="quant.cpp" \
       org.opencontainers.image.description="LLM inference with 7x longer context — pure C, zero dependencies" \
       org.opencontainers.image.source="https://github.com/quantumaikr/quant.cpp"
 
-# Copy only the binary
+# Copy binaries
 COPY --from=builder /src/build/quant /usr/local/bin/quant
+COPY --from=builder /src/build/quant-server /usr/local/bin/quant-server
 
 # Create model mount point
 RUN mkdir -p /models
 
-# Future server mode
+# OpenAI-compatible server port
 EXPOSE 8080
 
 # Volume for GGUF model files

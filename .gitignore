@@ -45,6 +45,12 @@ models/.claude/worktrees/
 *.gguf
 models/
 
+# Benchmark results (machine-generated)
+bench/ablation_results/
+bench/kv_quality_results/
+bench/data/long_context_ppl_*.csv
+bench/data/long_context_ppl_*.json
+
 # Makefile build artifacts
 quant
 tq_convert

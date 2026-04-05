@@ -6,7 +6,7 @@
 
 <p align="center">
   Lossless KV cache compression. Also ships as <a href="#-single-header-mode"><b>quant.h</b></a> — a single-header library.<br>
-  67K LOC. Embeddable. Read it in an afternoon.
+  55K LOC. Embeddable. Read it in an afternoon.
 </p>
 
 <p align="center">
@@ -76,7 +76,7 @@ LLM memory is dominated by the **KV cache**, not model weights. At 32K context, 
 |  | quant.cpp | llama.cpp | vLLM | MLX | ONNX RT |
 |:--|:---------:|:---------:|:----:|:---:|:-------:|
 | KV compression | **7x, +0% PPL** | +10.6% PPL | -- | -- | -- |
-| Code size | **67K LOC** | 250K+ | 100K+ | 50K+ | 500K+ |
+| Code size | **55K LOC** | 250K+ | 100K+ | 50K+ | 500K+ |
 | Dependencies | **zero** | ggml | PyTorch | Apple fw | runtime |
 | Embeddable | **single header** | -- | -- | -- | complex |
 | WASM | **192KB** | -- | -- | -- | -- |
@@ -278,7 +278,7 @@ Everything runs client-side. Nothing is uploaded. KV compression active by defau
 <details>
 <summary><b>How is this different from llama.cpp?</b></summary>
 
-llama.cpp is a full-featured inference framework (250K+ LOC). quant.cpp is a minimal engine (67K LOC) you can read, modify, and embed. Different tools for different problems: llama.cpp optimizes speed, quant.cpp optimizes memory (KV compression) and embeddability (single header).
+llama.cpp is a full-featured inference framework (250K+ LOC). quant.cpp is a minimal engine (55K LOC) you can read, modify, and embed. Different tools for different problems: llama.cpp optimizes speed, quant.cpp optimizes memory (KV compression) and embeddability (single header).
 
 </details>
 
