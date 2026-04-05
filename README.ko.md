@@ -6,15 +6,16 @@
 
 <p align="center">
   무손실 KV 캐시 압축. <a href="#-단일-헤더-모드"><b>quant.h</b></a> 단일 헤더 라이브러리로도 제공됩니다.<br>
-  55K LOC. 임베딩 가능. 오후 한나절이면 전체 코드를 읽을 수 있습니다.
+  67K LOC. 임베딩 가능. 오후 한나절이면 전체 코드를 읽을 수 있습니다.
 </p>
 
 <p align="center">
+  <a href="https://github.com/quantumaikr/quant.cpp/releases/tag/v0.5.0"><img src="https://img.shields.io/badge/release-v0.5.0-blue" alt="Release"></a>
   <a href="#"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License"></a>
   <a href="#"><img src="https://img.shields.io/badge/tests-34%20pass-brightgreen" alt="Tests"></a>
-  <a href="#"><img src="https://img.shields.io/badge/score-99.7%25-brightgreen" alt="Score"></a>
+  <a href="#"><img src="https://img.shields.io/badge/score-99.2%25-brightgreen" alt="Score"></a>
   <a href="#"><img src="https://img.shields.io/badge/models-7%20verified-blue" alt="Models"></a>
-  <a href="#"><img src="https://img.shields.io/badge/WASM-192KB-purple" alt="WASM"></a>
+  <a href="https://quantumaikr.github.io/quant.cpp/"><img src="https://img.shields.io/badge/WASM_데모-192KB-purple" alt="WASM"></a>
   <a href="#"><img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20WASM-orange" alt="Platforms"></a>
 </p>
 
@@ -31,7 +32,7 @@ LLM 메모리의 병목은 모델 가중치가 아니라 **KV 캐시**입니다.
 │  모델 (4GB)  │  KV 캐시 (FP16)                              │
 │              │  ████████████████████████  8K 컨텍스트  ← OOM │
 ├──────────────┼──────────────────────────────────────────────┤
-│  모델 (4GB)  │  KV (4-bit) ███  →→→→→  55K 컨텍스트        │
+│  모델 (4GB)  │  KV (4-bit) ███  →→→→→  350K 컨텍스트        │
 │              │              ↑ 6.9배 작음                     │
 └──────────────┴──────────────────────────────────────────────┘
 ```
@@ -76,7 +77,7 @@ LLM 메모리의 병목은 모델 가중치가 아니라 **KV 캐시**입니다.
 |  | quant.cpp | llama.cpp | vLLM | MLX | ONNX RT |
 |:--|:---------:|:---------:|:----:|:---:|:-------:|
 | KV 압축 | **7x, +0% PPL** | +10.6% PPL | -- | -- | -- |
-| 코드 크기 | **55K LOC** | 250K+ | 100K+ | 50K+ | 500K+ |
+| 코드 크기 | **67K LOC** | 250K+ | 100K+ | 50K+ | 500K+ |
 | 의존성 | **제로** | ggml | PyTorch | Apple fw | 런타임 |
 | 임베더블 | **단일 헤더** | -- | -- | -- | 복잡 |
 | WASM | **192KB** | -- | -- | -- | -- |
@@ -300,7 +301,7 @@ curl http://localhost:8080/v1/chat/completions \
 <details>
 <summary><b>llama.cpp와 뭐가 다른가요?</b></summary>
 
-llama.cpp는 전체 기능을 갖춘 추론 프레임워크 (250K+ LOC). quant.cpp는 읽고, 수정하고, 임베딩할 수 있는 미니멀 엔진 (55K LOC). 다른 문제를 위한 다른 도구입니다: llama.cpp는 속도를, quant.cpp는 메모리(KV 압축)와 임베더빌리티(단일 헤더)를 최적화합니다.
+llama.cpp는 전체 기능을 갖춘 추론 프레임워크 (250K+ LOC). quant.cpp는 읽고, 수정하고, 임베딩할 수 있는 미니멀 엔진 (67K LOC). 다른 문제를 위한 다른 도구입니다: llama.cpp는 속도를, quant.cpp는 메모리(KV 압축)와 임베더빌리티(단일 헤더)를 최적화합니다.
 
 </details>
 
@@ -349,6 +350,19 @@ Linux, macOS, Windows (MSVC/MinGW), iOS, Android, WASM에서 동작합니다.
 광범위하게 테스트했습니다 (2-bit delta, NF2, online SVD, multi-hash). 어떤 접근도 허용 가능한 품질을 달성하지 못했습니다. step당 코사인 0.997이 200 step 후 0.885로 누적됩니다. 3-bit + delta가 실용적 최소입니다.
 
 </details>
+
+---
+
+## 문서
+
+| 문서 | 설명 |
+|:-----|:-----|
+| **[API 레퍼런스](docs/api.md)** | quant.h + libturboquant 전체 C API (730줄) |
+| **[커스텀 양자화 가이드](docs/custom-quantization.md)** | 함수 3개로 새 KV 양자화 타입 추가 |
+| **[로드맵](ROADMAP.md)** | 프로젝트 방향과 계획 |
+| **[변경 이력](CHANGELOG.md)** | 버전별 릴리스 노트 |
+| **[기술 리포트](docs/papers/quant_cpp_tech_report.md)** | 아키텍처와 벤치마크 (Arxiv 초안) |
+| **[WASM 데모](https://quantumaikr.github.io/quant.cpp/)** | 브라우저에서 바로 체험 — 설치 불필요 |
 
 ---
 

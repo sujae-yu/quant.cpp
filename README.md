@@ -6,15 +6,16 @@
 
 <p align="center">
   Lossless KV cache compression. Also ships as <a href="#-single-header-mode"><b>quant.h</b></a> — a single-header library.<br>
-  55K LOC. Embeddable. Read it in an afternoon.
+  67K LOC. Embeddable. Read it in an afternoon.
 </p>
 
 <p align="center">
+  <a href="https://github.com/quantumaikr/quant.cpp/releases/tag/v0.5.0"><img src="https://img.shields.io/badge/release-v0.5.0-blue" alt="Release"></a>
   <a href="#"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License"></a>
   <a href="#"><img src="https://img.shields.io/badge/tests-34%20pass-brightgreen" alt="Tests"></a>
-  <a href="#"><img src="https://img.shields.io/badge/score-99.7%25-brightgreen" alt="Score"></a>
+  <a href="#"><img src="https://img.shields.io/badge/score-99.2%25-brightgreen" alt="Score"></a>
   <a href="#"><img src="https://img.shields.io/badge/models-7%20verified-blue" alt="Models"></a>
-  <a href="#"><img src="https://img.shields.io/badge/WASM-192KB-purple" alt="WASM"></a>
+  <a href="https://quantumaikr.github.io/quant.cpp/"><img src="https://img.shields.io/badge/WASM_demo-192KB-purple" alt="WASM"></a>
   <a href="#"><img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20WASM-orange" alt="Platforms"></a>
 </p>
 
@@ -31,7 +32,7 @@ LLM memory is dominated by the **KV cache**, not model weights. At 32K context, 
 │  Model (4GB) │  KV Cache (FP16)                             │
 │              │  ████████████████████████  8K context  ← OOM │
 ├──────────────┼──────────────────────────────────────────────┤
-│  Model (4GB) │  KV (4-bit) ███  →→→→→  55K context         │
+│  Model (4GB) │  KV (4-bit) ███  →→→→→  350K context         │
 │              │              ↑ 6.9x smaller                  │
 └──────────────┴──────────────────────────────────────────────┘
 ```
@@ -76,7 +77,7 @@ LLM memory is dominated by the **KV cache**, not model weights. At 32K context, 
 |  | quant.cpp | llama.cpp | vLLM | MLX | ONNX RT |
 |:--|:---------:|:---------:|:----:|:---:|:-------:|
 | KV compression | **7x, +0% PPL** | +10.6% PPL | -- | -- | -- |
-| Code size | **55K LOC** | 250K+ | 100K+ | 50K+ | 500K+ |
+| Code size | **67K LOC** | 250K+ | 100K+ | 50K+ | 500K+ |
 | Dependencies | **zero** | ggml | PyTorch | Apple fw | runtime |
 | Embeddable | **single header** | -- | -- | -- | complex |
 | WASM | **192KB** | -- | -- | -- | -- |
@@ -300,7 +301,7 @@ Build with `-DTQ_BUILD_SERVER=ON`. Streaming SSE supported. KV compression confi
 <details>
 <summary><b>How is this different from llama.cpp?</b></summary>
 
-llama.cpp is a full-featured inference framework (250K+ LOC). quant.cpp is a minimal engine (55K LOC) you can read, modify, and embed. Different tools for different problems: llama.cpp optimizes speed, quant.cpp optimizes memory (KV compression) and embeddability (single header).
+llama.cpp is a full-featured inference framework (250K+ LOC). quant.cpp is a minimal engine (67K LOC) you can read, modify, and embed. Different tools for different problems: llama.cpp optimizes speed, quant.cpp optimizes memory (KV compression) and embeddability (single header).
 
 </details>
 
@@ -349,6 +350,19 @@ Yes. `cd wasm && bash build.sh`. The WASM binary is 192KB. Drop a GGUF model and
 Tested extensively (2-bit delta, NF2, online SVD, multi-hash). None reached acceptable quality. Per-step cosine 0.997 compounds to 0.885 after 200 steps. 3-bit + delta is the practical minimum.
 
 </details>
+
+---
+
+## Documentation
+
+| Document | Description |
+|:---------|:------------|
+| **[API Reference](docs/api.md)** | Full C API for quant.h and libturboquant (730 lines) |
+| **[Custom Quantization](docs/custom-quantization.md)** | Add your own KV type in 3 functions |
+| **[ROADMAP](ROADMAP.md)** | Project direction and planned features |
+| **[CHANGELOG](CHANGELOG.md)** | Version history and release notes |
+| **[Tech Report](docs/papers/quant_cpp_tech_report.md)** | Architecture and benchmarks (Arxiv draft) |
+| **[WASM Demo](https://quantumaikr.github.io/quant.cpp/)** | Try it in your browser — no install needed |
 
 ---
 
