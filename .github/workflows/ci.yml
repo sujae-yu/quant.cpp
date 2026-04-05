@@ -18,6 +18,9 @@ jobs:
           - os: macos-latest
             arch: arm64
             cmake_extra: ""
+          - os: windows-latest
+            arch: x64
+            cmake_extra: ""
 
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.os }} (${{ matrix.arch }})
@@ -38,13 +41,19 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release
           -DTQ_BUILD_TESTS=ON
           -DTQ_BUILD_BENCH=ON
+          -DTQ_BUILD_SERVER=ON
           ${{ matrix.cmake_extra }}
 
-      - name: Build
+      - name: Build (Unix)
+        if: runner.os != 'Windows'
         run: cmake --build build --config Release -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
 
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        run: cmake --build build --config Release -j $env:NUMBER_OF_PROCESSORS
+
       - name: Run tests
-        run: ctest --test-dir build --output-on-failure --timeout 120
+        run: ctest --test-dir build --output-on-failure --timeout 120 -C Release
 
       - name: Upload test results
         if: failure()

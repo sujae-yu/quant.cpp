@@ -16,16 +16,22 @@ jobs:
 
       - name: Build
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release
-          cmake --build build -j$(sysctl -n hw.ncpu)
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DTQ_BUILD_SERVER=ON
+          cmake --build build --config Release -j$(sysctl -n hw.ncpu)
 
-      - name: Rename binary
-        run: cp build/quant quant-macos-arm64
+      - name: Package
+        run: |
+          mkdir -p quant.cpp-macos-arm64
+          cp build/quant quant.cpp-macos-arm64/
+          cp build/quant-server quant.cpp-macos-arm64/
+          cp LICENSE quant.cpp-macos-arm64/ 2>/dev/null || true
+          cp README.md quant.cpp-macos-arm64/ 2>/dev/null || true
+          tar czf quant.cpp-macos-arm64.tar.gz quant.cpp-macos-arm64/
 
       - uses: actions/upload-artifact@v4
         with:
-          name: quant-macos-arm64
-          path: quant-macos-arm64
+          name: quant.cpp-macos-arm64
+          path: quant.cpp-macos-arm64.tar.gz
 
   build-linux-x86_64:
     runs-on: ubuntu-latest
@@ -34,36 +40,64 @@ jobs:
 
       - name: Build
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release \
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DTQ_BUILD_SERVER=ON \
             -DCMAKE_EXE_LINKER_FLAGS="-static -pthread"
-          cmake --build build -j$(nproc)
+          cmake --build build --config Release -j$(nproc)
 
-      - name: Rename binary
-        run: cp build/quant quant-linux-x86_64
+      - name: Package
+        run: |
+          mkdir -p quant.cpp-linux-x86_64
+          cp build/quant quant.cpp-linux-x86_64/
+          cp build/quant-server quant.cpp-linux-x86_64/
+          cp LICENSE quant.cpp-linux-x86_64/ 2>/dev/null || true
+          cp README.md quant.cpp-linux-x86_64/ 2>/dev/null || true
+          tar czf quant.cpp-linux-x86_64.tar.gz quant.cpp-linux-x86_64/
 
       - uses: actions/upload-artifact@v4
         with:
-          name: quant-linux-x86_64
-          path: quant-linux-x86_64
+          name: quant.cpp-linux-x86_64
+          path: quant.cpp-linux-x86_64.tar.gz
+
+  build-windows-x64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DTQ_BUILD_SERVER=ON
+          cmake --build build --config Release -j $env:NUMBER_OF_PROCESSORS
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path quant.cpp-windows-x64
+          Copy-Item build/Release/quant.exe quant.cpp-windows-x64/
+          Copy-Item build/Release/quant-server.exe quant.cpp-windows-x64/
+          if (Test-Path LICENSE) { Copy-Item LICENSE quant.cpp-windows-x64/ }
+          if (Test-Path README.md) { Copy-Item README.md quant.cpp-windows-x64/ }
+          Compress-Archive -Path quant.cpp-windows-x64/* -DestinationPath quant.cpp-windows-x64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quant.cpp-windows-x64
+          path: quant.cpp-windows-x64.zip
 
   release:
-    needs: [build-macos-arm64, build-linux-x86_64]
+    needs: [build-macos-arm64, build-linux-x86_64, build-windows-x64]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: quant-macos-arm64
+          path: artifacts
 
-      - uses: actions/download-artifact@v4
-        with:
-          name: quant-linux-x86_64
-
-      - name: Make binaries executable
-        run: chmod +x quant-macos-arm64 quant-linux-x86_64
+      - name: List artifacts
+        run: find artifacts -type f
 
       - uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: |
-            quant-macos-arm64
-            quant-linux-x86_64
+            artifacts/quant.cpp-macos-arm64/quant.cpp-macos-arm64.tar.gz
+            artifacts/quant.cpp-linux-x86_64/quant.cpp-linux-x86_64.tar.gz
+            artifacts/quant.cpp-windows-x64/quant.cpp-windows-x64.zip
