@@ -49,10 +49,25 @@ LLM memory is dominated by the **KV cache**, not model weights. At 32K context, 
 | 8GB Laptop | Llama 8B (Q4) | 16K tokens | **61K tokens** | **3.8x** |
 | 24GB RTX 3090 | Llama 8B (Q4) | 147K tokens | **559K tokens** | **3.8x** |
 
+## Get Started in 60 Seconds
+
 ```bash
-# One command. That's it.
-./quant model.gguf -p "hello" -k uniform_4b -v q4
+# 1. Build
+git clone https://github.com/quantumaikr/quant.cpp && cd quant.cpp
+cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc)
+
+# 2. Download a model (135MB starter)
+pip install huggingface_hub
+hf download bartowski/SmolLM2-135M-Instruct-GGUF SmolLM2-135M-Instruct-Q8_0.gguf --local-dir models/
+
+# 3. Run
+./build/quant models/SmolLM2-135M-Instruct-Q8_0.gguf --chat -p "Hello!" -j 4
+
+# 4. With KV compression (7x longer context)
+./build/quant models/SmolLM2-135M-Instruct-Q8_0.gguf --chat -p "Hello!" -k uniform_4b -v q4
 ```
+
+> **[Full API docs](docs/api.md)** · **[WASM demo](https://quantumaikr.github.io/quant.cpp/)** · **[Add your own KV type](docs/custom-quantization.md)**
 
 ---
 
@@ -170,24 +185,20 @@ Models with QK-norm normalize keys to the unit sphere, creating extremely sparse
 
 ---
 
-## Quick Start
+## Advanced Usage
 
 ```bash
-git clone https://github.com/quantumaikr/quant.cpp && cd quant.cpp
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(nproc)
-
-# Basic inference
-./build/quant model.gguf -p "hello"
-
-# With KV compression (recommended)
-./build/quant model.gguf -p "hello" -k uniform_4b -v q4
-
-# Delta compression (maximum context)
-./build/quant model.gguf -p "hello" -k uniform_3b -v q4 --delta
+# Delta compression (maximum context, 8.5x)
+./build/quant model.gguf --chat -p "hello" -k uniform_3b -v q4 --delta
 
 # Perplexity benchmark
 ./build/quant model.gguf --ppl input.txt -k uniform_4b -v q4
+
+# Model info
+./build/quant model.gguf --info
+
+# Performance profiling
+./build/quant model.gguf --chat -p "hello" -n 50 --profile
 ```
 
 ---
