@@ -246,6 +246,28 @@ Everything runs client-side. Nothing is uploaded. KV compression active by defau
 
 ---
 
+## Docker & Server
+
+**Docker** (zero-dependency, ~10MB image):
+```bash
+docker build -t quant.cpp .
+docker run -v ./models:/models quant.cpp /models/model.gguf -p "hello" -k uniform_4b -v q4
+```
+
+**OpenAI-compatible server** (`/v1/chat/completions`):
+```bash
+cmake -B build -DTQ_BUILD_SERVER=ON && cmake --build build
+./build/quant-server model.gguf -p 8080 -k uniform_4b
+
+# Works with the OpenAI Python SDK
+curl http://localhost:8080/v1/chat/completions \
+  -d '{"messages":[{"role":"user","content":"Hello"}],"max_tokens":64}'
+```
+
+Build with `-DTQ_BUILD_SERVER=ON`. Streaming SSE supported. KV compression configurable per request.
+
+---
+
 ## Backends & Performance
 
 | Backend | Platform | Status | Notes |

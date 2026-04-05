@@ -246,6 +246,28 @@ python3 -m http.server 8080       # 로컬 서버 시작
 
 ---
 
+## Docker & 서버
+
+**Docker** (의존성 제로, ~10MB 이미지):
+```bash
+docker build -t quant.cpp .
+docker run -v ./models:/models quant.cpp /models/model.gguf -p "hello" -k uniform_4b -v q4
+```
+
+**OpenAI 호환 서버** (`/v1/chat/completions`):
+```bash
+cmake -B build -DTQ_BUILD_SERVER=ON && cmake --build build
+./build/quant-server model.gguf -p 8080 -k uniform_4b
+
+# OpenAI Python SDK와 호환
+curl http://localhost:8080/v1/chat/completions \
+  -d '{"messages":[{"role":"user","content":"Hello"}],"max_tokens":64}'
+```
+
+`-DTQ_BUILD_SERVER=ON`으로 빌드. SSE 스트리밍 지원. 요청별 KV 압축 설정 가능.
+
+---
+
 ## 백엔드 & 성능
 
 | 백엔드 | 플랫폼 | 상태 | 비고 |
