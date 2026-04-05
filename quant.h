@@ -14072,11 +14072,11 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
      * Gemma 3 with query_pre_attn_scalar: scale = 1/sqrt(scalar)
      * Others: scale = 1/sqrt(head_dim) */
     float attn_scale_dim = (float)head_dim;
-    if (c->use_qk_norm && c->model_type == 1 && c->full_head_dim > 0 && !c->is_moe) {
-        /* Gemma 4: QK-norm normalizes Q,K per head, but we still need 1/sqrt(head_dim)
-         * scaling. QK-norm ensures ||Q||=||K||~sqrt(head_dim) after norm weights,
-         * so the dot product scales as head_dim without explicit scaling. */
-        attn_scale_dim = (float)head_dim;
+    if (c->is_gemma4) {
+        /* Gemma 4: attention_scale = 1.0 (QK-norm already normalizes Q,K per head).
+         * Reference: refs/llama.cpp/src/llama-model.cpp line 1273
+         * Set attn_scale_dim = 1.0 so that 1/sqrt(attn_scale_dim) = 1.0 */
+        attn_scale_dim = 1.0f;
     } else if (c->query_pre_attn_scalar > 0.0f) {
         attn_scale_dim = c->query_pre_attn_scalar;
         if (c->full_head_dim > 0 && model->layer_is_sliding && !model->layer_is_sliding[l]) {
@@ -15376,30 +15376,71 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
     int output_pos = 0;
     int prev_token = prompt_tokens[n_prompt - 1];
 
-    /* EOS token IDs — check common values.
-     * Qwen3.5: eos = 248044 (<|endoftext|>), also 248046 (<|im_end|>)
+    /* EOS token IDs — check common values across model families.
+     * Qwen3.5: eos = 248044 (<|endoftext|>), 248046 (<|im_end|>)
      * Gemma3: eos = 1
      * Gemma4: eos = 106 (<end_of_turn>)
-     * LLaMA: eos = 2 */
-    int eos_token1 = 1;       /* Gemma3 <eos>, also common default */
-    int eos_token2 = 248044;  /* Qwen <|endoftext|> */
-    int eos_token3 = 248046;  /* Qwen <|im_end|> */
-    int eos_token4 = 106;     /* Gemma4 <end_of_turn> */
+     * LLaMA 2: eos = 2
+     * LLaMA 3: eos = 128001 (<|end_of_text|>), 128009 (<|eot_id|>) */
+    int eos_tokens[] = {
+        1,       /* Gemma3 <eos> */
+        2,       /* LLaMA 2 </s> */
+        106,     /* Gemma4 <end_of_turn> */
+        128001,  /* LLaMA 3 <|end_of_text|> */
+        128006,  /* LLaMA 3 <|start_header_id|> (new turn = stop) */
+        128007,  /* LLaMA 3 <|end_header_id|> */
+        128008,  /* LLaMA 3 <|start_of_role|> */
+        128009,  /* LLaMA 3 <|eot_id|> */
+        248044,  /* Qwen <|endoftext|> */
+        248046,  /* Qwen <|im_end|> */
+    };
+    int n_eos = sizeof(eos_tokens) / sizeof(eos_tokens[0]);
 
     /* Generate loop */
     while (generated < config->max_tokens) {
-        if (next_token == eos_token1 || next_token == eos_token2 ||
-            next_token == eos_token3 || next_token == eos_token4) break;
+        int is_eos = 0;
+        for (int e = 0; e < n_eos; e++) {
+            if (next_token == eos_tokens[e]) { is_eos = 1; break; }
+        }
+        if (is_eos) break;
         if (pos >= model->config.max_seq_len) break;
 
         /* Decode token to text */
         if (tokenizer) {
             const char* piece = tq_decode(tokenizer, prev_token, next_token);
 
-            /* Skip thinking tokens (e.g. Qwen3.5 <think>...</think>) */
-            if (piece && (strstr(piece, "<think>") || strstr(piece, "</think>"))) {
-                piece = "";
+            /* Skip special/thinking tokens that shouldn't appear in output.
+             * Qwen3.5: <think>...</think>
+             * Gemma 4: thought, <channel|>, <tool|>, <mask>, <unused*>
+             * LLaMA 3: <|start_header_id|>, <|reserved_special_token_*|> */
+            int should_stop = 0;
+            if (piece) {
+                if (strstr(piece, "<think>") || strstr(piece, "</think>") ||
+                    strstr(piece, "<channel|>") || strstr(piece, "<tool|>") ||
+                    strstr(piece, "<mask>") ||
+                    strstr(piece, "<unused") || strstr(piece, "<|think")) {
+                    piece = "";
+                }
+                /* Gemma 4 "thought" token: only filter if it's the EXACT piece
+                 * (not a substring of normal text like "thoughtful") */
+                if (piece[0] != '\0' && strcmp(piece, "thought") == 0) {
+                    piece = "";
+                }
+                /* Stop generation on turn-boundary tokens (LLaMA 3 / Qwen only).
+                 * Gemma uses token ID-based EOS (106), not text-based detection. */
+                if (strstr(piece, "<|start_header_id|>") ||
+                    strstr(piece, "<|eot_id|>") ||
+                    strstr(piece, "<|im_end|>")) {
+                    should_stop = 1;
+                    piece = "";
+                }
+                /* Filter reserved special tokens */
+                if (strstr(piece, "<|reserved_special_token") ||
+                    strstr(piece, "<1st>") || strstr(piece, "<2nd>") || strstr(piece, "<3rd>")) {
+                    piece = "";
+                }
             }
+            if (should_stop) break;
 
             int piece_len = (int)strlen(piece);
 
