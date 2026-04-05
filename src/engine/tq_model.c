@@ -4043,6 +4043,7 @@ skip_q4_conversion: ;
 #ifdef TQ_HAS_METAL
     {
         extern int tq_metal_gpu_init_buffers(int, int, int, int);
+        extern int tq_metal_gpu_init_attn(int, int, int);
         int max_q_dim = c->n_heads * c->head_dim;
         int max_kv_dim = c->n_kv_heads * c->head_dim;
         if (c->full_n_heads > 0 && c->full_head_dim > 0) {
@@ -4052,6 +4053,9 @@ skip_q4_conversion: ;
             if (full_kv > max_kv_dim) max_kv_dim = full_kv;
         }
         tq_metal_gpu_init_buffers(c->hidden_dim, c->intermediate_dim, max_q_dim, max_kv_dim);
+
+        /* Initialize attention + KV cache GPU buffers for compute graph forward */
+        tq_metal_gpu_init_attn(c->n_heads, c->max_seq_len, max_kv_dim);
     }
 #endif
 

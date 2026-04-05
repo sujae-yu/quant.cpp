@@ -337,6 +337,62 @@ int tq_metal_moe_forward(
     const int*      up_types,       /* per-expert up quant types, NULL = use weight_type */
     const int*      down_types);    /* per-expert down quant types, NULL = use weight_type */
 
+/* ============================================================
+ * GPU Compute Graph — Full Layer Forward
+ *
+ * Encodes ALL operations for one transformer layer into a single
+ * Metal command buffer with minimal CPU<->GPU sync.
+ * Eliminates per-kernel dispatch overhead that made per-matmul
+ * GPU dispatch slower than CPU NEON.
+ *
+ * Usage:
+ *   tq_metal_gpu_init_buffers(dim, inter, q_dim, kv_dim);
+ *   tq_metal_gpu_init_attn(n_heads, max_seq, kv_dim);
+ *   for each layer:
+ *     tq_metal_forward_layer(x, key_cache, value_cache, ...);
+ * ============================================================ */
+
+/* Initialize persistent GPU activation buffers (call once at model load) */
+int tq_metal_gpu_init_buffers(int max_dim, int max_inter, int max_q_dim, int max_kv_dim);
+
+/* Initialize attention + KV cache GPU buffers (call once after config is known) */
+int tq_metal_gpu_init_attn(int n_heads, int max_seq, int kv_dim);
+
+/* Check if full GPU compute graph forward is available */
+int tq_metal_graph_available(void);
+
+/* Full transformer layer forward on GPU (Q4 weights).
+ * Encodes rmsnorm → QKV → RoPE → attention → O-proj → residual →
+ * rmsnorm → gate/up → activation → mul → down → residual.
+ * Returns 0 on success, -1 if unavailable (use CPU fallback). */
+int tq_metal_forward_layer(
+    float* x,
+    float* key_cache, float* value_cache,
+    const float* w_attn_norm, const float* w_ffn_norm,
+    const uint8_t* wq_qs, const float* wq_sc,
+    const uint8_t* wk_qs, const float* wk_sc,
+    const uint8_t* wv_qs, const float* wv_sc,
+    const uint8_t* wo_qs, const float* wo_sc,
+    const uint8_t* wg_qs, const float* wg_sc,
+    const uint8_t* wu_qs, const float* wu_sc,
+    const uint8_t* wd_qs, const float* wd_sc,
+    int dim, int n_heads, int n_kv_heads, int head_dim,
+    int inter_dim, int pos, int seq_len, float rope_base, float rms_eps,
+    int use_gelu);
+
+/* Legacy layer forward (QKV matmul only, backward compat) */
+int tq_metal_layer_forward(
+    float* xb, float* xb2, float* q, float* k, float* v,
+    float* hb, float* hb2,
+    const uint8_t* wq_qs, const float* wq_scales,
+    const uint8_t* wk_qs, const float* wk_scales,
+    const uint8_t* wv_qs, const float* wv_scales,
+    const uint8_t* wo_qs, const float* wo_scales,
+    const uint8_t* wg_qs, const float* wg_scales,
+    const uint8_t* wu_qs, const float* wu_scales,
+    const uint8_t* wd_qs, const float* wd_scales,
+    int dim, int q_dim, int kv_dim, int inter_dim);
+
 #ifdef __cplusplus
 }
 #endif

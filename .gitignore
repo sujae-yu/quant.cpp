@@ -58,3 +58,4 @@ libturboquant.a
 *.o
 tq_run
 tq_run.dSYM/
+.claude/worktrees/

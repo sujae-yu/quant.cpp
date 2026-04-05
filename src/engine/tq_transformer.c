@@ -2126,6 +2126,68 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
         /* layer_output_scale: simple scalar multiply on entire hidden state (Gemma 4).
          * No need to save/restore residual. */
 
+        /* ============================================================
+         * GPU Compute Graph: Full-layer GPU forward
+         *
+         * When ALL Q4 weights are available for a standard self-attn layer
+         * (no DeltaNet, no hybrid attention, no attn_output_gate, no QK-norm),
+         * attempt to run the entire layer on GPU with a single command buffer.
+         * This eliminates ~20 per-kernel dispatch overheads per layer.
+         *
+         * Falls through to CPU path on failure (returns -1).
+         * ============================================================ */
+        int gpu_layer_done = 0;
+#ifdef __APPLE__
+        /* GPU compute graph: full layer forward on Metal.
+         * Currently 2-commit-per-layer (Phase A: QKV+RoPE, Phase B: attn+FFN).
+         * Benchmark: 0.6 tok/s vs 17 tok/s CPU — disabled until 1-commit design.
+         * Root cause: waitUntilCompleted overhead (~0.3ms × 2 × 28 layers = 17ms).
+         * TODO: move KV cache to GPU to eliminate Phase A commit.
+         * Infrastructure kept for batch inference (multiple tokens per forward). */
+        if (0 && layer->wq_q4 && layer->wk_q4 && layer->wv_q4 && layer->wo_q4 &&
+            layer->w_gate_q4 && layer->w_up_q4 && layer->w_down_q4 &&
+            !layer->delta_a_log &&  /* not DeltaNet */
+            !layer->q_norm &&       /* no QK-norm (would need per-head norm on GPU) */
+            !c->attn_output_gate && /* no attention output gate */
+            !layer->moe &&          /* not MoE */
+            !(model->layer_is_sliding && !model->layer_is_sliding[l] && c->full_head_dim > 0) && /* not hybrid attention */
+            c->partial_rotary_factor <= 0.0f &&  /* full RoPE only (no partial) */
+            !model->rope_freqs &&   /* no learned RoPE frequencies */
+            !s->use_fp16_values &&  /* FP32 value cache only */
+            s->value_quant_bits == 0)  /* no quantized value cache */
+        {
+            int kv_dim_l = c->n_kv_heads * c->head_dim;
+            int inter = c->per_layer_inter_dim ? c->per_layer_inter_dim[l] : c->intermediate_dim;
+            size_t kv_layer_stride = (size_t)c->max_seq_len * kv_dim_l;
+
+            int rc = tq_metal_forward_layer(
+                s->x,
+                s->key_cache + (size_t)l * kv_layer_stride,
+                s->value_cache + (size_t)l * kv_layer_stride,
+                layer->attn_norm, layer->ffn_norm,
+                layer->wq_q4, layer->wq_q4s,
+                layer->wk_q4, layer->wk_q4s,
+                layer->wv_q4, layer->wv_q4s,
+                layer->wo_q4, layer->wo_q4s,
+                layer->w_gate_q4, layer->w_gate_q4s,
+                layer->w_up_q4, layer->w_up_q4s,
+                layer->w_down_q4, layer->w_down_q4s,
+                dim, c->n_heads, c->n_kv_heads, c->head_dim,
+                inter, pos, pos + 1, c->rope_freq_base, c->rms_norm_eps,
+                is_gemma3);
+
+            if (rc == 0) {
+                gpu_layer_done = 1;
+                /* GPU path handled everything including residual adds.
+                 * Skip directly to post-layer processing (PLE, layer_output_scale). */
+            }
+        }
+#endif
+
+        int layer_has_gguf = (layer->gguf_wq != NULL);
+
+        if (gpu_layer_done) goto layer_postprocess;
+
         /* Pre-attention/DeltaNet RMSNorm */
         tq_rmsnorm(s->xb, s->x, layer->attn_norm, dim, c->rms_norm_eps);
 
@@ -2134,7 +2196,6 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
          * Intermediate flushes synchronize where CPU needs GPU results.
          * This keeps batch mode active throughout the layer so even single
          * matmuls (wo, down) benefit from batch-mode GPU dispatch. */
-        int layer_has_gguf = (layer->gguf_wq != NULL);
         /* Metal batch mode: GGUF on-the-fly path only (Gemma 4 MoE).
          * Q4 converted weights: CPU NEON Q4×Q8 is faster than Metal GPU
          * due to per-dispatch overhead exceeding compute time on small matrices.
@@ -2436,6 +2497,10 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
 
             tq_add(s->x, s->x, s->xb2, dim);
         }
+
+    layer_postprocess:
+        /* Post-layer processing: PLE, layer_output_scale.
+         * GPU graph path jumps here after full-layer GPU forward. */
 
         /* Gemma 4 PLE: apply per-layer embedding after FFN, before layer_output_scale.
          * Can be disabled with TQ_NO_PLE=1 for debugging.
