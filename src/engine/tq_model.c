@@ -4038,6 +4038,23 @@ skip_q4_conversion: ;
     }
 
     #undef GGUF_KEY
+
+    /* Initialize persistent Metal GPU buffers for layer-level compute */
+#ifdef TQ_HAS_METAL
+    {
+        extern int tq_metal_gpu_init_buffers(int, int, int, int);
+        int max_q_dim = c->n_heads * c->head_dim;
+        int max_kv_dim = c->n_kv_heads * c->head_dim;
+        if (c->full_n_heads > 0 && c->full_head_dim > 0) {
+            int full_q = c->full_n_heads * c->full_head_dim;
+            int full_kv = c->full_n_kv_heads * c->full_head_dim;
+            if (full_q > max_q_dim) max_q_dim = full_q;
+            if (full_kv > max_kv_dim) max_kv_dim = full_kv;
+        }
+        tq_metal_gpu_init_buffers(c->hidden_dim, c->intermediate_dim, max_q_dim, max_kv_dim);
+    }
+#endif
+
     return model;
 }
 

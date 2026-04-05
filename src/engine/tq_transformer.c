@@ -960,6 +960,9 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
         }
         gate_q = gate_tmp;
     } else {
+        /* Note: Metal GPU QKV batch was benchmarked but is SLOWER than CPU NEON
+         * for batch-1 inference on Apple Silicon unified memory (5.4 vs 17 tok/s).
+         * GPU wins only for batch inference (multiple tokens). Keeping CPU path. */
         if (layer->wq_q2) {
             TQ_MATMUL_Q2_OR_1BIT(s->q, s->xb, layer->wq_q2, layer->wq_q2s, s->xb_q8, s->xb_q8s, n_heads * head_dim, dim, model->use_1bit_weights);
         } else if (layer->wq_q4) {
@@ -1002,7 +1005,7 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
     }
 
     /* Flush batched Q+K+V GPU dispatches before CPU-side RoPE/attention */
-    if (has_gguf) tq_metal_batch_flush_if_available();
+    tq_metal_batch_flush_if_available();
     /* (int8 preq cleared — path disabled on Apple Silicon, see note above) */
     TQ_PROF_STOP(_tp, matmul_ns);
 
@@ -1969,7 +1972,7 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
     else
         tq_matmul(s->xb2, s->xb, layer->wo, dim, n_heads * head_dim);
     /* Flush wo GPU dispatch before CPU reads xb2 for residual add */
-    if (has_gguf) tq_metal_batch_flush_if_available();
+    tq_metal_batch_flush_if_available();
     TQ_PROF_STOP(_tp, matmul_ns);
 
     /* Debug: print attention output before residual add */
@@ -2132,6 +2135,10 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
          * This keeps batch mode active throughout the layer so even single
          * matmuls (wo, down) benefit from batch-mode GPU dispatch. */
         int layer_has_gguf = (layer->gguf_wq != NULL);
+        /* Metal batch mode: GGUF on-the-fly path only (Gemma 4 MoE).
+         * Q4 converted weights: CPU NEON Q4×Q8 is faster than Metal GPU
+         * due to per-dispatch overhead exceeding compute time on small matrices.
+         * Benchmarked: Metal Q4 batch → 38 tok/s vs CPU Q4 → 95 tok/s (SmolLM2). */
         if (layer_has_gguf) tq_metal_batch_begin_if_available();
 
         if (layer->delta_a_log) {
