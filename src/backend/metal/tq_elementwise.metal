@@ -432,3 +432,19 @@ kernel void add_inplace(
         a[tid] += b[tid];
     }
 }
+
+/**
+ * KV cache write: copy K or V vector to the correct position in the cache.
+ * cache[pos * kv_dim + i] = src[i]
+ */
+kernel void kv_cache_write(
+    device float*       cache [[buffer(0)]],   /* [max_seq * kv_dim] cache */
+    device const float* src   [[buffer(1)]],   /* [kv_dim] new K or V */
+    constant uint&      pos   [[buffer(2)]],   /* position to write */
+    constant uint&      kv_dim [[buffer(3)]],  /* kv dimension */
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid < kv_dim) {
+        cache[pos * kv_dim + tid] = src[tid];
+    }
+}

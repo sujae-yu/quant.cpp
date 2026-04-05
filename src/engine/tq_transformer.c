@@ -27,6 +27,9 @@
 #include <stdio.h>
 #include <time.h>
 #include <limits.h>
+#ifdef __APPLE__
+#include <unistd.h> /* getpagesize, posix_memalign */
+#endif
 
 /* Unified Q2/1-bit matmul dispatch.
  * When model->use_1bit_weights, Q2 fields contain sign bits + norms,
@@ -191,9 +194,25 @@ tq_state_t* tq_create_state_ex(const tq_model_config_t* config, tq_type kv_type,
     s->hb2    = (float*)calloc((size_t)inter_dim, sizeof(float));
     s->logits = (float*)calloc((size_t)config->vocab_size, sizeof(float));
 
-    /* KV cache for self_attn layers — use max_kv_dim for hybrid attention compatibility */
+    /* KV cache for self_attn layers — use max_kv_dim for hybrid attention compatibility.
+     * Page-aligned allocation for Metal GPU zero-copy (newBufferWithBytesNoCopy). */
     size_t kv_layer_size = (size_t)max_seq * max_kv_dim;
-    s->key_cache   = (float*)calloc((size_t)n_layers * kv_layer_size, sizeof(float));
+    size_t kv_total_bytes = (size_t)n_layers * kv_layer_size * sizeof(float);
+#ifdef __APPLE__
+    {
+        void* kv_ptr = NULL;
+        size_t page_sz = (size_t)getpagesize();
+        size_t aligned_sz = (kv_total_bytes + page_sz - 1) & ~(page_sz - 1);
+        if (posix_memalign(&kv_ptr, page_sz, aligned_sz) == 0) {
+            memset(kv_ptr, 0, aligned_sz);
+            s->key_cache = (float*)kv_ptr;
+        } else {
+            s->key_cache = (float*)calloc(1, kv_total_bytes);
+        }
+    }
+#else
+    s->key_cache   = (float*)calloc(1, kv_total_bytes);
+#endif
 
     /* Value cache quantization: Q4 or Q2 for aggressive V compression.
      * When value_quant_bits > 0, V is stored quantized instead of FP16/FP32.
@@ -226,7 +245,23 @@ tq_state_t* tq_create_state_ex(const tq_model_config_t* config, tq_type kv_type,
     } else {
         s->use_fp16_values = 0;
         s->value_cache_fp16 = NULL;
+        /* Page-aligned for Metal GPU zero-copy */
+#ifdef __APPLE__
+        {
+            void* vc_ptr = NULL;
+            size_t page_sz = (size_t)getpagesize();
+            size_t vc_bytes = (size_t)n_layers * kv_layer_size * sizeof(float);
+            size_t aligned_sz = (vc_bytes + page_sz - 1) & ~(page_sz - 1);
+            if (posix_memalign(&vc_ptr, page_sz, aligned_sz) == 0) {
+                memset(vc_ptr, 0, aligned_sz);
+                s->value_cache = (float*)vc_ptr;
+            } else {
+                s->value_cache = (float*)calloc(1, vc_bytes);
+            }
+        }
+#else
         s->value_cache = (float*)calloc((size_t)n_layers * kv_layer_size, sizeof(float));
+#endif
         s->value_cache_qs = NULL;
         s->value_cache_scales = NULL;
         s->kv_cache_size = (size_t)n_layers * kv_layer_size * sizeof(float);
@@ -2144,6 +2179,11 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
          * Root cause: waitUntilCompleted overhead (~0.3ms × 2 × 28 layers = 17ms).
          * TODO: move KV cache to GPU to eliminate Phase A commit.
          * Infrastructure kept for batch inference (multiple tokens per forward). */
+        /* GPU compute graph: 1-commit full-layer forward.
+         * Benchmarked: Q4 Metal kernel is 4x slower than CPU NEON Q4×Q8 fused dot.
+         * Root cause: Q4 nibble extraction in GPU shader is inefficient.
+         * Fix needed: weight repacking to GPU-friendly layout at load time.
+         * Infrastructure ready — enable when repacked weights are implemented. */
         if (0 && layer->wq_q4 && layer->wk_q4 && layer->wv_q4 && layer->wo_q4 &&
             layer->w_gate_q4 && layer->w_up_q4 && layer->w_down_q4 &&
             !layer->delta_a_log &&  /* not DeltaNet */

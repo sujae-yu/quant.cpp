@@ -67,6 +67,7 @@ static id<MTLComputePipelineState> tq_pipe_gelu_tanh       = nil;
 static id<MTLComputePipelineState> tq_pipe_softmax         = nil;
 static id<MTLComputePipelineState> tq_pipe_attn_qk         = nil;
 static id<MTLComputePipelineState> tq_pipe_attn_v          = nil;
+static id<MTLComputePipelineState> tq_pipe_kv_cache_write  = nil;
 
 /* Cached pipelines — fused MoE kernels */
 static id<MTLComputePipelineState> tq_pipe_moe_gate_up     = nil;
@@ -441,6 +442,7 @@ int tq_init_metal_backend(void) {
         tq_pipe_gelu_tanh       = makePipe(@"gelu_tanh");
         tq_pipe_softmax         = makePipe(@"softmax_inplace");
         tq_pipe_attn_qk         = makePipe(@"attention_qk");
+        tq_pipe_kv_cache_write  = makePipe(@"kv_cache_write");
         tq_pipe_attn_v          = makePipe(@"attention_v");
 
         /* Create IQ2_S codebook buffer (shared by matmul and MoE kernels) */
@@ -2060,22 +2062,31 @@ int tq_metal_forward_layer(
         /* Upload x to GPU (unified memory — just memcpy to shared buffer) */
         memcpy([g_gpu_x contents], x, (size_t)dim * sizeof(float));
 
-        /* Upload KV cache for positions [0..pos] to GPU.
-         * On Apple Silicon, key_cache is in unified memory so this is fast.
-         * We upload the full cache slice — GPU attention needs all positions. */
-        size_t cache_bytes = (size_t)(pos + 1) * kv_dim * sizeof(float);
-        memcpy([g_gpu_key_cache contents], key_cache, cache_bytes);
-        memcpy([g_gpu_val_cache contents], value_cache, cache_bytes);
+        /* Zero-copy KV cache: wrap CPU cache pointers as Metal buffers.
+         * Apple Silicon unified memory means no data copy needed.
+         * The GPU reads/writes the same physical memory as CPU. */
+        size_t cache_total = (size_t)seq_len * kv_dim * sizeof(float);
+        if (cache_total == 0) cache_total = (size_t)kv_dim * sizeof(float);
+        id<MTLBuffer> kc_buf = [tq_mtl_device newBufferWithBytesNoCopy:key_cache
+                                length:cache_total
+                                options:MTLResourceStorageModeShared
+                                deallocator:nil];
+        id<MTLBuffer> vc_buf = [tq_mtl_device newBufferWithBytesNoCopy:value_cache
+                                length:cache_total
+                                options:MTLResourceStorageModeShared
+                                deallocator:nil];
+        if (!kc_buf || !vc_buf) return -1;
 
         /* Weight norm buffers (zero-copy) */
         id<MTLBuffer> attn_norm_buf = tq_get_weight_buffer(w_attn_norm, (size_t)dim * sizeof(float));
         id<MTLBuffer> ffn_norm_buf  = tq_get_weight_buffer(w_ffn_norm, (size_t)dim * sizeof(float));
         if (!attn_norm_buf || !ffn_norm_buf) return -1;
 
-        /* ---- Create ONE command buffer + ONE encoder ---- */
+        /* ===== ONE command buffer, ONE encoder, ONE commit =====
+         * All operations encoded sequentially with memory barriers.
+         * GPU executes the entire layer pipeline without CPU sync. */
         id<MTLCommandBuffer> cmdBuf = [tq_mtl_queue commandBuffer];
         if (!cmdBuf) return -1;
-
         id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
         if (!enc) return -1;
 
@@ -2090,104 +2101,75 @@ int tq_metal_forward_layer(
         /* ---- Step 3: RoPE on Q and K ---- */
         encode_rope(enc, g_gpu_q, g_gpu_k, pos, head_dim, n_heads, n_kv_heads, rope_base);
 
-        /* ---- Step 4: Store K,V to cache position, then attention ----
-         * We need to copy Q's K and V into the cache at position pos.
-         * Since the encoder is running on GPU, we use a blit-like approach:
-         * write K and V at offset pos*kv_dim in the cache buffers.
-         * We can do this with add_vectors(cache_pos = 0 + k) trick,
-         * but simpler: endEncoding, blit, re-encode. Even better: the cache
-         * was already uploaded, we just need to update position pos. */
-
-        /* End encoder to do the cache write via CPU (unified memory means
-         * the GPU buffer contents pointer is CPU-accessible after GPU completes).
-         * But we want zero sync! Alternative: use a tiny copy kernel.
-         * For now: use memcpy into the shared buffer directly before commit.
-         * The encoder hasn't committed yet, so GPU hasn't started.
-         * Writes to shared memory before commit are visible to GPU. */
-        [enc endEncoding];
-
-        /* Write K,V at position pos in cache buffers (CPU write to shared memory
-         * is visible to GPU because command buffer hasn't been committed yet) */
+        /* ---- Step 4: Write K,V to cache ON GPU (no CPU sync!) ---- */
         {
-            /* We need the Q,K,V results from GPU first. But GPU hasn't run yet!
-             * Solution: commit this batch, wait, then do attention in a second batch.
-             * This is still 2 commits per layer instead of N, a big improvement.
-             *
-             * Alternative: pre-upload K,V into cache before attention.
-             * The K,V from the projection are only available after GPU runs.
-             * So we must split into Phase A (projection + RoPE) and Phase B (attention + FFN). */
+            id<MTLBuffer> pos_buf = tq_get_dim_buffer((uint32_t)pos);
+            id<MTLBuffer> kvd_buf = tq_get_dim_buffer((uint32_t)kv_dim);
 
-            [cmdBuf commit];
-            [cmdBuf waitUntilCompleted];
-            if (cmdBuf.status == MTLCommandBufferStatusError) {
-                NSLog(@"TurboQuant: GPU graph Phase A error: %@", cmdBuf.error);
-                return -1;
-            }
+            /* Write K to cache */
+            [enc setComputePipelineState:tq_pipe_kv_cache_write];
+            [enc setBuffer:kc_buf   offset:0 atIndex:0];
+            [enc setBuffer:g_gpu_k  offset:0 atIndex:1];
+            [enc setBuffer:pos_buf  offset:0 atIndex:2];
+            [enc setBuffer:kvd_buf  offset:0 atIndex:3];
+            [enc dispatchThreads:MTLSizeMake(kv_dim, 1, 1)
+               threadsPerThreadgroup:MTLSizeMake(MIN(kv_dim, 256), 1, 1)];
+            [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
 
-            /* Copy K,V results into cache (GPU buffer → cache GPU buffer) */
-            float* gpu_k_ptr = (float*)[g_gpu_k contents];
-            float* gpu_v_ptr = (float*)[g_gpu_v contents];
-            float* kc_ptr = (float*)[g_gpu_key_cache contents];
-            float* vc_ptr = (float*)[g_gpu_val_cache contents];
-            memcpy(kc_ptr + pos * kv_dim, gpu_k_ptr, (size_t)kv_dim * sizeof(float));
-            memcpy(vc_ptr + pos * kv_dim, gpu_v_ptr, (size_t)kv_dim * sizeof(float));
-
-            /* Also write back to CPU KV cache for future layers / positions */
-            memcpy(key_cache + pos * kv_dim, gpu_k_ptr, (size_t)kv_dim * sizeof(float));
-            memcpy(value_cache + pos * kv_dim, gpu_v_ptr, (size_t)kv_dim * sizeof(float));
+            /* Write V to cache */
+            [enc setBuffer:vc_buf   offset:0 atIndex:0];
+            [enc setBuffer:g_gpu_v  offset:0 atIndex:1];
+            [enc dispatchThreads:MTLSizeMake(kv_dim, 1, 1)
+               threadsPerThreadgroup:MTLSizeMake(MIN(kv_dim, 256), 1, 1)];
+            [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
         }
 
-        /* ---- Phase B: Attention + O-proj + FFN (single commit) ---- */
-        id<MTLCommandBuffer> cmdBuf2 = [tq_mtl_queue commandBuffer];
-        if (!cmdBuf2) return -1;
-        id<MTLComputeCommandEncoder> enc2 = [cmdBuf2 computeCommandEncoder];
-        if (!enc2) return -1;
-
-        /* Attention scores: Q * K^T for all positions */
+        /* ---- Step 5: Attention (reads from GPU KV cache directly) ---- */
         int attn_seq_len = pos + 1;
-        encode_attn_qk(enc2, g_gpu_q, g_gpu_key_cache, g_gpu_att,
+        /* Attention uses same encoder — single command buffer! */
+        encode_attn_qk(enc, g_gpu_q, kc_buf, g_gpu_att,
                         head_dim, attn_seq_len, n_heads, n_kv_heads, kv_dim);
 
         /* Softmax over attention scores per head */
-        encode_softmax(enc2, g_gpu_att, n_heads, attn_seq_len);
+        encode_softmax(enc, g_gpu_att, n_heads, attn_seq_len);
 
         /* Weighted sum of values → xb (reuse xb for attention output) */
-        encode_attn_v(enc2, g_gpu_att, g_gpu_val_cache, g_gpu_xb,
+        encode_attn_v(enc, g_gpu_att, vc_buf, g_gpu_xb,
                       head_dim, attn_seq_len, n_heads, n_kv_heads, kv_dim);
 
         /* ---- Step 5: Output projection (xb → xb2) ---- */
-        encode_q4_matmul(enc2, g_gpu_xb, g_gpu_xb2, wo_qs, wo_sc, dim, q_dim);
+        encode_q4_matmul(enc, g_gpu_xb, g_gpu_xb2, wo_qs, wo_sc, dim, q_dim);
 
         /* ---- Step 6: Residual add (x += xb2) ---- */
-        encode_add_inplace(enc2, g_gpu_x, g_gpu_xb2, dim);
+        encode_add_inplace(enc, g_gpu_x, g_gpu_xb2, dim);
 
         /* ---- Step 7: Pre-FFN RMSNorm(x → xb) ---- */
-        encode_rmsnorm(enc2, g_gpu_x, ffn_norm_buf, g_gpu_xb, dim, rms_eps);
+        encode_rmsnorm(enc, g_gpu_x, ffn_norm_buf, g_gpu_xb, dim, rms_eps);
 
         /* ---- Step 8: FFN gate + up projections ---- */
-        encode_q4_matmul(enc2, g_gpu_xb, g_gpu_hb,  wg_qs, wg_sc, inter_dim, dim);
-        encode_q4_matmul(enc2, g_gpu_xb, g_gpu_hb2, wu_qs, wu_sc, inter_dim, dim);
+        encode_q4_matmul(enc, g_gpu_xb, g_gpu_hb,  wg_qs, wg_sc, inter_dim, dim);
+        encode_q4_matmul(enc, g_gpu_xb, g_gpu_hb2, wu_qs, wu_sc, inter_dim, dim);
 
         /* ---- Step 9: Activation + gate multiply ---- */
         if (use_gelu) {
-            encode_gelu_tanh(enc2, g_gpu_hb, inter_dim);
+            encode_gelu_tanh(enc, g_gpu_hb, inter_dim);
         } else {
-            encode_silu(enc2, g_gpu_hb, g_gpu_hb, inter_dim);
+            encode_silu(enc, g_gpu_hb, g_gpu_hb, inter_dim);
         }
-        encode_mul(enc2, g_gpu_hb, g_gpu_hb2, g_gpu_hb, inter_dim);
+        encode_mul(enc, g_gpu_hb, g_gpu_hb2, g_gpu_hb, inter_dim);
 
         /* ---- Step 10: Down projection (hb → xb2) ---- */
-        encode_q4_matmul(enc2, g_gpu_hb, g_gpu_xb2, wd_qs, wd_sc, dim, inter_dim);
+        encode_q4_matmul(enc, g_gpu_hb, g_gpu_xb2, wd_qs, wd_sc, dim, inter_dim);
 
         /* ---- Step 11: Residual add (x += xb2) ---- */
-        encode_add_inplace(enc2, g_gpu_x, g_gpu_xb2, dim);
+        encode_add_inplace(enc, g_gpu_x, g_gpu_xb2, dim);
 
-        [enc2 endEncoding];
-        [cmdBuf2 commit];
-        [cmdBuf2 waitUntilCompleted];
+        [enc endEncoding];
+        [cmdBuf commit];
+        [cmdBuf waitUntilCompleted];
 
-        if (cmdBuf2.status == MTLCommandBufferStatusError) {
-            NSLog(@"TurboQuant: GPU graph Phase B error: %@", cmdBuf2.error);
+        if (cmdBuf.status == MTLCommandBufferStatusError) {
+            NSLog(@"TurboQuant: GPU graph Phase B error: %@", cmdBuf.error);
             return -1;
         }
 
