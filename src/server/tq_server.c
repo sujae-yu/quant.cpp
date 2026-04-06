@@ -18,11 +18,26 @@
 #include <string.h>
 #include <stdarg.h>
 #include <stdbool.h>
+#if defined(_MSC_VER)
+#include <intrin.h>
+typedef volatile long atomic_int;
+#define atomic_store(p, v) _InterlockedExchange((p), (v))
+#define atomic_load(p) _InterlockedCompareExchange((p), 0, 0)
+#else
 #include <stdatomic.h>
+#endif
 #include <signal.h>
 #include <errno.h>
 #include <time.h>
+#ifdef _WIN32
+#include <windows.h>
+#define pthread_mutex_t SRWLOCK
+#define PTHREAD_MUTEX_INITIALIZER SRWLOCK_INIT
+#define pthread_mutex_lock(m) AcquireSRWLockExclusive(m)
+#define pthread_mutex_unlock(m) ReleaseSRWLockExclusive(m)
+#else
 #include <pthread.h>
+#endif
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/types.h>

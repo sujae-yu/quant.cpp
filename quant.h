@@ -144,7 +144,10 @@ typedef volatile long atomic_int;
 #ifndef CLOCK_MONOTONIC
 #define CLOCK_MONOTONIC 1
 #endif
+#ifndef _TIMESPEC_DEFINED
+#define _TIMESPEC_DEFINED
 struct timespec { long tv_sec; long tv_nsec; };
+#endif
 static inline int clock_gettime(int id, struct timespec* ts) {
     (void)id; LARGE_INTEGER f, c;
     QueryPerformanceFrequency(&f); QueryPerformanceCounter(&c);
