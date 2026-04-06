@@ -13,6 +13,9 @@
  * - uniform_4b quantize/dequantize: KV cache uniform quantization
  */
 
+#ifdef _MSC_VER
+#define _USE_MATH_DEFINES
+#endif
 #include <gtest/gtest.h>
 #include <cmath>
 #include <vector>

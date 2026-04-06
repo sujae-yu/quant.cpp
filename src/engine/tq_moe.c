@@ -22,6 +22,10 @@
 #define TQ_MOE_HAS_NEON 0
 #endif
 
+#ifdef _MSC_VER
+#define __builtin_prefetch(addr, ...) ((void)0)
+#endif
+
 #ifdef TQ_HAS_ACCELERATE
 #include <Accelerate/Accelerate.h>
 #endif

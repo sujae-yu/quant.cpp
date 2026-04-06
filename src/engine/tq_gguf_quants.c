@@ -24,6 +24,12 @@
 #define TQ_HAS_NEON 0
 #endif
 
+/* MSVC: no __builtin_* intrinsics */
+#ifdef _MSC_VER
+#define __builtin_prefetch(addr, ...) ((void)0)
+#define __builtin_return_address(n) ((void*)0)
+#endif
+
 /* ============================================================
  * FP16 / BF16 helpers
  * ============================================================ */

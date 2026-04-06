@@ -41,6 +41,15 @@ typedef SRWLOCK pthread_mutex_srw_t;
 #undef pthread_mutex_destroy
 #define pthread_mutex_destroy(m) ((void)0)
 #define PTHREAD_MUTEX_INITIALIZER SRWLOCK_INIT
+#define pthread_cond_signal(c) WakeConditionVariable(c)
+#include <process.h>
+static inline int pthread_create(pthread_t* t, const void* a, void*(*fn)(void*), void* arg) {
+    (void)a; *t = (HANDLE)_beginthreadex(NULL,0,(unsigned(__stdcall*)(void*))fn,arg,0,NULL);
+    return *t ? 0 : -1;
+}
+static inline int pthread_join(pthread_t t, void** r) {
+    (void)r; WaitForSingleObject(t, INFINITE); CloseHandle(t); return 0;
+}
 #else
 #include <pthread.h>
 #endif
