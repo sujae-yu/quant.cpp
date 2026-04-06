@@ -89,12 +89,28 @@ const char* quant_version(void);
 #include <errno.h>
 #ifdef _WIN32
 #include <windows.h>
+#include <process.h>
+/* Full pthread shim for MSVC using Windows primitives */
+typedef HANDLE pthread_t;
 #define pthread_mutex_t SRWLOCK
 #define PTHREAD_MUTEX_INITIALIZER SRWLOCK_INIT
 #define pthread_mutex_init(m,a) (InitializeSRWLock(m),0)
 #define pthread_mutex_lock(m) AcquireSRWLockExclusive(m)
 #define pthread_mutex_unlock(m) ReleaseSRWLockExclusive(m)
 #define pthread_mutex_destroy(m) ((void)0)
+#define pthread_cond_t CONDITION_VARIABLE
+#define pthread_cond_init(c,a) InitializeConditionVariable(c)
+#define pthread_cond_wait(c,m) SleepConditionVariableSRW(c,m,INFINITE,0)
+#define pthread_cond_signal(c) WakeConditionVariable(c)
+#define pthread_cond_broadcast(c) WakeAllConditionVariable(c)
+#define pthread_cond_destroy(c) ((void)0)
+static inline int pthread_create(pthread_t* t, const void* a, void*(*fn)(void*), void* arg) {
+    (void)a; *t = (HANDLE)_beginthreadex(NULL,0,(unsigned(__stdcall*)(void*))fn,arg,0,NULL);
+    return *t ? 0 : -1;
+}
+static inline int pthread_join(pthread_t t, void** r) {
+    (void)r; WaitForSingleObject(t, INFINITE); CloseHandle(t); return 0;
+}
 #else
 #include <pthread.h>
 #endif
