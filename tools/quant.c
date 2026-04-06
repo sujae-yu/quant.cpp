@@ -43,8 +43,9 @@
 #ifndef CLOCK_MONOTONIC
 #define CLOCK_MONOTONIC 1
 #endif
-#if defined(_WIN32) && !defined(_TIMESPEC_DEFINED)
-#define _TIMESPEC_DEFINED
+#if defined(_WIN32) && !defined(_TIMESPEC_DEFINED) && !defined(__struct_timespec_defined)
+#define _TIMESPEC_DEFINED 1
+#define __struct_timespec_defined 1
 struct timespec { long tv_sec; long tv_nsec; };
 #endif
 static int clock_gettime(int id, struct timespec* ts) {

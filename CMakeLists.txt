@@ -280,8 +280,8 @@ foreach(ex_src ${EXAMPLE_C_SOURCES} ${EXAMPLE_CXX_SOURCES})
     target_link_libraries(${ex_name} turboquant)
 endforeach()
 
-# OpenAI-compatible HTTP server
-if(TQ_BUILD_SERVER)
+# OpenAI-compatible HTTP server (POSIX only — uses sys/socket.h)
+if(TQ_BUILD_SERVER AND NOT MSVC)
     add_executable(quant-server src/server/tq_server.c)
     target_include_directories(quant-server PRIVATE
         ${CMAKE_SOURCE_DIR}/src/server
