@@ -144,9 +144,9 @@ typedef volatile long atomic_int;
 #ifndef CLOCK_MONOTONIC
 #define CLOCK_MONOTONIC 1
 #endif
-#if !defined(_TIMESPEC_DEFINED) && !defined(__struct_timespec_defined)
-#define _TIMESPEC_DEFINED 1
-#define __struct_timespec_defined 1
+/* timespec: MSVC 2022+ defines it in time.h, older MSVC doesn't.
+ * Only define if not already available. */
+#if !defined(_TIMESPEC_DEFINED) && !defined(__struct_timespec_defined) && !defined(_INC_TIME)
 struct timespec { long tv_sec; long tv_nsec; };
 #endif
 static inline int clock_gettime(int id, struct timespec* ts) {
