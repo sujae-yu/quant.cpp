@@ -112,8 +112,53 @@ static inline int pthread_join(pthread_t t, void** r) {
     (void)r; WaitForSingleObject(t, INFINITE); CloseHandle(t); return 0;
 }
 #define __thread __declspec(thread)
+#include <io.h>
+#ifndef R_OK
+#define R_OK 4
+#endif
+#define access _access
+/* Minimal dirent for MSVC */
+struct dirent { char d_name[260]; };
+typedef struct { HANDLE h; WIN32_FIND_DATAA fd; int first; } DIR;
+static inline DIR* opendir(const char* p) {
+    char buf[270]; snprintf(buf, sizeof(buf), "%s\\*", p);
+    DIR* d = (DIR*)malloc(sizeof(DIR));
+    d->h = FindFirstFileA(buf, &d->fd); d->first = 1;
+    if (d->h == INVALID_HANDLE_VALUE) { free(d); return NULL; }
+    return d;
+}
+static inline struct dirent* readdir(DIR* d) {
+    static struct dirent e;
+    if (d->first) { d->first = 0; } else if (!FindNextFileA(d->h, &d->fd)) return NULL;
+    strncpy(e.d_name, d->fd.cFileName, 259); e.d_name[259] = 0;
+    return &e;
+}
+static inline void closedir(DIR* d) { FindClose(d->h); free(d); }
+/* stdatomic shim */
+#include <intrin.h>
+typedef volatile long atomic_int;
+#define atomic_store(p, v) _InterlockedExchange((p), (v))
+#define atomic_load(p) _InterlockedCompareExchange((p), 0, 0)
+#define atomic_fetch_add(p, v) _InterlockedExchangeAdd((p), (v))
+/* clock_gettime shim */
+#ifndef CLOCK_MONOTONIC
+#define CLOCK_MONOTONIC 1
+#endif
+struct timespec { long tv_sec; long tv_nsec; };
+static inline int clock_gettime(int id, struct timespec* ts) {
+    (void)id; LARGE_INTEGER f, c;
+    QueryPerformanceFrequency(&f); QueryPerformanceCounter(&c);
+    ts->tv_sec = (long)(c.QuadPart / f.QuadPart);
+    ts->tv_nsec = (long)((c.QuadPart % f.QuadPart) * 1000000000LL / f.QuadPart);
+    return 0;
+}
 #else
 #include <pthread.h>
+#include <unistd.h>
+#include <dirent.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #endif
 #include <limits.h>
 
@@ -121,14 +166,8 @@ static inline int pthread_join(pthread_t t, void** r) {
 #include <mach/mach_time.h>
 #endif
 
-#if defined(_MSC_VER)
-/* MSVC: use interlocked intrinsics */
-#include <intrin.h>
-typedef volatile long atomic_int;
-#define atomic_store(p, v) _InterlockedExchange((p), (v))
-#define atomic_load(p) _InterlockedCompareExchange((p), 0, 0)
-#define atomic_fetch_add(p, v) _InterlockedExchangeAdd((p), (v))
-#else
+/* stdatomic: already shimmed at top for MSVC */
+#if !defined(_MSC_VER)
 #include <stdatomic.h>
 #endif
 
@@ -136,16 +175,7 @@ typedef volatile long atomic_int;
 #include <arm_neon.h>
 #endif
 
-#ifdef _WIN32
-#include <windows.h>
-#include <io.h>
-#else
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <dirent.h>
-#endif
+/* Platform includes: already handled at top for _WIN32 */
 
 // ============================================================================
 // Section 1: Types and Specs (from tq_types.h, tq_spec.h)
