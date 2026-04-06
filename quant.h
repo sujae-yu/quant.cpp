@@ -104,7 +104,16 @@ const char* quant_version(void);
 #include <mach/mach_time.h>
 #endif
 
+#if defined(_MSC_VER)
+/* MSVC: use interlocked intrinsics */
+#include <intrin.h>
+typedef volatile long atomic_int;
+#define atomic_store(p, v) _InterlockedExchange((p), (v))
+#define atomic_load(p) _InterlockedCompareExchange((p), 0, 0)
+#define atomic_fetch_add(p, v) _InterlockedExchangeAdd((p), (v))
+#else
 #include <stdatomic.h>
+#endif
 
 #ifdef __ARM_NEON
 #include <arm_neon.h>

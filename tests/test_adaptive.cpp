@@ -1,3 +1,5 @@
+#define _USE_MATH_DEFINES
+#include <cmath>
 /**
  * test_adaptive.cpp -- Tests for adaptive compression features
  *

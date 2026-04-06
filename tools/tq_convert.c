@@ -17,7 +17,9 @@
 #ifndef _WIN32
 #include <unistd.h>
 #endif
+#ifndef _WIN32
 #include <dirent.h>
+#endif
 
 static void print_usage(const char* prog) {
     fprintf(stderr, "TQM Converter — Pre-quantize models for instant loading\n\n");

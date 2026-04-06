@@ -97,7 +97,8 @@ TEST(Threading, ConcurrentAttention) {
             for (int i = 0; i < 128; i++)
                 query[i] = cosf(i * 0.1f + t);
 
-            float scores[seq_len];
+            std::vector<float> scores_vec(seq_len);
+            float* scores = scores_vec.data();
             tq_status s = tq_attention(ctx, query, blocks.data(),
                                        seq_len, head_dim,
                                        TQ_TYPE_POLAR_3B, scores);

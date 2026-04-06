@@ -43,7 +43,7 @@
 #ifndef CLOCK_MONOTONIC
 #define CLOCK_MONOTONIC 1
 #endif
-#ifndef _TIMESPEC_DEFINED
+#if defined(_WIN32) && !defined(_TIMESPEC_DEFINED)
 #define _TIMESPEC_DEFINED
 struct timespec { long tv_sec; long tv_nsec; };
 #endif
