@@ -1,0 +1,5 @@
+_headers
+build.sh
+quant_wasm.c
+test/
+.npmignore

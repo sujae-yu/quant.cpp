@@ -1,0 +1,56 @@
+{
+  "name": "@quantcpp/wasm",
+  "version": "0.5.1",
+  "description": "Single-header C LLM inference engine compiled to WASM. Run GGUF models in the browser with KV cache compression. 192KB binary.",
+  "main": "index.js",
+  "module": "index.mjs",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.mjs",
+    "index.d.ts",
+    "quant.js",
+    "quant.wasm",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "bash build.sh",
+    "test": "node test/smoke.mjs",
+    "prepublishOnly": "bash build.sh"
+  },
+  "keywords": [
+    "llm",
+    "inference",
+    "wasm",
+    "webassembly",
+    "browser",
+    "gguf",
+    "llama",
+    "transformer",
+    "kv-cache",
+    "quantization",
+    "turboquant",
+    "polarquant",
+    "embedded",
+    "single-header"
+  ],
+  "author": "QuantumAI <hello@quantumai.kr>",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/quantumaikr/quant.cpp",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/quantumaikr/quant.cpp.git",
+    "directory": "wasm"
+  },
+  "bugs": {
+    "url": "https://github.com/quantumaikr/quant.cpp/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "browser": {
+    "fs": false,
+    "path": false
+  }
+}

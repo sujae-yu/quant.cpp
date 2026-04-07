@@ -46,25 +46,36 @@ The world's simplest way to add LLM to a C/C++ project.
 
 ## Direction 2: KV Compression Research Platform
 
-The reference implementation for KV cache quantization research.
+A C reference engine for KV cache quantization research.
 
-### Done
-- [x] 7 quantization types (Polar, QJL, Turbo, Uniform, TurboKV)
+### Production-ready
+- [x] `uniform_4b` KV quantization (4–7x compression, +6.3% PPL on Llama 3.2 3B)
+- [x] `uniform_4b` + Q4 V combo (6.9x KV memory reduction)
 - [x] Delta compression (P-frame encoding)
-- [x] QK-norm aware compression
+- [x] QK-norm aware compression (Gemma 4 / hybrid attention models)
 - [x] Plugin architecture (3 functions to add new type)
-- [x] 34 unit tests
+- [x] 35 unit tests
 
-### In Progress
-- [ ] "Add Your Own Type" tutorial (docs/custom-quantization.md)
+### Building blocks (research, not yet production-ready)
+- [x] Random Hadamard Transform (`tq_rht.c`)
+- [x] Lloyd-Max-Gaussian codebook quantizer (`tq_codebook.c`)
+- [x] 1-bit QJL sign hash (`tq_qjl.c`)
+- [x] PolarQuant (polar coordinate) compression (`tq_polar.c`)
+- [x] `turbo_kv_*` types composing the building blocks (paper structure, gap in quality)
+
+### Open: TurboQuant paper reproduction
+- [ ] Close the gap on `turbo_kv_*` quality vs Google paper — see issue #14
+- [ ] Per-channel outlier handling (paper's 32-channel split)
+- [ ] QJL constant verification for Rademacher rows
+- [ ] Per-head rotation seeds
+- [ ] Regression test pinning `turbo_kv_4b` PPL on Llama 3.2 3B ≤ 14.5
+
+### Planned (after Direction 2 reproduction)
+- [ ] "Add Your Own Type" tutorial polish (docs/custom-quantization.md)
 - [ ] Arxiv tech report
-
-### Planned
-- [ ] llama.cpp KV type PR (ggml type registration)
+- [ ] llama.cpp KV type PR (ggml type registration) — only after paper reproduction works
 - [ ] vLLM KV compression plugin
 - [ ] Benchmarking suite (PPL across models × KV types)
-- [ ] Learned codebook quantization
-- [ ] Per-head adaptive bit allocation
 
 ## Non-Goals
 
