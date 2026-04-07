@@ -386,15 +386,18 @@ TEST(TurboKV, TraitsTable) {
 }
 
 TEST(TurboKV, FormatSpec) {
+    /* Variant F: no residual stage in 3b/4b/5b — single-stage codebook only */
     tq_format_spec_t spec3 = tq_get_format_spec(TQ_TYPE_TURBO_KV_3B);
     EXPECT_EQ(spec3.algorithm, TQ_ALG_TURBO);
     EXPECT_EQ(spec3.key_bits, 3);
-    EXPECT_TRUE(spec3.flags & TQ_FLAG_HAS_RESIDUAL);
 
     tq_format_spec_t spec4 = tq_get_format_spec(TQ_TYPE_TURBO_KV_4B);
     EXPECT_EQ(spec4.algorithm, TQ_ALG_TURBO);
     EXPECT_EQ(spec4.key_bits, 4);
-    EXPECT_TRUE(spec4.flags & TQ_FLAG_HAS_RESIDUAL);
+
+    tq_format_spec_t spec5 = tq_get_format_spec(TQ_TYPE_TURBO_KV_5B);
+    EXPECT_EQ(spec5.algorithm, TQ_ALG_TURBO);
+    EXPECT_EQ(spec5.key_bits, 5);
 }
 
 /* ============================================================

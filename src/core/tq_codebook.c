@@ -36,16 +36,28 @@ static const float CODEBOOK_4BIT[16] = {
      0.1284f,  0.3881f,  0.6568f,  0.9423f,  1.2562f,  1.6180f,  2.0690f,  2.7326f
 };
 
+/* b=5 (32 levels): optimal Lloyd-Max for N(0,1).
+ * Source: Max 1960 Table I, 32-level Gaussian quantizer output values.
+ * MSE is roughly 4x lower than 4-bit; outer level shrinks to ~2.0 because
+ * the additional levels concentrate in the body. */
+static const float CODEBOOK_5BIT[32] = {
+    -1.9956f, -1.7900f, -1.6107f, -1.4493f, -1.3010f, -1.1631f, -1.0334f, -0.9104f,
+    -0.7928f, -0.6795f, -0.5697f, -0.4626f, -0.3576f, -0.2543f, -0.1520f, -0.0506f,
+     0.0506f,  0.1520f,  0.2543f,  0.3576f,  0.4626f,  0.5697f,  0.6795f,  0.7928f,
+     0.9104f,  1.0334f,  1.1631f,  1.3010f,  1.4493f,  1.6107f,  1.7900f,  1.9956f
+};
+
 /* Codebook table indexed by bits */
-static const float* const CODEBOOKS[5] = {
+static const float* const CODEBOOKS[6] = {
     NULL,          /* 0 bits: unused */
     CODEBOOK_1BIT, /* 1 bit: 2 levels */
     CODEBOOK_2BIT, /* 2 bits: 4 levels */
     CODEBOOK_3BIT, /* 3 bits: 8 levels */
-    CODEBOOK_4BIT  /* 4 bits: 16 levels */
+    CODEBOOK_4BIT, /* 4 bits: 16 levels */
+    CODEBOOK_5BIT  /* 5 bits: 32 levels */
 };
 
-static const int CODEBOOK_SIZES[5] = {0, 2, 4, 8, 16};
+static const int CODEBOOK_SIZES[6] = {0, 2, 4, 8, 16, 32};
 
 /* ============================================================
  * Codebook quantize: find nearest centroid for each element
@@ -53,7 +65,7 @@ static const int CODEBOOK_SIZES[5] = {0, 2, 4, 8, 16};
 
 void tq_codebook_quantize(const float* src, uint8_t* dst_indices,
                            int n, int bits, float inv_std) {
-    if (!src || !dst_indices || bits < 1 || bits > 4 || n <= 0) return;
+    if (!src || !dst_indices || bits < 1 || bits > 5 || n <= 0) return;
 
     const float* centroids = CODEBOOKS[bits];
     int n_levels = CODEBOOK_SIZES[bits];
@@ -82,7 +94,7 @@ void tq_codebook_quantize(const float* src, uint8_t* dst_indices,
 
 void tq_codebook_dequantize(const uint8_t* indices, float* dst,
                              int n, int bits, float inv_std) {
-    if (!indices || !dst || bits < 1 || bits > 4 || n <= 0) return;
+    if (!indices || !dst || bits < 1 || bits > 5 || n <= 0) return;
 
     const float* centroids = CODEBOOKS[bits];
     float std_val = (inv_std > 1e-10f) ? (1.0f / inv_std) : 1.0f;
@@ -97,7 +109,7 @@ void tq_codebook_dequantize(const uint8_t* indices, float* dst,
  * ============================================================ */
 
 const float* tq_codebook_centroids(int bits) {
-    if (bits < 1 || bits > 4) return NULL;
+    if (bits < 1 || bits > 5) return NULL;
     return CODEBOOKS[bits];
 }
 

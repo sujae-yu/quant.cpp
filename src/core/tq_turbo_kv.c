@@ -910,3 +910,145 @@ void tq_turbo_kv_2b_attention_ref(const float* query, const void* kv,
         scores[seq] = mse_score + qjl_correction;
     }
 }
+
+/* ============================================================
+ * TurboQuant KV 5-bit (Variant F architecture):
+ *   normalize -> RHT -> 5-bit (32-level) Lloyd-Max codebook on rotated values
+ * Single-stage estimator, no QJL residual.
+ * ============================================================ */
+
+/* Pack 5-bit indices into a bit-stream, LSB-first.
+ * 128 elems × 5 bits = 640 bits = 80 bytes. */
+static void pack_5bit(const uint8_t* indices, uint8_t* packed, int n) {
+    int total_bytes = (n * 5 + 7) / 8;
+    memset(packed, 0, (size_t)total_bytes);
+    for (int i = 0; i < n; i++) {
+        int bit_offset = i * 5;
+        int byte_idx = bit_offset / 8;
+        int bit_pos  = bit_offset % 8;
+        uint16_t val = (uint16_t)(indices[i] & 0x1F);
+        packed[byte_idx] |= (uint8_t)(val << bit_pos);
+        if (bit_pos > 3) {
+            packed[byte_idx + 1] |= (uint8_t)(val >> (8 - bit_pos));
+        }
+    }
+}
+
+static void unpack_5bit(const uint8_t* packed, uint8_t* indices, int n) {
+    int total_bytes = (n * 5 + 7) / 8;
+    for (int i = 0; i < n; i++) {
+        int bit_offset = i * 5;
+        int byte_idx = bit_offset / 8;
+        int bit_pos  = bit_offset % 8;
+        uint16_t val = (uint16_t)packed[byte_idx];
+        if (bit_pos > 3 && byte_idx + 1 < total_bytes) {
+            val |= (uint16_t)packed[byte_idx + 1] << 8;
+        }
+        indices[i] = (uint8_t)((val >> bit_pos) & 0x1F);
+    }
+}
+
+void tq_turbo_kv_5b_quantize_ref(const float* src, void* dst, int n) {
+    block_tq_turbo_kv_5b* block = (block_tq_turbo_kv_5b*)dst;
+    int dim = n;
+    if (dim > TQ_BK) dim = TQ_BK;
+
+    float norm_sq = 0.0f;
+    for (int i = 0; i < dim; i++) norm_sq += src[i] * src[i];
+    float norm = sqrtf(norm_sq);
+    block->norm = tkv_fp32_to_fp16(norm);
+    block->residual_norm = 0;
+    block->_pad = 0;
+
+    float rotated[TQ_BK];
+    float inv_norm = (norm > 1e-10f) ? (1.0f / norm) : 0.0f;
+    for (int i = 0; i < dim; i++) rotated[i] = src[i] * inv_norm;
+    for (int i = dim; i < TQ_BK; i++) rotated[i] = 0.0f;
+
+    tq_rht_transform(rotated, dim, TKV_DEFAULT_SEED);
+
+    /* Variant F: max-abs scaling, no clipping */
+    float max_abs = 0.0f;
+    for (int i = 0; i < dim; i++) {
+        float a = fabsf(rotated[i]);
+        if (a > max_abs) max_abs = a;
+    }
+    if (max_abs < 1e-10f) max_abs = 1.0f;
+    const float CENT_5BIT_MAX = 1.9956f;
+    float inv_std = CENT_5BIT_MAX / max_abs;
+    block->inv_std_fp16 = tkv_fp32_to_fp16(inv_std);
+
+    uint8_t indices[TQ_BK];
+    tq_codebook_quantize(rotated, indices, dim, 5, inv_std);
+    pack_5bit(indices, block->mse_indices, dim);
+}
+
+static void dequant_mse_rotated_5bit(const block_tq_turbo_kv_5b* block,
+                                      float* rotated, int dim) {
+    float inv_std = tkv_fp16_to_fp32(block->inv_std_fp16);
+    if (inv_std < 1e-10f) inv_std = sqrtf((float)dim);
+    uint8_t indices[TQ_BK] = {0};
+    unpack_5bit(block->mse_indices, indices, dim);
+    tq_codebook_dequantize(indices, rotated, dim, 5, inv_std);
+}
+
+void tq_turbo_kv_5b_dequantize_ref(const void* src, float* dst, int n) {
+    const block_tq_turbo_kv_5b* block = (const block_tq_turbo_kv_5b*)src;
+    int dim = n;
+    if (dim > TQ_BK) dim = TQ_BK;
+
+    float norm = tkv_fp16_to_fp32(block->norm);
+
+    float rotated[TQ_BK];
+    dequant_mse_rotated_5bit(block, rotated, dim);
+    tq_rht_inverse(rotated, dim, TKV_DEFAULT_SEED);
+
+    for (int i = 0; i < dim; i++) dst[i] = rotated[i] * norm;
+}
+
+void tq_turbo_kv_5b_attention_ref(const float* query, const void* kv_cache,
+                                    float* scores, int seq_len, int head_dim) {
+    const block_tq_turbo_kv_5b* blocks_5b = (const block_tq_turbo_kv_5b*)kv_cache;
+    int dim = head_dim;
+    if (dim > TQ_BK) dim = TQ_BK;
+
+    /* Pre-rotate query once */
+    float q_rot[TQ_BK];
+    memcpy(q_rot, query, (size_t)dim * sizeof(float));
+    for (int i = dim; i < TQ_BK; i++) q_rot[i] = 0.0f;
+    tq_rht_transform(q_rot, dim, TKV_DEFAULT_SEED);
+
+    for (int seq = 0; seq < seq_len; seq++) {
+        const block_tq_turbo_kv_5b* block = &blocks_5b[seq];
+        float norm = tkv_fp16_to_fp32(block->norm);
+
+        float rotated[TQ_BK];
+        dequant_mse_rotated_5bit(block, rotated, dim);
+
+        float mse_dot = 0.0f;
+#ifdef __ARM_NEON
+        {
+            float32x4_t acc0 = vdupq_n_f32(0.0f);
+            float32x4_t acc1 = vdupq_n_f32(0.0f);
+            float32x4_t acc2 = vdupq_n_f32(0.0f);
+            float32x4_t acc3 = vdupq_n_f32(0.0f);
+            int d = 0;
+            for (; d + 15 < dim; d += 16) {
+                acc0 = vfmaq_f32(acc0, vld1q_f32(&q_rot[d]),      vld1q_f32(&rotated[d]));
+                acc1 = vfmaq_f32(acc1, vld1q_f32(&q_rot[d + 4]),  vld1q_f32(&rotated[d + 4]));
+                acc2 = vfmaq_f32(acc2, vld1q_f32(&q_rot[d + 8]),  vld1q_f32(&rotated[d + 8]));
+                acc3 = vfmaq_f32(acc3, vld1q_f32(&q_rot[d + 12]), vld1q_f32(&rotated[d + 12]));
+            }
+            acc0 = vaddq_f32(vaddq_f32(acc0, acc1), vaddq_f32(acc2, acc3));
+            for (; d + 3 < dim; d += 4) {
+                acc0 = vfmaq_f32(acc0, vld1q_f32(&q_rot[d]), vld1q_f32(&rotated[d]));
+            }
+            mse_dot = vaddvq_f32(acc0);
+            for (; d < dim; d++) mse_dot += q_rot[d] * rotated[d];
+        }
+#else
+        for (int d = 0; d < dim; d++) mse_dot += q_rot[d] * rotated[d];
+#endif
+        scores[seq] = norm * mse_dot;
+    }
+}

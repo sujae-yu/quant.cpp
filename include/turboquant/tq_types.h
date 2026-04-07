@@ -54,7 +54,8 @@ typedef enum {
     TQ_TYPE_TURBO_KV_1B = 10,/* TurboQuant KV: 1-bit Hamming (sign only)           */
     TQ_TYPE_TURBO_KV_2B = 11,/* TurboQuant KV: 2-bit (1-bit codebook + 1-bit QJL) */
     TQ_TYPE_UNIFORM_3B= 12,  /* Min-Max uniform 3-bit with sub-block scales     */
-    TQ_TYPE_COUNT     = 13
+    TQ_TYPE_TURBO_KV_5B = 13,/* TurboQuant KV: RHT + 5-bit Lloyd-Max codebook   */
+    TQ_TYPE_COUNT     = 14
 } tq_type;
 
 /* ============================================================
@@ -220,6 +221,22 @@ typedef struct {
     uint8_t  mse_indices[TQ_BK * 3 / 8];  /* 3-bit packed codebook indices (48B)  */
 } block_tq_turbo_kv_3b;
 
+/* TurboQuant KV cache block: 5-bit variant (Variant F architecture)
+ *
+ * 5-bit (32-level) Lloyd-Max-Gaussian codebook on RHT-rotated values.
+ * Same single-stage structure as turbo_kv_4b — no QJL residual.
+ *
+ * Layout: norm(2) + residual_norm(2) + inv_std(2) + _pad(2) + mse_5bit(80) = 88 bytes
+ * 128 elements * 5 bits = 640 bits = 80 bytes for indices.
+ */
+typedef struct {
+    uint16_t norm;                          /* L2 norm of original vector (fp16)       */
+    uint16_t residual_norm;                 /* unused (kept for layout symmetry)       */
+    uint16_t inv_std_fp16;                  /* per-block inv_std for codebook lookup   */
+    uint16_t _pad;                          /* alignment padding                       */
+    uint8_t  mse_indices[TQ_BK * 5 / 8];   /* 5-bit packed indices 0..31 (80B)        */
+} block_tq_turbo_kv_5b;
+
 /* TurboQuant KV cache block: 4-bit variant (Variant F: codebook-only, no QJL)
  *
  * Karpathy-loop ablation showed the QJL residual contributes ~0 to scores.
@@ -277,6 +294,7 @@ TQ_CHECK_SIZE(block_tq_uniform_3b, 4 * TQ_3B_NSUB + TQ_BK * 3 / 8);
 TQ_CHECK_SIZE(block_tq_mixed_4b8, 4 + TQ_MIXED_OUTLIERS + TQ_MIXED_OUTLIERS * 2 + TQ_BK / 2);
 TQ_CHECK_SIZE(block_tq_turbo_kv_3b, 8 + TQ_BK * 3 / 8);
 TQ_CHECK_SIZE(block_tq_turbo_kv_4b, 8 + TQ_BK / 2);
+TQ_CHECK_SIZE(block_tq_turbo_kv_5b, 8 + TQ_BK * 5 / 8);
 TQ_CHECK_SIZE(block_tq_turbo_kv_1b, 8 + TQ_BK / 8);
 TQ_CHECK_SIZE(block_tq_turbo_kv_2b, 8 + TQ_BK / 8 + TQ_BK / 8);
 
