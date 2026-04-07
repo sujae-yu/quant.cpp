@@ -229,6 +229,11 @@ if(TQ_BUILD_TESTS)
         target_link_libraries(${test_name} turboquant GTest::gtest_main)
         add_test(NAME ${test_name} COMMAND ${test_name})
 
+        # Slow tests on MSVC (no auto-vectorization, weaker codegen) need more time
+        if(MSVC AND ${test_name} MATCHES "test_(multihash_dim64|ops|unbiased|cumulative_error)")
+            set_tests_properties(${test_name} PROPERTIES TIMEOUT 600)
+        endif()
+
         # Pass Metal availability to test targets
         if(TQ_BUILD_METAL AND APPLE)
             target_compile_definitions(${test_name} PRIVATE TQ_HAS_METAL=1)

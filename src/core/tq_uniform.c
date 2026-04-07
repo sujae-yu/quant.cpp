@@ -9,6 +9,7 @@
 
 #include "turboquant/turboquant.h"
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 #include <float.h>
 
@@ -191,8 +192,10 @@ void tq_quantize_query_q8(const float* query, int8_t* q8_out,
  */
 void tq_uniform_4b_attention_int_ref(const float* query, const void* kv,
                                       float* scores, int seq_len, int head_dim) {
-    /* Step 1: Quantize query to Q8 (once, amortized over seq_len) */
-    int8_t q8[512]; /* max head_dim supported */
+    /* Step 1: Quantize query to Q8 (once, amortized over seq_len).
+     * Heap-allocate to avoid stack overflow on large head_dim. */
+    int8_t* q8 = (int8_t*)malloc((size_t)head_dim * sizeof(int8_t));
+    if (!q8) { for (int s = 0; s < seq_len; s++) scores[s] = 0.0f; return; }
     float q_scale, q_sum;
     tq_quantize_query_q8(query, q8, &q_scale, &q_sum, head_dim);
 
@@ -225,6 +228,7 @@ void tq_uniform_4b_attention_int_ref(const float* query, const void* kv,
         }
         scores[s] = score;
     }
+    free(q8);
 }
 
 /* ---------- Uniform 4-bit attention (dequantize + dot product) ---------- */

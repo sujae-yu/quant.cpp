@@ -175,7 +175,11 @@ TEST(TQM, SaveLoadRoundtrip) {
     ASSERT_EQ(model.use_q4_weights, 1);
 
     /* Save to temp file */
+#ifdef _WIN32
+    const char* tmp_path = "test_tqm_roundtrip.tqm";
+#else
     const char* tmp_path = "/tmp/test_tqm_roundtrip.tqm";
+#endif
     int ret = tq_save_tqm(&model, NULL, tmp_path);
     ASSERT_EQ(ret, 0);
 
@@ -259,7 +263,11 @@ TEST(TQM, SaveLoadRoundtrip) {
  * ============================================================ */
 TEST(TQM, AutoDetect) {
     /* Write a minimal TQM header to a temp file */
+#ifdef _WIN32
+    const char* tmp_path = "test_tqm_autodetect.tqm";
+#else
     const char* tmp_path = "/tmp/test_tqm_autodetect.tqm";
+#endif
     FILE* f = fopen(tmp_path, "wb");
     ASSERT_NE(f, nullptr);
 

@@ -420,7 +420,11 @@ TEST(ModelConfig, MoEFields) {
 
 TEST(GGUF, MagicDetection) {
     /* Write a tiny file with GGUF magic but invalid content */
+#ifdef _WIN32
+    const char* tmppath = "test_gguf_magic.gguf";
+#else
     const char* tmppath = "/tmp/test_gguf_magic.gguf";
+#endif
     FILE* f = fopen(tmppath, "wb");
     ASSERT_NE(f, nullptr);
     uint32_t magic = 0x46554747; /* "GGUF" as LE uint32 */

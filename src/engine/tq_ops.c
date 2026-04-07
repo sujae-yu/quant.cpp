@@ -23,7 +23,8 @@ typedef CONDITION_VARIABLE pthread_cond_t;
 #define pthread_mutex_unlock(m)  LeaveCriticalSection(m)
 #define pthread_mutex_destroy(m) DeleteCriticalSection(m)
 #define pthread_cond_init(c, a)  InitializeConditionVariable(c)
-#define pthread_cond_wait(c, m)  SleepConditionVariableCS(c, m, INFINITE)
+/* Note: cond_wait uses SRW variant because mutex is SRWLOCK (see below) */
+#define pthread_cond_wait(c, m)  SleepConditionVariableSRW(c, m, INFINITE, 0)
 #define pthread_cond_broadcast(c) WakeAllConditionVariable(c)
 #define pthread_cond_destroy(c)  ((void)0)
 /* __thread → __declspec(thread) */

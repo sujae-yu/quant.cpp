@@ -54,7 +54,7 @@ void tq_qjl_quantize_ref(const float* src, void* dst, int n) {
     if (dim > TQ_BK_QJL) dim = TQ_BK_QJL;
 
     /* Quick NaN check on first and last element */
-    if (src[0] != src[0] || src[dim-1] != src[dim-1]) {
+    if (dim > 0 && (src[0] != src[0] || src[dim-1] != src[dim-1])) {
         memset(block, 0, sizeof(*block));
         return;
     }

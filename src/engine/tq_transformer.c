@@ -216,6 +216,7 @@ tq_state_t* tq_create_state_ex(const tq_model_config_t* config, tq_type kv_type,
 #else
     s->key_cache   = (float*)calloc(1, kv_total_bytes);
 #endif
+    if (!s->key_cache) { free(s); return NULL; }
 
     /* Value cache quantization: Q4 or Q2 for aggressive V compression.
      * When value_quant_bits > 0, V is stored quantized instead of FP16/FP32.
@@ -265,6 +266,7 @@ tq_state_t* tq_create_state_ex(const tq_model_config_t* config, tq_type kv_type,
 #else
         s->value_cache = (float*)calloc((size_t)n_layers * kv_layer_size, sizeof(float));
 #endif
+        if (!s->value_cache) { free(s->key_cache); free(s); return NULL; }
         s->value_cache_qs = NULL;
         s->value_cache_scales = NULL;
         s->kv_cache_size = (size_t)n_layers * kv_layer_size * sizeof(float);
