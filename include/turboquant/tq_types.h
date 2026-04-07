@@ -56,7 +56,8 @@ typedef enum {
     TQ_TYPE_UNIFORM_3B= 12,  /* Min-Max uniform 3-bit with sub-block scales     */
     TQ_TYPE_TURBO_KV_5B = 13,/* TurboQuant KV: RHT + 5-bit Lloyd-Max codebook   */
     TQ_TYPE_TURBO_KV_4BO = 14,/* TurboQuant KV: 4-bit codebook + 8 FP16 outliers */
-    TQ_TYPE_COUNT     = 15
+    TQ_TYPE_TURBO_KV_3BO = 15,/* TurboQuant KV: 3-bit codebook + 8 FP16 outliers */
+    TQ_TYPE_COUNT     = 16
 } tq_type;
 
 /* ============================================================
@@ -245,6 +246,24 @@ typedef struct {
     uint16_t out_values[TQ_KV_4BO_OUTLIERS];   /* outlier values FP16 (16B)          */
 } block_tq_turbo_kv_4bo;
 
+/* TurboQuant KV cache block: 3-bit + per-block outliers (Variant G, smaller base)
+ *
+ * Same outlier mechanism as turbo_kv_4bo but with a 3-bit (8-level) codebook
+ * for the body. Smaller block size at the cost of a coarser codebook.
+ *
+ * Layout: 8 hdr + 48 mse_3bit + 8 out_idx + 16 out_val_fp16 = 80 bytes
+ * Compare: 4b=72B, 4bo=96B, 5b=88B, 3bo=80B
+ */
+typedef struct {
+    uint16_t norm;                              /* L2 norm of original (fp16)       */
+    uint16_t residual_norm;                     /* unused                           */
+    uint16_t inv_std_fp16;                      /* per-block inv_std                */
+    uint16_t _pad;                              /* alignment                        */
+    uint8_t  mse_indices[TQ_BK * 3 / 8];       /* 3-bit packed indices (48B)       */
+    uint8_t  out_indices[TQ_KV_4BO_OUTLIERS];  /* outlier channel indices (8B)     */
+    uint16_t out_values[TQ_KV_4BO_OUTLIERS];   /* outlier values FP16 (16B)        */
+} block_tq_turbo_kv_3bo;
+
 /* TurboQuant KV cache block: 5-bit variant (Variant F architecture)
  *
  * 5-bit (32-level) Lloyd-Max-Gaussian codebook on RHT-rotated values.
@@ -320,6 +339,7 @@ TQ_CHECK_SIZE(block_tq_turbo_kv_3b, 8 + TQ_BK * 3 / 8);
 TQ_CHECK_SIZE(block_tq_turbo_kv_4b, 8 + TQ_BK / 2);
 TQ_CHECK_SIZE(block_tq_turbo_kv_5b, 8 + TQ_BK * 5 / 8);
 TQ_CHECK_SIZE(block_tq_turbo_kv_4bo, 8 + TQ_BK / 2 + TQ_KV_4BO_OUTLIERS + TQ_KV_4BO_OUTLIERS * 2);
+TQ_CHECK_SIZE(block_tq_turbo_kv_3bo, 8 + TQ_BK * 3 / 8 + TQ_KV_4BO_OUTLIERS + TQ_KV_4BO_OUTLIERS * 2);
 TQ_CHECK_SIZE(block_tq_turbo_kv_1b, 8 + TQ_BK / 8);
 TQ_CHECK_SIZE(block_tq_turbo_kv_2b, 8 + TQ_BK / 8 + TQ_BK / 8);
 

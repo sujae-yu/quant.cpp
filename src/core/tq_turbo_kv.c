@@ -1228,3 +1228,130 @@ void tq_turbo_kv_4bo_attention_ref(const float* query, const void* kv_cache,
         scores[seq] = norm * mse_dot;
     }
 }
+
+/* ============================================================
+ * TurboQuant KV 3-bit + outliers (Variant G, smaller base):
+ *   Same outlier mechanism as 4bo but with a 3-bit codebook for the body.
+ *   80 byte block — between 4b (72) and 5b (88).
+ * ============================================================ */
+
+void tq_turbo_kv_3bo_quantize_ref(const float* src, void* dst, int n) {
+    block_tq_turbo_kv_3bo* block = (block_tq_turbo_kv_3bo*)dst;
+    int dim = n;
+    if (dim > TQ_BK) dim = TQ_BK;
+
+    float norm_sq = 0.0f;
+    for (int i = 0; i < dim; i++) norm_sq += src[i] * src[i];
+    float norm = sqrtf(norm_sq);
+    block->norm = tkv_fp32_to_fp16(norm);
+    block->residual_norm = 0;
+    block->_pad = 0;
+
+    float rotated[TQ_BK];
+    float inv_norm = (norm > 1e-10f) ? (1.0f / norm) : 0.0f;
+    for (int i = 0; i < dim; i++) rotated[i] = src[i] * inv_norm;
+    for (int i = dim; i < TQ_BK; i++) rotated[i] = 0.0f;
+    tq_rht_transform(rotated, dim, TKV_DEFAULT_SEED);
+
+    /* Find top-K outliers */
+    int K = TQ_KV_4BO_OUTLIERS;
+    int out_idx[TQ_KV_4BO_OUTLIERS];
+    float out_abs[TQ_KV_4BO_OUTLIERS];
+    for (int k = 0; k < K; k++) { out_idx[k] = -1; out_abs[k] = -1.0f; }
+
+    for (int i = 0; i < dim; i++) {
+        float a = fabsf(rotated[i]);
+        int min_pos = 0;
+        for (int k = 1; k < K; k++) {
+            if (out_abs[k] < out_abs[min_pos]) min_pos = k;
+        }
+        if (a > out_abs[min_pos]) {
+            out_abs[min_pos] = a;
+            out_idx[min_pos] = i;
+        }
+    }
+    for (int k = 0; k < K; k++) {
+        int idx = out_idx[k];
+        if (idx < 0) {
+            block->out_indices[k] = 0;
+            block->out_values[k] = 0;
+        } else {
+            block->out_indices[k] = (uint8_t)idx;
+            block->out_values[k] = tkv_fp32_to_fp16(rotated[idx]);
+        }
+    }
+
+    /* Body-only max-abs scaling for 3-bit codebook */
+    char is_outlier[TQ_BK];
+    memset(is_outlier, 0, sizeof(is_outlier));
+    for (int k = 0; k < K; k++) {
+        if (out_idx[k] >= 0) is_outlier[out_idx[k]] = 1;
+    }
+    float body_max_abs = 0.0f;
+    for (int i = 0; i < dim; i++) {
+        if (is_outlier[i]) continue;
+        float a = fabsf(rotated[i]);
+        if (a > body_max_abs) body_max_abs = a;
+    }
+    if (body_max_abs < 1e-10f) body_max_abs = 1.0f;
+    const float CENT_3BIT_MAX = 2.1520f;
+    float inv_std = CENT_3BIT_MAX / body_max_abs;
+    block->inv_std_fp16 = tkv_fp32_to_fp16(inv_std);
+
+    uint8_t indices[TQ_BK];
+    tq_codebook_quantize(rotated, indices, dim, 3, inv_std);
+    pack_3bit(indices, block->mse_indices, dim);
+}
+
+static void dequant_mse_rotated_3bo(const block_tq_turbo_kv_3bo* block,
+                                     float* rotated, int dim) {
+    float inv_std = tkv_fp16_to_fp32(block->inv_std_fp16);
+    if (inv_std < 1e-10f) inv_std = sqrtf((float)dim);
+    uint8_t indices[TQ_BK] = {0};
+    unpack_3bit(block->mse_indices, indices, dim);
+    tq_codebook_dequantize(indices, rotated, dim, 3, inv_std);
+
+    int K = TQ_KV_4BO_OUTLIERS;
+    for (int k = 0; k < K; k++) {
+        int idx = block->out_indices[k];
+        if (idx < dim) {
+            rotated[idx] = tkv_fp16_to_fp32(block->out_values[k]);
+        }
+    }
+}
+
+void tq_turbo_kv_3bo_dequantize_ref(const void* src, float* dst, int n) {
+    const block_tq_turbo_kv_3bo* block = (const block_tq_turbo_kv_3bo*)src;
+    int dim = n;
+    if (dim > TQ_BK) dim = TQ_BK;
+
+    float norm = tkv_fp16_to_fp32(block->norm);
+    float rotated[TQ_BK];
+    dequant_mse_rotated_3bo(block, rotated, dim);
+    tq_rht_inverse(rotated, dim, TKV_DEFAULT_SEED);
+    for (int i = 0; i < dim; i++) dst[i] = rotated[i] * norm;
+}
+
+void tq_turbo_kv_3bo_attention_ref(const float* query, const void* kv_cache,
+                                     float* scores, int seq_len, int head_dim) {
+    const block_tq_turbo_kv_3bo* blocks_3bo = (const block_tq_turbo_kv_3bo*)kv_cache;
+    int dim = head_dim;
+    if (dim > TQ_BK) dim = TQ_BK;
+
+    float q_rot[TQ_BK];
+    memcpy(q_rot, query, (size_t)dim * sizeof(float));
+    for (int i = dim; i < TQ_BK; i++) q_rot[i] = 0.0f;
+    tq_rht_transform(q_rot, dim, TKV_DEFAULT_SEED);
+
+    for (int seq = 0; seq < seq_len; seq++) {
+        const block_tq_turbo_kv_3bo* block = &blocks_3bo[seq];
+        float norm = tkv_fp16_to_fp32(block->norm);
+
+        float rotated[TQ_BK];
+        dequant_mse_rotated_3bo(block, rotated, dim);
+
+        float mse_dot = 0.0f;
+        for (int d = 0; d < dim; d++) mse_dot += q_rot[d] * rotated[d];
+        scores[seq] = norm * mse_dot;
+    }
+}
