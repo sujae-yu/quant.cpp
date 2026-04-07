@@ -56,6 +56,28 @@ Translated to PPL terms, the paper's results imply approximately **zero PPL degr
 | Pre-rotated query optimization | ✅ correct | `q_rot = RHT(query)` once |
 | Inner product estimator combining stages | ⚠️ unverified | `dot1 + r_norm * qjl_correction` — formula may not exactly match paper |
 
+## Ablation: which stage is broken?
+
+Ran `turbo_kv_*` with the QJL correction forcibly disabled (MSE-only) on Llama 3.2 3B:
+
+| Config | PPL | Δ from full |
+|---|---:|---:|
+| `turbo_kv_4b` full (MSE+QJL) | 16.03 | (baseline) |
+| `turbo_kv_4b` MSE-only | **16.03** | **0.00** |
+| `turbo_kv_3b` full (MSE+QJL) | 25.84 | (baseline) |
+| `turbo_kv_3b` MSE-only | **25.84** | **0.00** |
+
+**The QJL stage contributes literally nothing to the final scores.** Disabling it produces byte-identical PPL.
+
+This narrows the diagnosis dramatically:
+1. The QJL correction term is being computed as ~0 (or constant) regardless of input
+2. The MSE-only Lloyd-Max codebook stage is **strictly worse than uniform per-block min-max** at the same bit budget — Lloyd-Max-Gaussian centroids appear to clip outliers that uniform_4b's per-block range captures
+3. Real key vectors after RHT have heavier tails than the N(0,1) assumption — likely because the keys themselves have a few large components that don't fully redistribute even after a single-stage Hadamard rotation
+
+Two structural fixes are needed:
+- **Outlier handling at Stage 1** (paper does this — 32 outlier channels at higher bit width)
+- **QJL correction debugging** — verify the constant `√(π/2)/m` is right for our Rademacher rows (the original paper uses Gaussian rows; constants differ)
+
 ## Hypotheses for the gap
 
 1. **Lloyd-Max scaling**: After random rotation of a unit-norm vector, coordinates follow a `Beta(1/2, (d−1)/2)` distribution scaled to `[−1, 1]`, not exactly `N(0, 1/d)`. The discrepancy matters at small `d` (head_dim 64–128). Need to either (a) recompute centroids for the Beta distribution, or (b) verify that the Gaussian approximation suffices for `d ≥ 128`.
