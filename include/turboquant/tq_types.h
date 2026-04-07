@@ -204,31 +204,36 @@ typedef struct {
 }
 #endif
 
-/* TurboQuant KV cache block: RHT + Lloyd-Max codebook + QJL residual
- * 3-bit variant: 2-bit codebook (4 levels) + 1-bit QJL sign hash
- * Block covers TQ_BK elements (128).
- * Layout: norm(2) + residual_norm(2) + inv_std(2) + _pad(2) + mse_2bit(32) + qjl_signs(16) = 56 bytes
+/* TurboQuant KV cache block: 3-bit variant (Variant F: codebook-only, no QJL)
+ *
+ * Karpathy-loop ablation: QJL contributed ~0. Reclaimed those 16 bytes to
+ * upgrade from 2-bit (4 levels) to 3-bit (8 levels) Lloyd-Max codebook —
+ * 2x finer resolution at the same block size.
+ *
+ * Layout: norm(2) + residual_norm(2) + inv_std(2) + _pad(2) + mse_3bit(48) = 56 bytes
  */
 typedef struct {
     uint16_t norm;                     /* L2 norm of original vector (fp16)        */
-    uint16_t residual_norm;            /* L2 norm of residual after MSE (fp16)     */
-    uint16_t inv_std_fp16;             /* per-block 1/std for codebook lookup      */
-    uint16_t _pad;                     /* alignment padding (was rht_seed upper)   */
-    uint8_t  mse_indices[TQ_BK / 4];  /* 2-bit packed codebook indices (32B)      */
-    uint8_t  qjl_signs[TQ_BK / 8];    /* 1-bit QJL sign hash on residual (16B)   */
+    uint16_t residual_norm;            /* unused (kept for layout)                 */
+    uint16_t inv_std_fp16;             /* per-block inv_std for codebook lookup    */
+    uint16_t _pad;                     /* alignment padding                        */
+    uint8_t  mse_indices[TQ_BK * 3 / 8];  /* 3-bit packed codebook indices (48B)  */
 } block_tq_turbo_kv_3b;
 
-/* TurboQuant KV cache block: 4-bit variant
- * 3-bit codebook (8 levels) + 1-bit QJL sign hash
- * Layout: norm(2) + residual_norm(2) + inv_std(2) + _pad(2) + mse_3bit(48) + qjl_signs(16) = 72 bytes
+/* TurboQuant KV cache block: 4-bit variant (Variant F: codebook-only, no QJL)
+ *
+ * Karpathy-loop ablation showed the QJL residual contributes ~0 to scores.
+ * We reclaim those 16 bytes to upgrade from 3-bit (8 levels) Lloyd-Max codebook
+ * to 4-bit (16 levels) — 2x finer reconstruction at the same block size.
+ *
+ * Layout: norm(2) + residual_norm(2) + inv_std(2) + _pad(2) + mse_4bit(64) = 72 bytes
  */
 typedef struct {
     uint16_t norm;                         /* L2 norm of original vector (fp16)        */
-    uint16_t residual_norm;                /* L2 norm of residual after MSE (fp16)     */
-    uint16_t inv_std_fp16;                 /* per-block 1/std for codebook lookup      */
+    uint16_t residual_norm;                /* unused now (kept for future residual)    */
+    uint16_t inv_std_fp16;                 /* per-block inv_std for codebook lookup    */
     uint16_t _pad;                         /* alignment padding                        */
-    uint8_t  mse_indices[TQ_BK * 3 / 8];  /* 3-bit packed codebook indices (48B)      */
-    uint8_t  qjl_signs[TQ_BK / 8];        /* 1-bit QJL sign hash on residual (16B)   */
+    uint8_t  mse_indices[TQ_BK / 2];      /* 4-bit packed linear indices 0..15 (64B)  */
 } block_tq_turbo_kv_4b;
 
 /* TurboQuant KV cache block: 1-bit Hamming attention
@@ -270,8 +275,8 @@ TQ_CHECK_SIZE(block_tq_uniform_4b, 4 + TQ_BK / 2);
 TQ_CHECK_SIZE(block_tq_uniform_2b, 4 * TQ_2B_NSUB + TQ_BK / 4);
 TQ_CHECK_SIZE(block_tq_uniform_3b, 4 * TQ_3B_NSUB + TQ_BK * 3 / 8);
 TQ_CHECK_SIZE(block_tq_mixed_4b8, 4 + TQ_MIXED_OUTLIERS + TQ_MIXED_OUTLIERS * 2 + TQ_BK / 2);
-TQ_CHECK_SIZE(block_tq_turbo_kv_3b, 8 + TQ_BK / 4 + TQ_BK / 8);
-TQ_CHECK_SIZE(block_tq_turbo_kv_4b, 8 + TQ_BK * 3 / 8 + TQ_BK / 8);
+TQ_CHECK_SIZE(block_tq_turbo_kv_3b, 8 + TQ_BK * 3 / 8);
+TQ_CHECK_SIZE(block_tq_turbo_kv_4b, 8 + TQ_BK / 2);
 TQ_CHECK_SIZE(block_tq_turbo_kv_1b, 8 + TQ_BK / 8);
 TQ_CHECK_SIZE(block_tq_turbo_kv_2b, 8 + TQ_BK / 8 + TQ_BK / 8);
 

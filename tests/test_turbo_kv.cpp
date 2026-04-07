@@ -117,22 +117,10 @@ TEST(TurboKV3B, NormPreserved) {
     EXPECT_NEAR(decoded_norm, expected_norm, expected_norm * 0.01f);
 }
 
-TEST(TurboKV3B, QJLSignsNonZero) {
-    const int dim = TQ_BK;
-    std::vector<float> input(dim);
-    for (int i = 0; i < dim; i++) input[i] = sinf(i * 0.3f);
-
-    block_tq_turbo_kv_3b block;
-    memset(&block, 0, sizeof(block));
-    tq_turbo_kv_3b_quantize_ref(input.data(), &block, dim);
-
-    /* QJL signs should not be all zeros */
-    bool has_nonzero = false;
-    for (int i = 0; i < TQ_BK / 8; i++) {
-        if (block.qjl_signs[i] != 0) has_nonzero = true;
-    }
-    EXPECT_TRUE(has_nonzero);
-}
+/* QJLSignsNonZero test removed: Variant F drops the QJL stage from the
+ * 3b/4b TurboQuant types since the Karpathy ablation showed it
+ * contributed ~0 to attention scores. The 16 bytes are now used for a
+ * larger codebook (see tq_types.h). */
 
 /* ============================================================
  * 4-bit roundtrip tests
