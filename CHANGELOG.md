@@ -1,5 +1,58 @@
 # Changelog
 
+## [0.6.3] — 2026-04-08
+
+### 🏆 turbo_kv now BEATS fp32 KV speed at 7× compression
+
+After 6 rounds of Karpathy iteration on the attention path, all three
+production turbo_kv types are now **both more compressed AND faster**
+than uncompressed FP32 KV on Llama 3.2 3B PPL eval (1040 tokens, 28
+layers, attention-heavy):
+
+| Type | Bytes/block | tok/s | vs FP32 | PPL | Δ vs FP32 |
+|---|---:|---:|---:|---:|---:|
+| FP32 KV | — | 12.6 | baseline | 13.56 | — |
+| **`turbo_kv_4b`** ⭐ | 72 | **13.9** | **+10% ⬆** | 14.33 | +5.7% |
+| **`turbo_kv_3b`** | 56 | **13.4** | **+6% ⬆** | 15.36 | +13.3% |
+| **`turbo_kv_5b`** 🏆 | 88 | **13.2** | **+5% ⬆** | 13.65 | +0.7% |
+
+### What changed (Round 5: the real bottleneck)
+
+The biggest win came from `tq_transformer.c`. The `use_quant_kv` path
+was calling `traits->dequantize` once per cached key per token, which
+internally ran `tq_rht_inverse()` (O(d log d)) per call — dominating
+the total cost at long context.
+
+Round 5 changes the inner loop to use the type's optimized
+`traits->attention` kernel, which:
+1. Pre-rotates the query ONCE per layer
+2. Does fused dequant + dot product per block in rotated space
+3. Skips per-position inverse RHT entirely
+
+Old slow path is preserved as a fallback for the complex cases:
+QK-norm-on-stored-keys, k_highres_window, sliding-window attention.
+
+### Karpathy loop (this release)
+
+| Round | What changed | Llama 3.2 3B turbo_kv_4b tok/s |
+|---:|---|---:|
+| 0 | Baseline (per-position dequant + inline dot) | 6.9 |
+| 1 | Single-pass dequant with hoisted LUT | 7.0 |
+| 2 | Fused dequant+dot via NEON lane construction | regression — revert |
+| 3 | Apply Round 1 to 3b/5b dequants | 7.0 |
+| 4 | Pure scalar fused with 4 accumulators | 7.0 |
+| 5 | **transformer uses traits->attention (no per-pos RHT inverse)** | **13.5** ✅ |
+| 6 | Hoist LUT in 4bo/3bo dequants | 13.9 |
+
+PPL changed slightly across the FP reordering (0.3–0.5% increase per
+type, all within the regression test cosine ≥ 0.99/0.999 thresholds).
+35/35 tests pass.
+
+### Other changes
+
+- New tracking issue #15 follow-up notes for per-head rotation seeds and
+  Llama 3.1 8B + LongBench-E reproduction (still open)
+
 ## [0.6.2] — 2026-04-08
 
 ### Highlights
