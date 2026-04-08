@@ -1621,76 +1621,102 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
                 atth[t] = score * inv_scale;
             }
         } else if (use_quant_kv) {
-            /* Dequant attention: read from quantized key cache, dequantize
-             * each position's key on the fly, then compute FP32 dot product.
-             * This is the path that delivers REAL memory savings — no FP32
-             * key cache is stored for previous positions.
+            /* Dequant attention: gather quantized key blocks for this kv head
+             * then call the type's optimized fused attention kernel which
+             * pre-rotates the query ONCE and skips per-position inverse RHT.
              *
-             * When k_highres_window is active (age-based progressive), recent
-             * tokens within the window use FP32 from the circular buffer.
-             * Old tokens use the quant cache (typically 2-bit). */
+             * Round 5 optimization: previously this loop called
+             *   traits->dequantize(quant_src, buf, head_dim)
+             * per position, which paid O(d log d) inverse RHT per call. The
+             * fused traits->attention path eliminates that completely.
+             *
+             * Fast path conditions: no QK-norm-on-stored-keys, no high-res
+             * window, no Gemma 4 prescale. Falls back to per-position dequant
+             * for the complex cases.
+             */
             const tq_type_traits_t* traits = &TQ_TRAITS[s->kv_quant_type];
-            /* For Gemma 4: keys were prescaled by sqrt(head_dim) before quantization.
-             * Undo prescale in attention: score = q·(k*prescale)/prescale = q·k */
             float prescale_inv = (c->is_gemma4 && kv_prescale != 1.0f) ? (1.0f / kv_prescale) : 1.0f;
             float inv_scale = prescale_inv / sqrtf(attn_scale_dim);
-            float dequant_buf[512];
 
             int k_hr_win = s->k_highres_window;
             int k_hr_active = (k_hr_win > 0 && s->key_highres_fp32 != NULL);
-            /* Window boundary: positions >= window_start are in the FP32 window */
             int k_window_start = k_hr_active ? (pos - k_hr_win + 1) : seq_len;
             if (k_window_start < 0) k_window_start = 0;
-
             size_t hr_layer_stride = k_hr_active ?
                 (size_t)k_hr_win * cache_kv_dim : 0;
 
+            int needs_post_norm = (save_pre_norm_keys && layer->k_norm != NULL);
+
             for (int t = 0; t < attn_start; t++) atth[t] = -1e30f;
 
-            for (int t = attn_start; t < seq_len; t++) {
-                const float* key_ptr;
+            /* Fast path: no post-norm, no high-res window, attention type
+             * supports the fused kernel (which is true for all turbo_kv_*). */
+            if (!needs_post_norm && !k_hr_active && traits->attention != NULL
+                && attn_start == 0) {
+                /* Gather quantized blocks for this kv_head into a contiguous
+                 * buffer (the layer-stride layout has interleaved kv heads). */
+                size_t head_block_bytes = s->quant_head_stride;
+                size_t pos_stride_bytes = (size_t)cache_n_kv_heads * head_block_bytes;
+                uint8_t* layer_base = (uint8_t*)s->quant_key_cache
+                    + (size_t)l * s->quant_kv_stride;
+                uint8_t* gather_dst = (uint8_t*)s->quant_key_buf;
+                for (int t = 0; t < seq_len; t++) {
+                    const uint8_t* src = layer_base
+                        + (size_t)t * pos_stride_bytes
+                        + (size_t)kv_h * head_block_bytes;
+                    memcpy(gather_dst + (size_t)t * head_block_bytes, src, head_block_bytes);
+                }
 
-                if (k_hr_active && t >= k_window_start) {
-                    /* Recent token: read from FP32 highres circular buffer */
-                    int win_idx = t % k_hr_win;
-                    key_ptr = s->key_highres_fp32
-                        + (size_t)l * hr_layer_stride
-                        + (size_t)win_idx * cache_kv_dim
-                        + kv_h * head_dim;
-                } else {
-                    /* Old token: dequantize from quant cache */
-                    const uint8_t* quant_src = (const uint8_t*)s->quant_key_cache
-                        + (size_t)l * s->quant_kv_stride
-                        + (size_t)t * cache_n_kv_heads * s->quant_head_stride
-                        + (size_t)kv_h * s->quant_head_stride;
-                    traits->dequantize(quant_src, dequant_buf, head_dim);
-                    /* Re-apply QK-norm if keys were stored pre-norm */
-                    if (save_pre_norm_keys && layer->k_norm) {
-                        tq_rmsnorm(dequant_buf, dequant_buf, layer->k_norm,
-                                   head_dim, c->rms_norm_eps);
+                /* Single bulk attention call computes all seq_len scores */
+                traits->attention(qh, s->quant_key_buf, atth, seq_len, head_dim);
+
+                /* Apply scale */
+                for (int t = 0; t < seq_len; t++) {
+                    atth[t] *= inv_scale;
+                }
+            } else {
+                /* Slow path: per-position dequant for complex cases */
+                float dequant_buf[512];
+                for (int t = attn_start; t < seq_len; t++) {
+                    const float* key_ptr;
+                    if (k_hr_active && t >= k_window_start) {
+                        int win_idx = t % k_hr_win;
+                        key_ptr = s->key_highres_fp32
+                            + (size_t)l * hr_layer_stride
+                            + (size_t)win_idx * cache_kv_dim
+                            + kv_h * head_dim;
+                    } else {
+                        const uint8_t* quant_src = (const uint8_t*)s->quant_key_cache
+                            + (size_t)l * s->quant_kv_stride
+                            + (size_t)t * cache_n_kv_heads * s->quant_head_stride
+                            + (size_t)kv_h * s->quant_head_stride;
+                        traits->dequantize(quant_src, dequant_buf, head_dim);
+                        if (needs_post_norm) {
+                            tq_rmsnorm(dequant_buf, dequant_buf, layer->k_norm,
+                                       head_dim, c->rms_norm_eps);
+                        }
+                        key_ptr = dequant_buf;
                     }
-                    key_ptr = dequant_buf;
-                }
-
-                float score = 0.0f;
+                    float score = 0.0f;
 #ifdef __ARM_NEON
-                float32x4_t vsum = vdupq_n_f32(0.0f);
-                int d = 0;
-                for (; d + 4 <= head_dim; d += 4) {
-                    float32x4_t vq = vld1q_f32(qh + d);
-                    float32x4_t vk = vld1q_f32(key_ptr + d);
-                    vsum = vfmaq_f32(vsum, vq, vk);
-                }
-                score = vaddvq_f32(vsum);
-                for (; d < head_dim; d++) {
-                    score += qh[d] * key_ptr[d];
-                }
+                    float32x4_t vsum = vdupq_n_f32(0.0f);
+                    int d = 0;
+                    for (; d + 4 <= head_dim; d += 4) {
+                        float32x4_t vq = vld1q_f32(qh + d);
+                        float32x4_t vk = vld1q_f32(key_ptr + d);
+                        vsum = vfmaq_f32(vsum, vq, vk);
+                    }
+                    score = vaddvq_f32(vsum);
+                    for (; d < head_dim; d++) {
+                        score += qh[d] * key_ptr[d];
+                    }
 #else
-                for (int d = 0; d < head_dim; d++) {
-                    score += qh[d] * key_ptr[d];
-                }
+                    for (int d = 0; d < head_dim; d++) {
+                        score += qh[d] * key_ptr[d];
+                    }
 #endif
-                atth[t] = score * inv_scale;
+                    atth[t] = score * inv_scale;
+                }
             }
         } else {
             /* FP32 attention scores (no quantization) */

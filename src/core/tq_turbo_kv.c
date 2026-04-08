@@ -29,6 +29,7 @@ extern void tq_codebook_quantize(const float* src, uint8_t* dst_indices,
                                   int n, int bits, float inv_std);
 extern void tq_codebook_dequantize(const uint8_t* indices, float* dst,
                                     int n, int bits, float inv_std);
+extern const float* tq_codebook_centroids(int bits);
 
 /* ============================================================
  * FP16 helpers (local copies to avoid cross-module dependencies)
@@ -152,26 +153,84 @@ static void compute_qjl_signs(const float* residual, uint8_t* signs,
 
 static void dequant_mse_rotated_3bit_v2(const block_tq_turbo_kv_3b* block,
                                          float* rotated, int dim) {
-    /* Variant F (3b): 3-bit codebook (8 levels) + max-abs scaling, no QJL */
+    /* Variant F (3b): 3-bit codebook (8 levels) + max-abs scaling.
+     * Single-pass fused unpack + LUT lookup + scale (Round 1 pattern). */
     float inv_std = tkv_fp16_to_fp32(block->inv_std_fp16);
     if (inv_std < 1e-10f) inv_std = sqrtf((float)dim);
-    uint8_t indices[TQ_BK] = {0};
-    unpack_3bit(block->mse_indices, indices, dim);
-    tq_codebook_dequantize(indices, rotated, dim, 3, inv_std);
+    float scale = 1.0f / inv_std;
+    const float* cb = tq_codebook_centroids(3);
+    float lut[8];
+    for (int i = 0; i < 8; i++) lut[i] = cb[i] * scale;
+    /* 3-bit packing is bit-stream LSB-first, 8 elements per 3 bytes */
+    const uint8_t* p = block->mse_indices;
+    int i = 0;
+    for (; i + 7 < dim; i += 8) {
+        /* 3 bytes encode 8 indices */
+        uint32_t w = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16);
+        rotated[i + 0] = lut[(w >>  0) & 7];
+        rotated[i + 1] = lut[(w >>  3) & 7];
+        rotated[i + 2] = lut[(w >>  6) & 7];
+        rotated[i + 3] = lut[(w >>  9) & 7];
+        rotated[i + 4] = lut[(w >> 12) & 7];
+        rotated[i + 5] = lut[(w >> 15) & 7];
+        rotated[i + 6] = lut[(w >> 18) & 7];
+        rotated[i + 7] = lut[(w >> 21) & 7];
+        p += 3;
+    }
+    /* Tail */
+    for (; i < dim; i++) {
+        int bit_off = i * 3;
+        int byte_idx = bit_off / 8;
+        int bit_pos = bit_off % 8;
+        uint16_t v = block->mse_indices[byte_idx];
+        if (bit_pos > 5 && byte_idx + 1 < (dim * 3 + 7) / 8) {
+            v |= (uint16_t)block->mse_indices[byte_idx + 1] << 8;
+        }
+        rotated[i] = lut[(v >> bit_pos) & 7];
+    }
 }
 
 static void dequant_mse_rotated_4bit_v2(const block_tq_turbo_kv_4b* block,
                                          float* rotated, int dim) {
-    /* Variant F: 4-bit codebook (16 levels) + max-abs scaling */
+    /* Variant F: 4-bit codebook (16 levels) + max-abs scaling.
+     *
+     * Single-pass fused unpack + codebook lookup + scale.
+     * Pre-multiply the per-block scale into a local 16-entry table so
+     * the inner loop is one byte load + two table lookups + two stores.
+     */
     float inv_std = tkv_fp16_to_fp32(block->inv_std_fp16);
     if (inv_std < 1e-10f) inv_std = sqrtf((float)dim);
-    /* Unpack 4-bit indices: 2 per byte, LSB-first */
-    uint8_t indices[TQ_BK];
-    for (int i = 0; i < dim; i++) {
-        uint8_t b = block->mse_indices[i / 2];
-        indices[i] = (i & 1) ? (b >> 4) : (b & 0x0F);
+    float scale = 1.0f / inv_std;
+
+    /* Pre-scaled local codebook (16 entries) */
+    const float* cb = tq_codebook_centroids(4);
+    float lut[16];
+    for (int i = 0; i < 16; i++) lut[i] = cb[i] * scale;
+
+    const uint8_t* mi = block->mse_indices;
+    /* Process 2 elements per byte, unrolled by 2 bytes per iteration */
+    int i = 0;
+    int byte_n = dim / 2;
+    for (int b = 0; b + 1 < byte_n; b += 2) {
+        uint8_t b0 = mi[b];
+        uint8_t b1 = mi[b + 1];
+        rotated[i + 0] = lut[b0 & 0x0F];
+        rotated[i + 1] = lut[b0 >> 4];
+        rotated[i + 2] = lut[b1 & 0x0F];
+        rotated[i + 3] = lut[b1 >> 4];
+        i += 4;
     }
-    tq_codebook_dequantize(indices, rotated, dim, 4, inv_std);
+    for (int b = i / 2; b < byte_n; b++) {
+        uint8_t bv = mi[b];
+        rotated[i + 0] = lut[bv & 0x0F];
+        rotated[i + 1] = lut[bv >> 4];
+        i += 2;
+    }
+    /* Tail (odd dim) */
+    if (i < dim) {
+        uint8_t bv = mi[i / 2];
+        rotated[i] = lut[bv & 0x0F];
+    }
 }
 
 /* ============================================================
@@ -410,41 +469,46 @@ void tq_turbo_kv_4b_attention_ref(const float* query, const void* kv_cache,
     for (int i = dim; i < TQ_BK; i++) q_rot[i] = 0.0f;
     tq_rht_transform(q_rot, dim, TKV_DEFAULT_SEED);
 
+    /* Hoist codebook pointer (constant for all blocks) */
+    const float* cb = tq_codebook_centroids(4);
+
     for (int seq = 0; seq < seq_len; seq++) {
         const block_tq_turbo_kv_4b* block = &blocks_4b[seq];
         float norm = tkv_fp16_to_fp32(block->norm);
+        float inv_std = tkv_fp16_to_fp32(block->inv_std_fp16);
+        if (inv_std < 1e-10f) inv_std = sqrtf((float)dim);
+        float scale = 1.0f / inv_std;
 
-        float rotated[TQ_BK];
-        dequant_mse_rotated_4bit_v2(block, rotated, dim);
+        /* Per-block pre-scaled LUT (16 floats, fits in 64 bytes — L1 hot) */
+        float lut[16];
+        for (int j = 0; j < 16; j++) lut[j] = cb[j] * scale;
 
-        float mse_dot = 0.0f;
-#ifdef __ARM_NEON
-        {
-            float32x4_t acc0 = vdupq_n_f32(0.0f);
-            float32x4_t acc1 = vdupq_n_f32(0.0f);
-            float32x4_t acc2 = vdupq_n_f32(0.0f);
-            float32x4_t acc3 = vdupq_n_f32(0.0f);
-            int d = 0;
-            for (; d + 15 < dim; d += 16) {
-                acc0 = vfmaq_f32(acc0, vld1q_f32(&q_rot[d]),      vld1q_f32(&rotated[d]));
-                acc1 = vfmaq_f32(acc1, vld1q_f32(&q_rot[d + 4]),  vld1q_f32(&rotated[d + 4]));
-                acc2 = vfmaq_f32(acc2, vld1q_f32(&q_rot[d + 8]),  vld1q_f32(&rotated[d + 8]));
-                acc3 = vfmaq_f32(acc3, vld1q_f32(&q_rot[d + 12]), vld1q_f32(&rotated[d + 12]));
-            }
-            acc0 = vaddq_f32(vaddq_f32(acc0, acc1), vaddq_f32(acc2, acc3));
-            for (; d + 3 < dim; d += 4) {
-                acc0 = vfmaq_f32(acc0, vld1q_f32(&q_rot[d]), vld1q_f32(&rotated[d]));
-            }
-            mse_dot = vaddvq_f32(acc0);
-            for (; d < dim; d++) {
-                mse_dot += q_rot[d] * rotated[d];
-            }
+        /* Round 4: fused scalar dequant + dot product, 4 accumulators.
+         * Eliminates the rotated[] intermediate buffer entirely.
+         * Apple Silicon's 6 ALUs + L1-hot LUT make scalar gather fast. */
+        const uint8_t* mi = block->mse_indices;
+        float a0 = 0, a1 = 0, a2 = 0, a3 = 0;
+        int d = 0;
+        for (; d + 7 < dim; d += 8) {
+            uint8_t b0 = mi[d / 2 + 0];
+            uint8_t b1 = mi[d / 2 + 1];
+            uint8_t b2 = mi[d / 2 + 2];
+            uint8_t b3 = mi[d / 2 + 3];
+            a0 += q_rot[d + 0] * lut[b0 & 0x0F];
+            a1 += q_rot[d + 1] * lut[b0 >> 4];
+            a2 += q_rot[d + 2] * lut[b1 & 0x0F];
+            a3 += q_rot[d + 3] * lut[b1 >> 4];
+            a0 += q_rot[d + 4] * lut[b2 & 0x0F];
+            a1 += q_rot[d + 5] * lut[b2 >> 4];
+            a2 += q_rot[d + 6] * lut[b3 & 0x0F];
+            a3 += q_rot[d + 7] * lut[b3 >> 4];
         }
-#else
-        for (int d = 0; d < dim; d++) {
-            mse_dot += q_rot[d] * rotated[d];
+        float mse_dot = (a0 + a1) + (a2 + a3);
+        for (; d < dim; d++) {
+            uint8_t bv = mi[d / 2];
+            int idx = (d & 1) ? (bv >> 4) : (bv & 0x0F);
+            mse_dot += q_rot[d] * lut[idx];
         }
-#endif
 
         scores[seq] = norm * mse_dot;
     }
@@ -985,11 +1049,43 @@ void tq_turbo_kv_5b_quantize_ref(const float* src, void* dst, int n) {
 
 static void dequant_mse_rotated_5bit(const block_tq_turbo_kv_5b* block,
                                       float* rotated, int dim) {
+    /* Single-pass fused unpack + LUT lookup + scale (Round 1 pattern).
+     * 5-bit packing: 5 bytes encode 8 indices (40 bits). */
     float inv_std = tkv_fp16_to_fp32(block->inv_std_fp16);
     if (inv_std < 1e-10f) inv_std = sqrtf((float)dim);
-    uint8_t indices[TQ_BK] = {0};
-    unpack_5bit(block->mse_indices, indices, dim);
-    tq_codebook_dequantize(indices, rotated, dim, 5, inv_std);
+    float scale = 1.0f / inv_std;
+    const float* cb = tq_codebook_centroids(5);
+    float lut[32];
+    for (int i = 0; i < 32; i++) lut[i] = cb[i] * scale;
+    const uint8_t* p = block->mse_indices;
+    int i = 0;
+    for (; i + 7 < dim; i += 8) {
+        uint64_t w = (uint64_t)p[0]
+                   | ((uint64_t)p[1] <<  8)
+                   | ((uint64_t)p[2] << 16)
+                   | ((uint64_t)p[3] << 24)
+                   | ((uint64_t)p[4] << 32);
+        rotated[i + 0] = lut[(w >>  0) & 31];
+        rotated[i + 1] = lut[(w >>  5) & 31];
+        rotated[i + 2] = lut[(w >> 10) & 31];
+        rotated[i + 3] = lut[(w >> 15) & 31];
+        rotated[i + 4] = lut[(w >> 20) & 31];
+        rotated[i + 5] = lut[(w >> 25) & 31];
+        rotated[i + 6] = lut[(w >> 30) & 31];
+        rotated[i + 7] = lut[(w >> 35) & 31];
+        p += 5;
+    }
+    /* Tail (slow path for non-multiple-of-8 dims) */
+    for (; i < dim; i++) {
+        int bit_off = i * 5;
+        int byte_idx = bit_off / 8;
+        int bit_pos = bit_off % 8;
+        uint16_t v = block->mse_indices[byte_idx];
+        if (bit_pos > 3 && byte_idx + 1 < (dim * 5 + 7) / 8) {
+            v |= (uint16_t)block->mse_indices[byte_idx + 1] << 8;
+        }
+        rotated[i] = lut[(v >> bit_pos) & 31];
+    }
 }
 
 void tq_turbo_kv_5b_dequantize_ref(const void* src, float* dst, int n) {
@@ -1150,15 +1246,36 @@ void tq_turbo_kv_4bo_quantize_ref(const float* src, void* dst, int n) {
 
 static void dequant_mse_rotated_4bo(const block_tq_turbo_kv_4bo* block,
                                      float* rotated, int dim) {
-    /* 4-bit codebook lookup */
+    /* Single-pass fused unpack + LUT lookup + scale (Round 1 pattern) */
     float inv_std = tkv_fp16_to_fp32(block->inv_std_fp16);
     if (inv_std < 1e-10f) inv_std = sqrtf((float)dim);
-    uint8_t indices[TQ_BK];
-    for (int i = 0; i < dim; i++) {
-        uint8_t b = block->mse_indices[i / 2];
-        indices[i] = (i & 1) ? (b >> 4) : (b & 0x0F);
+    float scale = 1.0f / inv_std;
+    const float* cb = tq_codebook_centroids(4);
+    float lut[16];
+    for (int i = 0; i < 16; i++) lut[i] = cb[i] * scale;
+
+    const uint8_t* mi = block->mse_indices;
+    int byte_n = dim / 2;
+    int i = 0;
+    for (int b = 0; b + 1 < byte_n; b += 2) {
+        uint8_t b0 = mi[b];
+        uint8_t b1 = mi[b + 1];
+        rotated[i + 0] = lut[b0 & 0x0F];
+        rotated[i + 1] = lut[b0 >> 4];
+        rotated[i + 2] = lut[b1 & 0x0F];
+        rotated[i + 3] = lut[b1 >> 4];
+        i += 4;
     }
-    tq_codebook_dequantize(indices, rotated, dim, 4, inv_std);
+    for (int b = i / 2; b < byte_n; b++) {
+        uint8_t bv = mi[b];
+        rotated[i + 0] = lut[bv & 0x0F];
+        rotated[i + 1] = lut[bv >> 4];
+        i += 2;
+    }
+    if (i < dim) {
+        uint8_t bv = mi[i / 2];
+        rotated[i] = lut[bv & 0x0F];
+    }
 
     /* Overwrite outlier positions with stored exact FP16 values */
     int K = TQ_KV_4BO_OUTLIERS;
@@ -1305,11 +1422,37 @@ void tq_turbo_kv_3bo_quantize_ref(const float* src, void* dst, int n) {
 
 static void dequant_mse_rotated_3bo(const block_tq_turbo_kv_3bo* block,
                                      float* rotated, int dim) {
+    /* Single-pass fused unpack + LUT lookup + scale (Round 1 pattern) */
     float inv_std = tkv_fp16_to_fp32(block->inv_std_fp16);
     if (inv_std < 1e-10f) inv_std = sqrtf((float)dim);
-    uint8_t indices[TQ_BK] = {0};
-    unpack_3bit(block->mse_indices, indices, dim);
-    tq_codebook_dequantize(indices, rotated, dim, 3, inv_std);
+    float scale = 1.0f / inv_std;
+    const float* cb = tq_codebook_centroids(3);
+    float lut[8];
+    for (int i = 0; i < 8; i++) lut[i] = cb[i] * scale;
+    const uint8_t* p = block->mse_indices;
+    int i = 0;
+    for (; i + 7 < dim; i += 8) {
+        uint32_t w = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16);
+        rotated[i + 0] = lut[(w >>  0) & 7];
+        rotated[i + 1] = lut[(w >>  3) & 7];
+        rotated[i + 2] = lut[(w >>  6) & 7];
+        rotated[i + 3] = lut[(w >>  9) & 7];
+        rotated[i + 4] = lut[(w >> 12) & 7];
+        rotated[i + 5] = lut[(w >> 15) & 7];
+        rotated[i + 6] = lut[(w >> 18) & 7];
+        rotated[i + 7] = lut[(w >> 21) & 7];
+        p += 3;
+    }
+    for (; i < dim; i++) {
+        int bit_off = i * 3;
+        int byte_idx = bit_off / 8;
+        int bit_pos = bit_off % 8;
+        uint16_t v = block->mse_indices[byte_idx];
+        if (bit_pos > 5 && byte_idx + 1 < (dim * 3 + 7) / 8) {
+            v |= (uint16_t)block->mse_indices[byte_idx + 1] << 8;
+        }
+        rotated[i] = lut[(v >> bit_pos) & 7];
+    }
 
     int K = TQ_KV_4BO_OUTLIERS;
     for (int k = 0; k < K; k++) {
