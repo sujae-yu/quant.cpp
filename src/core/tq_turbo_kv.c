@@ -1786,3 +1786,157 @@ void tq_turbo_kv_3bo_attention_ref(const float* query, const void* kv_cache,
         scores[seq] = norm * mse_dot;
     }
 }
+
+/* ============================================================
+ * TurboQuant KV 5-bit FAST: 1-byte-per-index layout for fp32 parity
+ *
+ * Same Variant F algorithm as turbo_kv_5b (RHT + 32-level Lloyd-Max
+ * codebook), but stores each index as a full byte. This wastes 3 bits
+ * per index but enables a pure-SIMD inner loop with no scalar bit
+ * extraction overhead.
+ *
+ * Layout: 8 hdr + 128 indices = 136 bytes per 128-element block
+ * Compression: 128*4 / 136 = 3.76× (vs 5.8× for turbo_kv_5b)
+ * Speed: fp32 KV parity (no scalar unpack, pure NEON tbl)
+ * PPL: same as turbo_kv_5b (+0.7% on Llama 3.2 3B)
+ * ============================================================ */
+
+void tq_turbo_kv_5b_fast_quantize_ref(const float* src, void* dst, int n) {
+    block_tq_turbo_kv_5b_fast* block = (block_tq_turbo_kv_5b_fast*)dst;
+    int dim = n;
+    if (dim > TQ_BK) dim = TQ_BK;
+
+    float norm_sq = 0.0f;
+    for (int i = 0; i < dim; i++) norm_sq += src[i] * src[i];
+    float norm = sqrtf(norm_sq);
+    block->norm = tkv_fp32_to_fp16(norm);
+    block->residual_norm = 0;
+    block->_pad = 0;
+
+    float rotated[TQ_BK];
+    float inv_norm = (norm > 1e-10f) ? (1.0f / norm) : 0.0f;
+    for (int i = 0; i < dim; i++) rotated[i] = src[i] * inv_norm;
+    for (int i = dim; i < TQ_BK; i++) rotated[i] = 0.0f;
+    tq_rht_transform(rotated, dim, TKV_DEFAULT_SEED);
+
+    float max_abs = 0.0f;
+    for (int i = 0; i < dim; i++) {
+        float a = fabsf(rotated[i]);
+        if (a > max_abs) max_abs = a;
+    }
+    if (max_abs < 1e-10f) max_abs = 1.0f;
+    const float CENT_5BIT_MAX_FAST = 1.9956f;
+    float inv_std = CENT_5BIT_MAX_FAST / max_abs;
+    block->inv_std_fp16 = tkv_fp32_to_fp16(inv_std);
+
+    /* Quantize directly to byte-aligned indices (0..31, no packing) */
+    uint8_t indices[TQ_BK];
+    tq_codebook_quantize(rotated, indices, dim, 5, inv_std);
+    for (int i = 0; i < dim; i++) block->mse_indices[i] = indices[i];
+    for (int i = dim; i < TQ_BK; i++) block->mse_indices[i] = 0;
+}
+
+void tq_turbo_kv_5b_fast_dequantize_ref(const void* src, float* dst, int n) {
+    const block_tq_turbo_kv_5b_fast* block = (const block_tq_turbo_kv_5b_fast*)src;
+    int dim = n;
+    if (dim > TQ_BK) dim = TQ_BK;
+
+    float norm = tkv_fp16_to_fp32(block->norm);
+    float inv_std = tkv_fp16_to_fp32(block->inv_std_fp16);
+    if (inv_std < 1e-10f) inv_std = sqrtf((float)dim);
+
+    float rotated[TQ_BK];
+    /* Direct byte-indexed dequant (no bit unpacking) */
+    tq_codebook_dequantize(block->mse_indices, rotated, dim, 5, inv_std);
+    tq_rht_inverse(rotated, dim, TKV_DEFAULT_SEED);
+    for (int i = 0; i < dim; i++) dst[i] = rotated[i] * norm;
+}
+
+/* Constant pulled out of __ARM_NEON guard so non-NEON builds also see it */
+static const float CB5_FAST_RECIP = 1.9956f / 127.0f;
+
+void tq_turbo_kv_5b_fast_attention_ref(const float* query, const void* kv_cache,
+                                         float* scores, int seq_len, int head_dim) {
+    const block_tq_turbo_kv_5b_fast* blocks = (const block_tq_turbo_kv_5b_fast*)kv_cache;
+    int dim = head_dim;
+    if (dim > TQ_BK) dim = TQ_BK;
+
+    /* Pre-rotate query once */
+    float q_rot[TQ_BK];
+    memcpy(q_rot, query, (size_t)dim * sizeof(float));
+    for (int i = dim; i < TQ_BK; i++) q_rot[i] = 0.0f;
+    tq_rht_transform(q_rot, dim, TKV_DEFAULT_SEED);
+
+    const float* cb = tq_codebook_centroids(5);
+#ifdef __ARM_NEON
+    /* Same int8 codebook as turbo_kv_5b — 32 entries in 2 NEON registers */
+    static int8_t s_cb5fast_i8[32] = {0};
+    static int s_cb5fast_init = 0;
+    if (!s_cb5fast_init) {
+        for (int j = 0; j < 32; j++) {
+            float v = cb[j] * (127.0f / 1.9956f);
+            int q = (int)(v >= 0 ? v + 0.5f : v - 0.5f);
+            if (q < -127) q = -127;
+            if (q >  127) q =  127;
+            s_cb5fast_i8[j] = (int8_t)q;
+        }
+        s_cb5fast_init = 1;
+    }
+    int8x16x2_t cb_vec = { vld1q_s8(s_cb5fast_i8), vld1q_s8(s_cb5fast_i8 + 16) };
+#endif
+
+    for (int seq = 0; seq < seq_len; seq++) {
+        const block_tq_turbo_kv_5b_fast* block = &blocks[seq];
+        float norm = tkv_fp16_to_fp32(block->norm);
+        float inv_std = tkv_fp16_to_fp32(block->inv_std_fp16);
+        if (inv_std < 1e-10f) inv_std = sqrtf((float)dim);
+        float per_block_scale = CB5_FAST_RECIP / inv_std;
+
+        const uint8_t* mi = block->mse_indices;
+        float mse_dot = 0.0f;
+
+#ifdef __ARM_NEON
+        float32x4_t acc0 = vdupq_n_f32(0.0f);
+        float32x4_t acc1 = vdupq_n_f32(0.0f);
+        float32x4_t acc2 = vdupq_n_f32(0.0f);
+        float32x4_t acc3 = vdupq_n_f32(0.0f);
+        float32x4_t scale_v = vdupq_n_f32(per_block_scale);
+
+        int d = 0;
+        /* Process 16 elements per iteration: direct 16-byte load — NO scalar
+         * bit unpacking. THIS is the key difference from turbo_kv_5b. */
+        for (; d + 15 < dim; d += 16) {
+            uint8x16_t indices = vld1q_u8(mi + d);
+            int8x16_t vals = vqtbl2q_s8(cb_vec, indices);
+
+            int16x8_t i16_lo = vmovl_s8(vget_low_s8(vals));
+            int16x8_t i16_hi = vmovl_s8(vget_high_s8(vals));
+            float32x4_t f0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(i16_lo)));
+            float32x4_t f1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(i16_lo)));
+            float32x4_t f2 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(i16_hi)));
+            float32x4_t f3 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(i16_hi)));
+
+            f0 = vmulq_f32(f0, scale_v);
+            f1 = vmulq_f32(f1, scale_v);
+            f2 = vmulq_f32(f2, scale_v);
+            f3 = vmulq_f32(f3, scale_v);
+
+            acc0 = vfmaq_f32(acc0, vld1q_f32(&q_rot[d +  0]), f0);
+            acc1 = vfmaq_f32(acc1, vld1q_f32(&q_rot[d +  4]), f1);
+            acc2 = vfmaq_f32(acc2, vld1q_f32(&q_rot[d +  8]), f2);
+            acc3 = vfmaq_f32(acc3, vld1q_f32(&q_rot[d + 12]), f3);
+        }
+        mse_dot = vaddvq_f32(vaddq_f32(vaddq_f32(acc0, acc1), vaddq_f32(acc2, acc3)));
+
+        for (; d < dim; d++) {
+            mse_dot += q_rot[d] * (s_cb5fast_i8[mi[d]] * per_block_scale);
+        }
+#else
+        float lut[32];
+        for (int j = 0; j < 32; j++) lut[j] = cb[j] / inv_std;
+        for (int d = 0; d < dim; d++) mse_dot += q_rot[d] * lut[mi[d]];
+#endif
+
+        scores[seq] = norm * mse_dot;
+    }
+}

@@ -48,7 +48,8 @@ enum {
     GGML_TYPE_TQ_TURBO_KV_5B  = GGML_TYPE_TQ_BASE + 13,
     GGML_TYPE_TQ_TURBO_KV_4BO = GGML_TYPE_TQ_BASE + 14,
     GGML_TYPE_TQ_TURBO_KV_3BO = GGML_TYPE_TQ_BASE + 15,
-    GGML_TYPE_TQ_COUNT         = 16,
+    GGML_TYPE_TQ_TURBO_KV_5B_FAST = GGML_TYPE_TQ_BASE + 16,
+    GGML_TYPE_TQ_COUNT         = 17,
 };
 
 /* ============================================================
@@ -73,6 +74,7 @@ static int tq_to_ggml_type(tq_type type) {
         case TQ_TYPE_TURBO_KV_5B:  return GGML_TYPE_TQ_TURBO_KV_5B;
         case TQ_TYPE_TURBO_KV_4BO: return GGML_TYPE_TQ_TURBO_KV_4BO;
         case TQ_TYPE_TURBO_KV_3BO: return GGML_TYPE_TQ_TURBO_KV_3BO;
+        case TQ_TYPE_TURBO_KV_5B_FAST: return GGML_TYPE_TQ_TURBO_KV_5B_FAST;
         default: return -1;
     }
 }
@@ -95,6 +97,7 @@ static tq_type ggml_to_tq_type(int ggml_id) {
         case GGML_TYPE_TQ_TURBO_KV_5B:  return TQ_TYPE_TURBO_KV_5B;
         case GGML_TYPE_TQ_TURBO_KV_4BO: return TQ_TYPE_TURBO_KV_4BO;
         case GGML_TYPE_TQ_TURBO_KV_3BO: return TQ_TYPE_TURBO_KV_3BO;
+        case GGML_TYPE_TQ_TURBO_KV_5B_FAST: return TQ_TYPE_TURBO_KV_5B_FAST;
         default: return TQ_TYPE_COUNT;
     }
 }
@@ -163,6 +166,7 @@ TQ_GGML_WRAPPERS(uniform_3b,  TQ_TYPE_UNIFORM_3B)
 TQ_GGML_WRAPPERS(turbo_kv_5b, TQ_TYPE_TURBO_KV_5B)
 TQ_GGML_WRAPPERS(turbo_kv_4bo, TQ_TYPE_TURBO_KV_4BO)
 TQ_GGML_WRAPPERS(turbo_kv_3bo, TQ_TYPE_TURBO_KV_3BO)
+TQ_GGML_WRAPPERS(turbo_kv_5b_fast, TQ_TYPE_TURBO_KV_5B_FAST)
 
 /* ============================================================
  * vec_dot wrappers (quantized key . FP32 query -> scalar)
@@ -219,6 +223,7 @@ TQ_GGML_VEC_DOT(uniform_3b,  TQ_TYPE_UNIFORM_3B)
 TQ_GGML_VEC_DOT(turbo_kv_5b, TQ_TYPE_TURBO_KV_5B)
 TQ_GGML_VEC_DOT(turbo_kv_4bo, TQ_TYPE_TURBO_KV_4BO)
 TQ_GGML_VEC_DOT(turbo_kv_3bo, TQ_TYPE_TURBO_KV_3BO)
+TQ_GGML_VEC_DOT(turbo_kv_5b_fast, TQ_TYPE_TURBO_KV_5B_FAST)
 
 /* ============================================================
  * GGML type trait table
@@ -366,6 +371,14 @@ static const tq_ggml_type_trait TQ_GGML_TRAITS[GGML_TYPE_TQ_COUNT] = {
         tq_ggml_to_float_turbo_kv_3bo,
         tq_ggml_vec_dot_turbo_kv_3bo,
     },
+    {
+        "tq_turbo_kv_5b_fast", GGML_TYPE_TQ_TURBO_KV_5B_FAST, TQ_TYPE_TURBO_KV_5B_FAST,
+        sizeof(block_tq_turbo_kv_5b_fast), TQ_BK,
+        (float)sizeof(block_tq_turbo_kv_5b_fast) * 8.0f / TQ_BK,
+        tq_ggml_from_float_turbo_kv_5b_fast,
+        tq_ggml_to_float_turbo_kv_5b_fast,
+        tq_ggml_vec_dot_turbo_kv_5b_fast,
+    },
 };
 
 #define TQ_GGML_NUM_TYPES (sizeof(TQ_GGML_TRAITS) / sizeof(TQ_GGML_TRAITS[0]))
@@ -460,6 +473,7 @@ tq_type tq_parse_kv_cache_type(const char* arg) {
         { "turbo_kv_5b",    TQ_TYPE_TURBO_KV_5B },
         { "turbo_kv_4bo",   TQ_TYPE_TURBO_KV_4BO },
         { "turbo_kv_3bo",   TQ_TYPE_TURBO_KV_3BO },
+        { "turbo_kv_5b_fast", TQ_TYPE_TURBO_KV_5B_FAST },
         { "tq-turbo-kv-4b", TQ_TYPE_TURBO_KV_4B },
         { "turbokv4",       TQ_TYPE_TURBO_KV_4B },
         { "turbo_kv_1b",    TQ_TYPE_TURBO_KV_1B },

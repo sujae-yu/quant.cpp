@@ -62,3 +62,4 @@ tq_run.dSYM/
 .claude/worktrees/
 docs/assets/hero_backup.png
 build_nomt/
+build_nometal/

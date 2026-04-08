@@ -63,6 +63,11 @@ extern void tq_turbo_kv_3bo_dequantize_ref(const void* src, float* dst, int n);
 extern void tq_turbo_kv_3bo_attention_ref(const float* query, const void* kv,
                                           float* scores, int seq_len, int head_dim);
 
+extern void tq_turbo_kv_5b_fast_quantize_ref(const float* src, void* dst, int n);
+extern void tq_turbo_kv_5b_fast_dequantize_ref(const void* src, float* dst, int n);
+extern void tq_turbo_kv_5b_fast_attention_ref(const float* query, const void* kv,
+                                                float* scores, int seq_len, int head_dim);
+
 extern void tq_turbo_kv_1b_quantize_ref(const float* src, void* dst, int n);
 extern void tq_turbo_kv_1b_dequantize_ref(const void* src, float* dst, int n);
 extern void tq_turbo_kv_1b_attention_ref(const float* query, const void* kv,
@@ -205,6 +210,16 @@ tq_type_traits_t TQ_TRAITS[TQ_TYPE_COUNT] = {
         .attention  = tq_turbo_kv_3bo_attention_ref,
         .residual_type = TQ_TYPE_COUNT,
     },
+    [TQ_TYPE_TURBO_KV_5B_FAST] = {
+        .name       = "turbo_kv_5b_fast",
+        .block_size = TQ_BK,
+        .type_size  = sizeof(block_tq_turbo_kv_5b_fast),
+        .bpe        = (float)sizeof(block_tq_turbo_kv_5b_fast) * 8.0f / TQ_BK,
+        .quantize   = tq_turbo_kv_5b_fast_quantize_ref,
+        .dequantize = tq_turbo_kv_5b_fast_dequantize_ref,
+        .attention  = tq_turbo_kv_5b_fast_attention_ref,
+        .residual_type = TQ_TYPE_COUNT,
+    },
     [TQ_TYPE_TURBO_KV_1B] = {
         .name       = "turbo_kv_1b",
         .block_size = TQ_BK,
@@ -310,6 +325,8 @@ tq_format_spec_t tq_get_format_spec(tq_type type) {
             spec.algorithm = TQ_ALG_TURBO; spec.key_bits = 4; break;
         case TQ_TYPE_TURBO_KV_3BO:
             spec.algorithm = TQ_ALG_TURBO; spec.key_bits = 3; break;
+        case TQ_TYPE_TURBO_KV_5B_FAST:
+            spec.algorithm = TQ_ALG_TURBO; spec.key_bits = 5; break;
         case TQ_TYPE_TURBO_KV_1B:
             spec.algorithm = TQ_ALG_TURBO; spec.key_bits = 1; break;
         case TQ_TYPE_TURBO_KV_2B:

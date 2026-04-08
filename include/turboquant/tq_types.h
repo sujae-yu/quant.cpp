@@ -57,7 +57,8 @@ typedef enum {
     TQ_TYPE_TURBO_KV_5B = 13,/* TurboQuant KV: RHT + 5-bit Lloyd-Max codebook   */
     TQ_TYPE_TURBO_KV_4BO = 14,/* TurboQuant KV: 4-bit codebook + 8 FP16 outliers */
     TQ_TYPE_TURBO_KV_3BO = 15,/* TurboQuant KV: 3-bit codebook + 8 FP16 outliers */
-    TQ_TYPE_COUNT     = 16
+    TQ_TYPE_TURBO_KV_5B_FAST = 16, /* 5-bit codebook, 1-byte-per-index, fp32 parity speed */
+    TQ_TYPE_COUNT     = 17
 } tq_type;
 
 /* ============================================================
@@ -264,6 +265,27 @@ typedef struct {
     uint16_t out_values[TQ_KV_4BO_OUTLIERS];   /* outlier values FP16 (16B)        */
 } block_tq_turbo_kv_3bo;
 
+/* TurboQuant KV cache block: 5-bit FAST variant (1-byte-per-index layout)
+ *
+ * Same Variant F algorithm as turbo_kv_5b (RHT + 32-level Lloyd-Max codebook),
+ * but stores each index as a full byte. This wastes 3 bits per index but
+ * enables a pure-SIMD inner loop with no scalar bit extraction overhead —
+ * gets fp32 KV speed parity at the cost of 1.55× more memory than turbo_kv_5b
+ * (3.76× vs 5.8× compression).
+ *
+ * Use case: "near-lossless quality at parity speed", for users who can spare
+ * the extra memory but need fp32 throughput. Same PPL as turbo_kv_5b.
+ *
+ * Layout: 8 hdr + 128 indices = 136 bytes per 128-element block
+ */
+typedef struct {
+    uint16_t norm;                          /* L2 norm of original (fp16)        */
+    uint16_t residual_norm;                 /* unused                            */
+    uint16_t inv_std_fp16;                  /* per-block inv_std                 */
+    uint16_t _pad;                          /* alignment                         */
+    uint8_t  mse_indices[TQ_BK];           /* 1 byte per 5-bit index (0..31)   */
+} block_tq_turbo_kv_5b_fast;
+
 /* TurboQuant KV cache block: 5-bit variant (Variant F architecture)
  *
  * 5-bit (32-level) Lloyd-Max-Gaussian codebook on RHT-rotated values.
@@ -340,6 +362,7 @@ TQ_CHECK_SIZE(block_tq_turbo_kv_4b, 8 + TQ_BK / 2);
 TQ_CHECK_SIZE(block_tq_turbo_kv_5b, 8 + TQ_BK * 5 / 8);
 TQ_CHECK_SIZE(block_tq_turbo_kv_4bo, 8 + TQ_BK / 2 + TQ_KV_4BO_OUTLIERS + TQ_KV_4BO_OUTLIERS * 2);
 TQ_CHECK_SIZE(block_tq_turbo_kv_3bo, 8 + TQ_BK * 3 / 8 + TQ_KV_4BO_OUTLIERS + TQ_KV_4BO_OUTLIERS * 2);
+TQ_CHECK_SIZE(block_tq_turbo_kv_5b_fast, 8 + TQ_BK);
 TQ_CHECK_SIZE(block_tq_turbo_kv_1b, 8 + TQ_BK / 8);
 TQ_CHECK_SIZE(block_tq_turbo_kv_2b, 8 + TQ_BK / 8 + TQ_BK / 8);
 
