@@ -74,6 +74,16 @@ LLM memory is dominated by the **KV cache**, not model weights. At 32K context, 
 
 `turbo_kv_4b` (default) and `turbo_kv_5b` (quality) are the Pareto-optimal recommendations: **5.8–7.1× memory compression at 92% of FP32 KV speed.** Full Karpathy-loop history (9 rounds across 3 sessions) in [bench/results/turboquant_reproduction.md](bench/results/turboquant_reproduction.md).
 
+### Cross-size validation (3 Llama-family models)
+
+| Model | turbo_kv_5b PPL Δ | turbo_kv_4b PPL Δ |
+|---|---:|---:|
+| SmolLM2 135M Instruct | +1.7% | +5.8% |
+| Llama 3.2 1B Instruct | **+0.7%** | +7.3% |
+| Llama 3.2 3B Instruct | **+0.7%** | +5.7% |
+
+`turbo_kv_5b` is consistently near-lossless across model sizes (~1% PPL Δ). `turbo_kv_4b` stays in the 5–8% range. **Recommendation**: use `turbo_kv_3b` only on models ≥ 3B parameters (the 8-level codebook is too coarse for small models — +61% PPL on Llama 3.2 1B).
+
 > **About this comparison**: We previously published v0.6.3 release notes claiming `turbo_kv` beats `fp32` KV speed. That was an artifact of the fp32 attention path being unoptimized scalar — once we added NEON to the fp32 path (commit `4490c83`), the honest gap is `−7%` to `−12%`, not `+5%` to `+10%`. We've corrected the README and the v0.6.3 release notes.
 
 ### Context length gains (`turbo_kv_4b` + `q4` value cache)
