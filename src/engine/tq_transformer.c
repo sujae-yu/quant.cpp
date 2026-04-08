@@ -1719,7 +1719,7 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
                 }
             }
         } else {
-            /* FP32 attention scores (no quantization) */
+            /* FP32 attention scores (no quantization) — NEON-optimized */
             float inv_scale = 1.0f / sqrtf(attn_scale_dim);
             /* Set positions outside sliding window to -inf */
             for (int t = 0; t < attn_start; t++) {
@@ -1728,9 +1728,23 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
             for (int t = attn_start; t < seq_len; t++) {
                 const float* kt = key_cache_layer + (size_t)t * cache_kv_dim + kv_h * head_dim;
                 float score = 0.0f;
+#ifdef __ARM_NEON
+                float32x4_t vsum = vdupq_n_f32(0.0f);
+                int d = 0;
+                for (; d + 4 <= head_dim; d += 4) {
+                    float32x4_t vq = vld1q_f32(qh + d);
+                    float32x4_t vk = vld1q_f32(kt + d);
+                    vsum = vfmaq_f32(vsum, vq, vk);
+                }
+                score = vaddvq_f32(vsum);
+                for (; d < head_dim; d++) {
+                    score += qh[d] * kt[d];
+                }
+#else
                 for (int d = 0; d < head_dim; d++) {
                     score += qh[d] * kt[d];
                 }
+#endif
                 atth[t] = score * inv_scale;
             }
         }
