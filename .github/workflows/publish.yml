@@ -31,9 +31,7 @@ jobs:
             arch: x86_64
           - os: ubuntu-latest
             arch: aarch64
-          - os: macos-13      # Intel runner
-            arch: x86_64
-          - os: macos-14      # Apple Silicon runner
+          - os: macos-14      # Apple Silicon (M-series). Intel macs deferred.
             arch: arm64
           - os: windows-latest
             arch: AMD64
@@ -49,6 +47,14 @@ jobs:
         uses: docker/setup-qemu-action@v3
         with:
           platforms: arm64
+
+      # cibuildwheel mounts only the package-dir into Linux build containers,
+      # so we must place quant.h INSIDE bindings/python/quantcpp/ before
+      # invoking it. setup.py refreshes from ../../quant.h in dev tree, but
+      # that path doesn't exist inside the manylinux container.
+      - name: Bundle quant.h into package
+        shell: bash
+        run: cp quant.h bindings/python/quantcpp/_quant.h
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.21.3
