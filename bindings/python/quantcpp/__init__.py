@@ -21,7 +21,7 @@ try:
     from importlib.metadata import version as _pkg_version
     __version__ = _pkg_version("quantcpp")
 except Exception:
-    __version__ = "0.8.1"  # fallback for editable / source-tree imports
+    __version__ = "0.8.2"  # fallback for editable / source-tree imports
 
 import os
 import threading
@@ -159,13 +159,11 @@ class Model:
         result = ctypes.cast(ptr, ctypes.c_char_p).value
         text = result.decode("utf-8", errors="replace") if result else ""
 
-        # NOTE (v0.8.1): the C string returned by quant_ask is allocated
-        # inside libquant.dylib's malloc heap. Calling ctypes.CDLL(None).free
-        # on it crashes on macOS arm64 because Python's libc handle resolves
-        # to a different malloc zone than the dylib's. We accept a ~65 KB
-        # leak per ask() call as a temporary tradeoff. quant_free_ctx /
-        # quant_free_model release the bulk of the memory at end of session.
-        # Tracked: add quant_free_string(void*) to quant.h in v0.8.2.
+        # Free via the dylib's own free wrapper (added in v0.8.2). Falls back
+        # to a leak if the loaded library is an older single-header that
+        # doesn't export quant_free_string — preserves binary compat.
+        if hasattr(lib, "quant_free_string"):
+            lib.quant_free_string(ptr)
 
         return text
 

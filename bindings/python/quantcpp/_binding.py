@@ -134,6 +134,13 @@ def _setup_signatures(lib: ctypes.CDLL) -> None:
     lib.quant_ask.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
     lib.quant_ask.restype = ctypes.c_void_p  # We use c_void_p so we can free()
 
+    # void quant_free_string(char*) — added in v0.8.2 to free quant_ask
+    # results without cross-heap libc.free() crashes on macOS arm64.
+    # Optional: older single-headers may not export this symbol.
+    if hasattr(lib, "quant_free_string"):
+        lib.quant_free_string.argtypes = [ctypes.c_void_p]
+        lib.quant_free_string.restype = None
+
     # void quant_free_ctx(quant_ctx* ctx)
     lib.quant_free_ctx.argtypes = [ctypes.c_void_p]
     lib.quant_free_ctx.restype = None

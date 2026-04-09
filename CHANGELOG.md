@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.8.2] — 2026-04-09 (quant_free_string + leak fix)
+
+### Eliminated the v0.8.1 leak in `Model.ask()`
+
+v0.8.1 worked but leaked ~65 KB per `ask()` call, because the Python wrapper couldn't safely call `libc.free()` on a pointer allocated inside `libquant.dylib`'s malloc heap (cross-zone abort on macOS arm64).
+
+v0.8.2 adds a tiny new export to the public C API:
+
+```c
+// quant.h
+void quant_free_string(char* str);
+```
+
+The implementation lives in the same translation unit as `quant_ask`, so its `free()` call uses the dylib's malloc zone — same heap, no abort. The Python wrapper now calls `lib.quant_free_string(ptr)` instead of skipping the free.
+
+Backwards compat: the binding uses `hasattr(lib, 'quant_free_string')` so older single-headers loaded via `QUANTCPP_LIB=...` continue to work (with the old leak behavior). New installs from PyPI 0.8.2 ship the updated `quant.h`.
+
+Verified: `Model("model.gguf").ask("hi")` × 3 in a row, clean exit, no abort, no leak warning under faulthandler.
+
+### Honest correction track is now 7 (still all self-found)
+
+This is the 7th correction logged in v0.6.x → v0.8.x. Found by running `Model.ask` repeatedly in the v0.8.1 verification cycle. Goal: stay 100% self-found before any external user reports a regression.
+
+### Still pending in v0.8.x
+
+- **`kv_compress=1` / `=2` re-enable in Python bindings** — still requires `quant.h` regeneration against the v0.8.0+ multi-file source (the bundled header is an Apr-6 snapshot whose UNIFORM_4B path aborts on Llama). Tracked in [Issue #18](https://github.com/quantumaikr/quant.cpp/issues/18). Will land when we regenerate the single header.
+
+---
+
 ## [0.8.1] — 2026-04-09 (Python bindings hotfix)
 
 ### `pip install quantcpp` is now actually usable

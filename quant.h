@@ -58,6 +58,12 @@ int quant_generate(quant_ctx* ctx, const char* prompt,
 // Generate and return full response as string. Caller must free().
 char* quant_ask(quant_ctx* ctx, const char* prompt);
 
+// Free a string returned by quant_ask. Always use this — never call libc
+// free() on the returned pointer directly. The string lives in the dylib's
+// malloc heap, which on macOS arm64 / Windows can be a different malloc
+// zone than the caller's libc.
+void quant_free_string(char* str);
+
 // Free resources.
 void quant_free_ctx(quant_ctx* ctx);
 void quant_free_model(quant_model* model);
@@ -15768,6 +15774,13 @@ char* quant_ask(quant_ctx* ctx, const char* prompt) {
         return NULL;
     }
     return output;
+}
+
+void quant_free_string(char* str) {
+    /* The string was malloc()'d inside this translation unit (quant_ask),
+     * so it must be free()'d here too — same malloc zone, no cross-heap
+     * crash on macOS arm64 / Windows. */
+    if (str) free(str);
 }
 
 void quant_free_ctx(quant_ctx* ctx) {
