@@ -19,7 +19,7 @@ try:
     from importlib.metadata import version as _pkg_version
     __version__ = _pkg_version("quantcpp")
 except Exception:
-    __version__ = "0.8.3"  # fallback for editable / source-tree imports
+    __version__ = "0.9.0"  # fallback for editable / source-tree imports
 
 import os
 import sys
@@ -181,28 +181,8 @@ class Model:
         top_p: float = 0.9,
         max_tokens: int = 256,
         n_threads: int = 4,
-        kv_compress: int = 0,
+        kv_compress: int = 1,
     ):
-        """
-        .. note::
-           ``kv_compress=1`` and ``kv_compress=2`` are temporarily disabled in
-           the Python bindings (v0.8.x) — the bundled ``quant.h`` single
-           header carries an older KV compression path that aborts on Llama
-           architectures. The CLI ``quant`` binary uses the multi-file engine
-           and works with all KV types. KV compression will be re-enabled in
-           the bindings once ``quant.h`` is re-generated against the v0.8.0+
-           tree (tracked as v0.8.1: WASM SIMD / un-stub turbo_kv).
-        """
-        if kv_compress not in (0,):
-            import warnings
-            warnings.warn(
-                "kv_compress != 0 is not supported in the Python bindings of "
-                "quantcpp 0.8.x — falling back to kv_compress=0. Use the CLI "
-                "binary for KV compression until v0.8.2.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-            kv_compress = 0
         if not os.path.isfile(path):
             raise FileNotFoundError(f"Model file not found: {path}")
 
