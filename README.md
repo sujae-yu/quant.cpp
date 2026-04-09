@@ -2,19 +2,18 @@
   <img src="docs/assets/hero.png" alt="quant.cpp" width="600">
 </p>
 
-<h3 align="center">The SQLite of LLMs</h3>
-<p align="center"><b>Add AI to any C project with a single 16K-line file. Zero dependencies.</b></p>
+<h3 align="center">quant.cpp</h3>
+<p align="center"><b>The smallest way to add AI to your app.</b></p>
 
 <p align="center">
-  <code>pip install quantcpp</code> — or drop <a href="#-single-header-mode"><code>quant.h</code></a> (one file, 654 KB) into any C project.<br>
-  No CMake, no submodules, no GPU. Just <code>cc app.c -lm</code>.<br>
-  Runs everywhere: <b>Linux, macOS, iOS, Android, WASM (193 KB), MSVC, microcontrollers</b>.
+  One C file (16K lines). Zero dependencies. Runs everywhere.<br>
+  <code>pip install quantcpp</code> — or <code>#include "quant.h"</code> and compile.
 </p>
 
 <table align="center">
 <tr>
-<td align="center"><b>3x KV compression</b><br>at FP32 quality</td>
-<td align="center"><b>+13% faster</b><br>than FP32 attention</td>
+<td align="center"><b>3x less memory</b><br>same quality</td>
+<td align="center"><b>13% faster</b><br>than uncompressed</td>
 <td align="center"><b>32K context</b><br>on 8GB Mac</td>
 <td align="center"><b>16K LOC</b><br>zero deps</td>
 </tr>
@@ -124,7 +123,12 @@ Pre-built wheels: Linux x86_64/aarch64, macOS arm64 (Python 3.9–3.13). Others 
 
 ---
 
-## The Problem
+## Why quant.cpp?
+
+When AI models have long conversations, they need memory called the **KV cache**. This memory grows with every message and often exceeds the model itself. quant.cpp compresses it 3x — so the same laptop can handle 3x longer conversations.
+
+<details>
+<summary><b>Technical detail: The KV cache problem</b></summary>
 
 LLM memory is dominated by the **KV cache**, not model weights. At 32K context, a 8B model's KV cache consumes **4GB** — more than the model itself. Every existing engine stores KV in FP16. We compress it.
 
@@ -138,6 +142,11 @@ LLM memory is dominated by the **KV cache**, not model weights. At 32K context, 
   |            |      6.9x smaller             |
   +------------+-------------------------------+
 ```
+
+</details>
+
+<details>
+<summary><b>Detailed benchmark tables</b></summary>
 
 ## The Result
 
@@ -251,6 +260,11 @@ bash bench/demo/book_chat.sh models/Llama-3.2-3B-Instruct-Q8_0.gguf
 On a 16GB Mac with Llama 3.2 3B: llama.cpp maxes out at ~50K tokens (FP16 KV). quant.cpp compresses KV 6.9x → **350K tokens** — enough for 12 novels.
 
 ---
+
+</details>
+
+<details>
+<summary><b>How it compares to other engines</b></summary>
 
 ## How It Compares
 
@@ -626,10 +640,51 @@ quant.cpp is an independent implementation of published research. The Variant F 
 
 **Honest attribution**: Variant F's structure (RHT + scalar grid quantization) is closest to HIGGS in spirit, applied to KV cache like TurboQuant, with both the QJL residual and the outlier channel split removed through ablation. If you use quant.cpp in academic work, please cite all three (HIGGS, TurboQuant, PolarQuant) and this repository.
 
+</details>
+
+---
+
+## Transparency & Trust
+
+We believe trust is built by being honest about what we got wrong.
+
+<details>
+<summary><b>10 self-corrections — all found before any external report</b></summary>
+
+| # | Version | What we claimed wrong | What we corrected |
+|---|---|---|---|
+| 1 | v0.6.3 | "Lossless 7× compression" | Re-measured; not lossless |
+| 2 | v0.6.x | "Beats FP32 speed" | FP32 baseline was unoptimized scalar |
+| 3 | v0.7.x | "With Metal default" | CMake default is Metal=OFF |
+| 4 | v0.7.x | Interpreted a general comment as directed at us | Updated attribution |
+| 5 | v0.8.0 | kv_compress=1 caused abort | Fixed in v0.8.1 |
+| 6 | v0.8.0 | libc.free() cross-heap crash | Fixed with quant_free_string |
+| 7 | v0.8.1 | 65 KB memory leak per ask() | Fixed in v0.8.2 |
+| 8 | v0.9.0 | Disabled a working feature by mistake | Re-enabled with verification |
+| 9 | v0.10 | 957-token eval with 53% FP32 window | Documented caveat, fixed tokenizer |
+| 10 | v0.10 | "2-bit Pareto-dominates 4-bit" | Withdrawn — PPL +36.7% at long context |
+
+Every claim in this README is backed by reproducible benchmark data in `bench/results/`.
+</details>
+
+<details>
+<summary><b>Benchmark artifacts</b></summary>
+
+| File | What it measures |
+|---|---|
+| [`progressive_kv_compression.md`](bench/results/progressive_kv_compression.md) | 128-token FP32 window = FP32 quality at 3x compression |
+| [`attention_aware_quantization.md`](bench/results/attention_aware_quantization.md) | Full Pareto curve (including withdrawn 2-bit claim) |
+| [`long_context_kv_compression.md`](bench/results/long_context_kv_compression.md) | 32K context memory + speed measurements |
+| [`layer_adaptive_analysis.md`](bench/results/layer_adaptive_analysis.md) | Per-layer adaptation is unnecessary after RHT (negative result) |
+</details>
+
 ---
 
 <p align="center">
-  <b><a href="https://quantumai.kr">QuantumAI</a></b> · <a href="https://github.com/quantumaikr/quant.cpp">GitHub</a>
+  <a href="https://pypi.org/project/quantcpp/">PyPI</a> ·
+  <a href="https://quantumaikr.github.io/quant.cpp/">WASM Demo</a> ·
+  <a href="CHANGELOG.md">Changelog</a> ·
+  <a href="https://github.com/quantumaikr/quant.cpp/issues">Issues</a>
 </p>
 
 <p align="center">
