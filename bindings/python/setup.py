@@ -29,24 +29,29 @@ PROJECT_ROOT = HERE.parent.parent          # quant.cpp repo root (only exists in
 PKG_DIR = HERE / "quantcpp"
 
 # Bundled header location (always inside the package — required for sdist).
-# In the dev tree we copy quant.h here on every build so MANIFEST/sdist
-# automatically picks it up. End users installing from sdist see only the
-# bundled copy.
+# Source-of-truth chain: ../../quant.h (dev tree) → ./quant.h (CI staging /
+# sdist payload) → quantcpp/_quant.h (final, used by compiler). The middle
+# location lives at the package-dir root because it must be NOT excluded by
+# any .gitignore so cibuildwheel's isolated source copies pick it up.
 BUNDLED_HEADER = PKG_DIR / "_quant.h"
-QUANT_H_DEV    = PROJECT_ROOT / "quant.h"
+STAGED_HEADER  = HERE / "quant.h"          # CI / sdist payload
+QUANT_H_DEV    = PROJECT_ROOT / "quant.h"  # dev tree fallback
 
 def _ensure_bundled_header() -> Path:
-    """Ensure quantcpp/_quant.h exists. Refresh from dev tree when newer."""
-    if QUANT_H_DEV.is_file():
+    """Ensure quantcpp/_quant.h exists. Try the dev tree, then the staged
+    package-dir copy used by sdists and CI."""
+    sources = [s for s in (QUANT_H_DEV, STAGED_HEADER) if s.is_file()]
+    if sources:
+        src = sources[0]
         if (not BUNDLED_HEADER.exists() or
-                QUANT_H_DEV.stat().st_mtime > BUNDLED_HEADER.stat().st_mtime):
-            shutil.copyfile(QUANT_H_DEV, BUNDLED_HEADER)
-            print(f"[quantcpp] Bundled {QUANT_H_DEV} -> {BUNDLED_HEADER}")
+                src.stat().st_mtime > BUNDLED_HEADER.stat().st_mtime):
+            shutil.copyfile(src, BUNDLED_HEADER)
+            print(f"[quantcpp] Bundled {src} -> {BUNDLED_HEADER}")
     if not BUNDLED_HEADER.is_file():
         raise FileNotFoundError(
-            f"Bundled header missing: {BUNDLED_HEADER}. "
-            "Either build from the quant.cpp repo (where ../../quant.h exists) "
-            "or install a published sdist that already contains _quant.h."
+            f"Bundled header missing: {BUNDLED_HEADER}. Looked in: "
+            f"{QUANT_H_DEV} (dev tree), {STAGED_HEADER} (package-dir staging). "
+            "If installing from sdist, the tarball is malformed."
         )
     return BUNDLED_HEADER
 

@@ -10,6 +10,11 @@ __pycache__/
 quantcpp/_quant.h
 quantcpp/_quant_impl.c
 
+# NOTE: bindings/python/quant.h is INTENTIONALLY NOT gitignored. The CI
+# publish workflow (and local builds) place a fresh copy of ../../quant.h
+# there before building so cibuildwheel's isolated source copies see it.
+# It will appear as untracked in `git status` after a build — do not commit.
+
 # Compiled shared libraries — never commit
 quantcpp/libquant.so
 quantcpp/libquant.dylib

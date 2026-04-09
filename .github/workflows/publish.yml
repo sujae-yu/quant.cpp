@@ -49,12 +49,12 @@ jobs:
           platforms: arm64
 
       # cibuildwheel mounts only the package-dir into Linux build containers,
-      # so we must place quant.h INSIDE bindings/python/quantcpp/ before
-      # invoking it. setup.py refreshes from ../../quant.h in dev tree, but
-      # that path doesn't exist inside the manylinux container.
+      # so quant.h must already live inside bindings/python/ before invoke.
+      # We stage it as bindings/python/quant.h (NOT inside quantcpp/, which
+      # is .gitignore'd and would be excluded by isolated source copies).
       - name: Bundle quant.h into package
         shell: bash
-        run: cp quant.h bindings/python/quantcpp/_quant.h
+        run: cp quant.h bindings/python/quant.h
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.21.3
@@ -85,6 +85,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      - name: Bundle quant.h into package
+        shell: bash
+        run: cp quant.h bindings/python/quant.h
 
       - name: Build sdist
         run: |

@@ -1,5 +1,6 @@
 include README.md
 include pyproject.toml
 include setup.py
+include quant.h
 include quantcpp/_quant.h
 recursive-include quantcpp *.py *.h
