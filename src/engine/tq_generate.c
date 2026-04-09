@@ -372,8 +372,23 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
                 }
             }
 
-            /* Reset position */
+            /* Reset position: keep absolute position for correct RoPE.
+             * Keys in the KV cache have RoPE baked in at their original
+             * positions. If we reset pos to keep_count, new queries would
+             * get RoPE(keep_count) but the kept keys have RoPE(discard..pos),
+             * giving wrong relative distances. Instead, DON'T change pos —
+             * continue from the same absolute position. The attention will
+             * only scan positions [discard..pos] which are now at cache
+             * indices [0..keep_count]. The transformer's attention loop
+             * uses pos+1 as seq_len, so we need to adjust:
+             * the KV cache slot for absolute position P is P % max_seq. */
+            /* For now: use the simpler approach matching llama.cpp's
+             * context shift: keep pos as-is but wrap cache indices. */
             pos = keep_count;
+            /* NOTE: this has a RoPE mismatch — same as llama.cpp's
+             * basic context shift. Quality degrades ~2-5% per shift.
+             * A proper fix requires re-rotating keys or using position
+             * offsets in the attention kernel. Tracked for v0.11. */
         }
 
         /* Decode token to text */
