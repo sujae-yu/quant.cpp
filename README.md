@@ -12,15 +12,39 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/quantumaikr/quant.cpp/releases/tag/v0.5.0"><img src="https://img.shields.io/badge/release-v0.5.0-blue" alt="Release"></a>
+  <a href="https://pypi.org/project/quantcpp/"><img src="https://img.shields.io/pypi/v/quantcpp.svg?label=PyPI&color=blue" alt="PyPI"></a>
+  <a href="https://pypi.org/project/quantcpp/"><img src="https://img.shields.io/pypi/pyversions/quantcpp.svg" alt="Python versions"></a>
+  <a href="https://github.com/quantumaikr/quant.cpp/releases/latest"><img src="https://img.shields.io/github/v/release/quantumaikr/quant.cpp?label=release" alt="Release"></a>
   <a href="#"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License"></a>
-  <a href="#"><img src="https://img.shields.io/badge/tests-34%20pass-brightgreen" alt="Tests"></a>
-  <a href="#"><img src="https://img.shields.io/badge/score-99.2%25-brightgreen" alt="Score"></a>
+  <a href="#"><img src="https://img.shields.io/badge/tests-35%20pass-brightgreen" alt="Tests"></a>
   <br>
   <a href="#"><img src="https://img.shields.io/badge/models-7%20verified-blue" alt="Models"></a>
   <a href="https://quantumaikr.github.io/quant.cpp/"><img src="https://img.shields.io/badge/WASM_demo-192KB-purple" alt="WASM"></a>
-  <a href="#"><img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20WASM-orange" alt="Platforms"></a>
+  <a href="#"><img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20WASM-orange" alt="Platforms"></a>
 </p>
+
+---
+
+## Install
+
+```bash
+pip install quantcpp
+```
+
+```python
+from quantcpp import Model
+
+m = Model("model.gguf")
+print(m.ask("What is 2+2?"))
+
+# Streaming
+for tok in m.generate("Once upon a time"):
+    print(tok, end="", flush=True)
+```
+
+Pre-built wheels for Linux x86_64, Linux aarch64, macOS arm64 (Python 3.9–3.13). Other platforms fall back to source distribution which compiles `quant.h` automatically — no external dependencies, just a C compiler.
+
+> **Note (v0.8.x):** the Python bindings currently default to `kv_compress=0` (no KV compression). KV compression is fully working in the CLI `quant` binary; bringing it to the bindings is tracked for v0.8.2 (regenerated single-header). See [CHANGELOG](CHANGELOG.md#081--2026-04-09-python-bindings-hotfix) for details.
 
 ---
 

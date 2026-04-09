@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.8.1] — 2026-04-09 (Python bindings hotfix)
+
+### `pip install quantcpp` is now actually usable
+
+Two critical bugs were found in the v0.8.0 Python bindings within hours of publishing — by running an end-user simulation (`pip install` in a clean venv → `Model("file.gguf").ask("question")`). Both bugs were live for v0.8.0; v0.8.1 fixes them.
+
+#### Bug 1: `Model("file.gguf").ask(...)` aborted on macOS arm64
+
+Root cause: the Python wrapper defaulted to `kv_compress=1`, which routed through the bundled `quant.h`'s UNIFORM_4B KV path. The single-header is an Apr-6 snapshot that pre-dates the v0.8.0 multi-file source by several days, and that older KV path aborts on Llama-architecture models.
+
+Fix: default `kv_compress=0` (no KV compression) in v0.8.1. Non-zero values warn and fall back. The CLI `quant` binary, which uses the multi-file engine, continues to work with all KV types.
+
+A real fix waits on a fresh `quant.h` regen against the v0.8.0+ tree (tracked as v0.8.2).
+
+#### Bug 2: `quant_ask` return string crashed `libc.free(ptr)`
+
+Root cause: `quant_ask` allocates the response string inside `libquant.dylib`'s malloc heap. The Python wrapper called `ctypes.CDLL(None).free(ptr)` to release it — but on macOS arm64, that handle resolves to a different malloc zone than the dylib's. Cross-zone free → abort.
+
+Fix: skip the explicit free in v0.8.1. We accept a ~65 KB leak per `ask()` call as a temporary tradeoff; `quant_free_ctx` / `quant_free_model` release the bulk of the memory at end of session. Tracked: add `quant_free_string(void*)` wrapper to `quant.h` in v0.8.2.
+
+### Honest correction track record
+
+This is corrections #5 and #6 in the project history (after the four in v0.6.x → v0.7.x). Both were caught by the project's own end-user-simulation testing, before any external user reported them. The pattern stands: **publish, simulate the user, fix in hours.**
+
+### v0.8.0 status
+
+PyPI 0.8.0 should be yanked (we strongly recommend upgrading to 0.8.1). Yanking only hides it from new `pip install` — anyone with a pinned `==0.8.0` install can still use it.
+
+---
+
 ## [0.8.0] — 2026-04-09
 
 ### Cross-platform SIMD: AVX2 port of turbo_kv attention
