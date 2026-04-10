@@ -135,7 +135,50 @@ Pre-built wheels: Linux x86_64/aarch64, macOS arm64 (Python 3.9–3.13). Others 
 
 ## Why quant.cpp?
 
-When AI models have long conversations, they need memory called the **KV cache**. This memory grows with every message and often exceeds the model itself. quant.cpp compresses it 3x — so the same laptop can handle 3x longer conversations.
+When AI models have long conversations, they need memory called the **KV cache**. This memory grows with every message and often exceeds the model itself. quant.cpp compresses it **6.4x** and prunes unimportant tokens — so the same laptop can handle **6x longer conversations at 59% lower attention cost**.
+
+---
+
+## Beyond RAG: Document-Level Context
+
+Traditional RAG splits documents into small chunks (512 tokens), embeds them, and retrieves fragments. This works for large corpora but has fundamental limitations:
+
+- **Chunking destroys relationships** — information spanning pages 3, 47, and 103 can't be found by any single chunk search
+- **Retrieval can fail** — if the question uses different words than the document ("employee retention" vs "turnover rate")
+- **No multi-hop reasoning** — connecting A → B → C across chunks is impossible when each is retrieved independently
+
+**Long-context KV compression offers a complementary approach:**
+
+```
+Chunk-Level RAG:    100K docs → chunk(512) → embed → search → 5 chunks → LLM(4K)
+                                 ↑ information loss here
+
+Document-Level RAG: 100K docs → doc-level index → search → 2-3 full docs → LLM(64K-128K)
+                                                              ↑ KV compression makes this fit
+```
+
+RAG decides **which documents** to look at. Long-context decides **how deeply** to understand them. Each does what it's best at.
+
+| | Chunk-RAG alone | Long-Context alone | **RAG + Long-Context** |
+|--|----------------|-------------------|----------------------|
+| 100K documents | only option | impossible | **RAG selects** |
+| Cross-page reasoning | fails | works | **works** |
+| Multi-hop Q&A | limited | works | **works** |
+| Exact recall | depends on retrieval | depends on model size | **best of both** |
+| Infrastructure | vector DB + 4 systems | LLM + .kv file | **practical hybrid** |
+
+**Pre-computed KV library** — process once, query forever:
+```python
+# Overnight (GPU or batch): process each document once
+m.ask(open("operations_manual.txt").read())
+m.save_context("ops_manual.kv")       # 1.5 GB, compressed
+
+# Anytime (laptop, offline): instant load + unlimited questions
+m.load_context("ops_manual.kv")       # 0.5 seconds
+m.ask("What's the expense reimbursement process?")  # instant
+```
+
+Without 6.4x KV compression, loading a full 50K-token document into a 3B model needs ~17 GB of KV memory (impossible on 16GB Mac). With compression: ~2.7 GB (fits easily).
 
 <details>
 <summary><b>Technical detail: The KV cache problem</b></summary>
