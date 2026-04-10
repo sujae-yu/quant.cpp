@@ -383,6 +383,9 @@ typedef struct {
     int n_threads;
     float rep_penalty;    /* repetition penalty (default: 1.1, 1.0 = disabled) */
     int rep_window;       /* how many recent tokens to penalize (default: 32) */
+    /* KV cache persistence (Document-Level RAG: read once, query forever) */
+    const char* save_kv_path; /* save KV cache after generation (NULL = don't save) */
+    const char* load_kv_path; /* load pre-computed KV cache before generation (NULL = normal) */
     /* Callback for streaming output */
     void (*on_token)(const char* text, void* user_data);
     void* user_data;
