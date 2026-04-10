@@ -41,6 +41,7 @@ jobs:
           cp wasm/_headers _site/_headers 2>/dev/null || true
           # Educational guide (/guide)
           cp site/index.html _site/guide/ 2>/dev/null || true
+          cp site/og-image.png _site/guide/ 2>/dev/null || true
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
