@@ -1,0 +1,679 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>quant.cpp — Understanding KV Cache Compression</title>
+<meta name="description" content="An educational guide to KV cache compression in LLM inference. Learn how quant.cpp achieves 6.4x compression with only 3% quality loss.">
+<style>
+/* ===== Reset & Base ===== */
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#0a0a0f;--bg2:#12121a;--bg3:#1a1a2e;
+  --text:#e0e0e8;--text2:#a0a0b0;--text3:#707088;
+  --accent:#6c5ce7;--accent2:#a29bfe;--accent3:#fd79a8;
+  --green:#00b894;--orange:#fdcb6e;--red:#ff6b6b;
+  --blue:#74b9ff;--cyan:#81ecec;
+  --radius:12px;--shadow:0 4px 30px rgba(0,0,0,.3);
+}
+html{scroll-behavior:smooth;font-size:16px}
+body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);line-height:1.7;overflow-x:hidden}
+a{color:var(--accent2);text-decoration:none;transition:color .2s}
+a:hover{color:var(--accent3)}
+code{font-family:'JetBrains Mono','Fira Code',monospace;background:var(--bg3);padding:2px 6px;border-radius:4px;font-size:.9em}
+pre{background:var(--bg2);border:1px solid rgba(255,255,255,.06);border-radius:var(--radius);padding:1.5em;overflow-x:auto;font-size:.85em;line-height:1.6}
+pre code{background:none;padding:0}
+img{max-width:100%;border-radius:var(--radius)}
+h1,h2,h3,h4{font-weight:700;line-height:1.3}
+
+/* ===== Layout ===== */
+.container{max-width:900px;margin:0 auto;padding:0 1.5rem}
+section{padding:5rem 0;position:relative}
+.section-label{display:inline-block;font-size:.75rem;font-weight:600;letter-spacing:.15em;text-transform:uppercase;color:var(--accent2);background:rgba(108,92,231,.12);padding:4px 12px;border-radius:20px;margin-bottom:1rem}
+section h2{font-size:2rem;margin-bottom:1rem}
+section h3{font-size:1.4rem;margin:2rem 0 .8rem;color:var(--accent2)}
+section p{color:var(--text2);margin-bottom:1rem}
+
+/* ===== Animations ===== */
+@keyframes fadeUp{from{opacity:0;transform:translateY(40px)}to{opacity:1;transform:translateY(0)}}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+@keyframes slideLeft{from{opacity:0;transform:translateX(-60px)}to{opacity:1;transform:translateX(0)}}
+@keyframes slideRight{from{opacity:0;transform:translateX(60px)}to{opacity:1;transform:translateX(0)}}
+@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.05)}}
+@keyframes glow{0%,100%{box-shadow:0 0 20px rgba(108,92,231,.2)}50%{box-shadow:0 0 40px rgba(108,92,231,.4)}}
+@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-10px)}}
+@keyframes typing{from{width:0}to{width:100%}}
+@keyframes blink{50%{border-color:transparent}}
+@keyframes countUp{from{opacity:0;transform:scale(.5)}to{opacity:1;transform:scale(1)}}
+@keyframes barGrow{from{width:0}to{width:var(--w)}}
+@keyframes flowRight{from{transform:translateX(-100%);opacity:0}to{transform:translateX(0);opacity:1}}
+@keyframes compress{0%{transform:scaleX(1)}50%{transform:scaleX(.15)}100%{transform:scaleX(.15)}}
+@keyframes shimmer{0%{background-position:-200% 0}100%{background-position:200% 0}}
+
+.reveal{opacity:0;transform:translateY(40px);transition:opacity .8s ease,transform .8s ease}
+.reveal.visible{opacity:1;transform:translateY(0)}
+.reveal-left{opacity:0;transform:translateX(-60px);transition:opacity .8s ease,transform .8s ease}
+.reveal-left.visible{opacity:1;transform:translateX(0)}
+.reveal-right{opacity:0;transform:translateX(60px);transition:opacity .8s ease,transform .8s ease}
+.reveal-right.visible{opacity:1;transform:translateX(0)}
+.stagger>*{opacity:0;transform:translateY(30px);transition:opacity .6s ease,transform .6s ease}
+.stagger.visible>*:nth-child(1){transition-delay:.1s;opacity:1;transform:translateY(0)}
+.stagger.visible>*:nth-child(2){transition-delay:.2s;opacity:1;transform:translateY(0)}
+.stagger.visible>*:nth-child(3){transition-delay:.3s;opacity:1;transform:translateY(0)}
+.stagger.visible>*:nth-child(4){transition-delay:.4s;opacity:1;transform:translateY(0)}
+.stagger.visible>*:nth-child(5){transition-delay:.5s;opacity:1;transform:translateY(0)}
+.stagger.visible>*:nth-child(6){transition-delay:.6s;opacity:1;transform:translateY(0)}
+
+/* ===== Navigation ===== */
+nav{position:fixed;top:0;left:0;right:0;z-index:100;background:rgba(10,10,15,.85);backdrop-filter:blur(20px);border-bottom:1px solid rgba(255,255,255,.06);transition:transform .3s}
+nav .inner{max-width:1100px;margin:0 auto;padding:.6rem 1.5rem;display:flex;align-items:center;justify-content:space-between}
+nav .logo{font-weight:800;font-size:1.1rem;color:var(--text)}
+nav .logo span{color:var(--accent2)}
+nav ul{list-style:none;display:flex;gap:1.5rem}
+nav li a{font-size:.8rem;color:var(--text3);font-weight:500;transition:color .2s;letter-spacing:.02em}
+nav li a:hover,nav li a.active{color:var(--accent2)}
+@media(max-width:768px){nav ul{display:none}}
+
+/* ===== Hero ===== */
+#hero{min-height:100vh;display:flex;align-items:center;justify-content:center;text-align:center;position:relative;overflow:hidden;padding-top:4rem}
+#hero::before{content:'';position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle at 30% 40%,rgba(108,92,231,.08) 0%,transparent 50%),radial-gradient(circle at 70% 60%,rgba(253,121,168,.05) 0%,transparent 50%);animation:float 8s ease-in-out infinite}
+#hero h1{font-size:clamp(2.5rem,6vw,4.5rem);font-weight:900;margin-bottom:1rem;animation:fadeUp .8s ease both}
+#hero h1 .highlight{background:linear-gradient(135deg,var(--accent),var(--accent3));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+#hero .subtitle{font-size:clamp(1rem,2.5vw,1.4rem);color:var(--text2);max-width:600px;margin:0 auto 2rem;animation:fadeUp .8s ease .2s both}
+#hero .hero-stats{display:flex;gap:2rem;justify-content:center;flex-wrap:wrap;animation:fadeUp .8s ease .4s both}
+.stat-card{background:var(--bg2);border:1px solid rgba(255,255,255,.06);border-radius:var(--radius);padding:1.2rem 1.8rem;min-width:140px;transition:transform .3s,box-shadow .3s}
+.stat-card:hover{transform:translateY(-4px);box-shadow:var(--shadow)}
+.stat-card .num{font-size:2rem;font-weight:800;background:linear-gradient(135deg,var(--accent2),var(--cyan));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.stat-card .label{font-size:.75rem;color:var(--text3);margin-top:.2rem}
+.hero-scroll{position:absolute;bottom:2rem;left:50%;transform:translateX(-50%);animation:float 2s ease-in-out infinite}
+.hero-scroll svg{width:24px;height:24px;stroke:var(--text3);stroke-width:2;fill:none}
+
+/* ===== TOC ===== */
+#toc{background:var(--bg2);border-top:1px solid rgba(255,255,255,.04);border-bottom:1px solid rgba(255,255,255,.04)}
+#toc .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:1rem}
+.toc-item{background:var(--bg3);border-radius:var(--radius);padding:1.2rem;display:flex;align-items:flex-start;gap:1rem;transition:transform .3s,background .3s;cursor:pointer;border:1px solid transparent}
+.toc-item:hover{transform:translateY(-2px);background:rgba(108,92,231,.1);border-color:rgba(108,92,231,.2)}
+.toc-num{font-size:1.5rem;font-weight:800;color:var(--accent);min-width:2rem}
+.toc-text h4{font-size:.95rem;margin-bottom:.2rem}
+.toc-text p{font-size:.8rem;color:var(--text3);line-height:1.4}
+
+/* ===== Visualization Blocks ===== */
+.viz{background:var(--bg2);border:1px solid rgba(255,255,255,.06);border-radius:var(--radius);padding:2rem;margin:1.5rem 0;overflow:hidden}
+.viz-title{font-size:.8rem;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.1em;margin-bottom:1rem}
+
+/* Memory bar animation */
+.mem-bar-container{margin:.8rem 0}
+.mem-bar-label{display:flex;justify-content:space-between;font-size:.8rem;margin-bottom:.3rem}
+.mem-bar-label span:first-child{color:var(--text2)}
+.mem-bar-label span:last-child{font-weight:600}
+.mem-bar{height:28px;border-radius:6px;background:var(--bg3);overflow:hidden;position:relative}
+.mem-bar-fill{height:100%;border-radius:6px;transition:width 1.5s ease;width:0;display:flex;align-items:center;padding-left:8px;font-size:.7rem;font-weight:600;color:rgba(0,0,0,.7)}
+.mem-bar-fill.bar-fp32{background:linear-gradient(90deg,var(--red),#e17055)}
+.mem-bar-fill.bar-prog{background:linear-gradient(90deg,var(--accent),var(--accent2))}
+.mem-bar-fill.bar-aggr{background:linear-gradient(90deg,var(--green),var(--cyan))}
+.mem-bar-fill.bar-evict{background:linear-gradient(90deg,#00cec9,var(--cyan))}
+.mem-bar-fill.animated{width:var(--w)}
+
+/* Compression pipeline */
+.pipeline{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin:1.5rem 0}
+.pipe-stage{background:var(--bg3);border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:.8rem 1rem;text-align:center;flex:1;min-width:120px;transition:all .5s ease;opacity:0;transform:translateX(-30px)}
+.pipe-stage.visible{opacity:1;transform:translateX(0)}
+.pipe-stage .stage-icon{font-size:1.5rem;margin-bottom:.3rem}
+.pipe-stage .stage-name{font-size:.75rem;font-weight:600;color:var(--accent2)}
+.pipe-stage .stage-detail{font-size:.7rem;color:var(--text3);margin-top:.2rem}
+.pipe-arrow{color:var(--text3);font-size:1.2rem;opacity:0;transition:opacity .5s}
+.pipe-arrow.visible{opacity:1}
+.pipe-result{background:linear-gradient(135deg,rgba(108,92,231,.15),rgba(0,184,148,.15));border:1px solid rgba(108,92,231,.3);border-radius:8px;padding:.8rem 1rem;text-align:center;flex:1;min-width:120px;animation:glow 3s ease-in-out infinite}
+.pipe-result .stage-name{color:var(--green);font-weight:700}
+
+/* Layer entropy viz */
+.entropy-bar{display:flex;align-items:center;gap:.5rem;margin:.4rem 0;font-size:.8rem}
+.entropy-bar .layer-id{min-width:60px;color:var(--text3);font-family:monospace}
+.entropy-bar .bar-track{flex:1;height:20px;background:var(--bg3);border-radius:4px;overflow:hidden}
+.entropy-bar .bar-value{height:100%;border-radius:4px;transition:width 1.2s ease;width:0;display:flex;align-items:center;justify-content:flex-end;padding-right:6px;font-size:.65rem;font-weight:600;color:rgba(255,255,255,.8)}
+.entropy-bar .ent-val{min-width:50px;text-align:right;font-family:monospace;color:var(--text2)}
+.bar-hot{background:linear-gradient(90deg,#e17055,var(--red))}
+.bar-warm{background:linear-gradient(90deg,var(--orange),#e17055)}
+.bar-cool{background:linear-gradient(90deg,var(--blue),var(--accent))}
+.bar-cold{background:linear-gradient(90deg,var(--green),var(--cyan))}
+
+/* Comparison table */
+table{width:100%;border-collapse:collapse;margin:1.5rem 0;font-size:.9rem}
+th{background:var(--bg3);padding:.8rem 1rem;text-align:left;font-size:.8rem;color:var(--accent2);text-transform:uppercase;letter-spacing:.05em;border-bottom:2px solid rgba(108,92,231,.3)}
+td{padding:.7rem 1rem;border-bottom:1px solid rgba(255,255,255,.04)}
+tr:hover td{background:rgba(108,92,231,.04)}
+.highlight-row td{background:rgba(0,184,148,.08);font-weight:600}
+.dim{color:var(--text3)}
+
+/* Info cards */
+.card-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem;margin:1.5rem 0}
+.info-card{background:var(--bg2);border:1px solid rgba(255,255,255,.06);border-radius:var(--radius);padding:1.5rem;transition:transform .3s,border-color .3s}
+.info-card:hover{transform:translateY(-3px);border-color:rgba(108,92,231,.3)}
+.info-card .card-icon{font-size:2rem;margin-bottom:.8rem}
+.info-card h4{font-size:1rem;margin-bottom:.4rem}
+.info-card p{font-size:.85rem;color:var(--text3);line-height:1.5}
+
+/* Paper reference */
+.paper{background:var(--bg2);border-left:3px solid var(--accent);border-radius:0 var(--radius) var(--radius) 0;padding:1rem 1.5rem;margin:1rem 0;transition:border-color .3s}
+.paper:hover{border-color:var(--accent3)}
+.paper .paper-title{font-weight:600;font-size:.95rem}
+.paper .paper-meta{font-size:.8rem;color:var(--text3);margin-top:.3rem}
+.paper .paper-desc{font-size:.85rem;color:var(--text2);margin-top:.5rem}
+
+/* KV cache animation */
+.kv-anim{display:flex;gap:2px;align-items:flex-end;height:80px;margin:1rem 0}
+.kv-block{width:8px;border-radius:2px 2px 0 0;transition:height 1s ease,background 1s ease}
+.kv-fp32{background:var(--accent2)}
+.kv-4bit{background:var(--green)}
+.kv-evicted{background:var(--bg3);opacity:.3}
+
+/* Attention heatmap */
+.attn-grid{display:grid;grid-template-columns:repeat(16,1fr);gap:2px;margin:1rem 0}
+.attn-cell{aspect-ratio:1;border-radius:2px;transition:background .5s ease}
+
+/* CTA */
+.cta{text-align:center;padding:4rem 0}
+.cta-btn{display:inline-block;padding:.9rem 2rem;border-radius:8px;font-weight:700;font-size:1rem;transition:all .3s}
+.cta-primary{background:linear-gradient(135deg,var(--accent),var(--accent3));color:#fff}
+.cta-primary:hover{transform:translateY(-2px);box-shadow:0 8px 30px rgba(108,92,231,.4);color:#fff}
+.cta-secondary{border:1px solid rgba(255,255,255,.15);color:var(--text2);margin-left:1rem}
+.cta-secondary:hover{border-color:var(--accent2);color:var(--accent2)}
+
+/* Glossary */
+.glossary-item{margin:1.5rem 0;padding:1rem;background:var(--bg2);border-radius:var(--radius);border:1px solid rgba(255,255,255,.04)}
+.glossary-item dt{font-weight:700;color:var(--accent2);font-size:1.05rem;margin-bottom:.3rem}
+.glossary-item dd{color:var(--text2);font-size:.9rem}
+
+/* Footer */
+footer{text-align:center;padding:3rem 0;color:var(--text3);font-size:.8rem;border-top:1px solid rgba(255,255,255,.04)}
+footer a{color:var(--text2)}
+
+/* ===== Responsive ===== */
+@media(max-width:600px){
+  section{padding:3rem 0}
+  .hero-stats{flex-direction:column;align-items:center}
+  .pipeline{flex-direction:column}
+  .pipe-arrow{transform:rotate(90deg)}
+  .card-grid{grid-template-columns:1fr}
+  #toc .grid{grid-template-columns:1fr}
+}
+</style>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+</head>
+<body>
+
+<!-- ===== Navigation ===== -->
+<nav>
+  <div class="inner">
+    <div class="logo">quant<span>.cpp</span></div>
+    <ul>
+      <li><a href="#problem">The Problem</a></li>
+      <li><a href="#solution">Solution</a></li>
+      <li><a href="#techniques">4 Techniques</a></li>
+      <li><a href="#benchmarks">Benchmarks</a></li>
+      <li><a href="#papers">Papers</a></li>
+      <li><a href="#glossary">Glossary</a></li>
+    </ul>
+  </div>
+</nav>
+
+<!-- ===== Hero ===== -->
+<section id="hero">
+  <div class="container">
+    <h1>AI's Memory,<br><span class="highlight">Compressed 6.4x</span></h1>
+    <p class="subtitle">An educational guide to KV cache compression — the key to running long-context AI on your laptop.</p>
+    <div class="hero-stats">
+      <div class="stat-card"><div class="num">6.4x</div><div class="label">KV Compression</div></div>
+      <div class="stat-card"><div class="num">3%</div><div class="label">Quality Cost</div></div>
+      <div class="stat-card"><div class="num">59%</div><div class="label">Attention Speedup</div></div>
+      <div class="stat-card"><div class="num">16K</div><div class="label">Lines of C</div></div>
+    </div>
+  </div>
+  <div class="hero-scroll"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12l7 7 7-7"/></svg></div>
+</section>
+
+<!-- ===== Table of Contents ===== -->
+<section id="toc">
+  <div class="container">
+    <div class="section-label">Guide</div>
+    <h2>What You'll Learn</h2>
+    <div class="grid stagger" style="margin-top:1.5rem">
+      <a href="#problem" class="toc-item"><div class="toc-num">1</div><div class="toc-text"><h4>The Memory Problem</h4><p>Why KV cache is the real bottleneck in AI inference</p></div></a>
+      <a href="#kv-cache" class="toc-item"><div class="toc-num">2</div><div class="toc-text"><h4>What is KV Cache?</h4><p>How transformers remember context, and why it costs so much</p></div></a>
+      <a href="#solution" class="toc-item"><div class="toc-num">3</div><div class="toc-text"><h4>The Insight</h4><p>Not all memories are equally important</p></div></a>
+      <a href="#techniques" class="toc-item"><div class="toc-num">4</div><div class="toc-text"><h4>4 Compression Techniques</h4><p>Progressive, K/V Asymmetry, H2O Eviction, PyramidKV</p></div></a>
+      <a href="#benchmarks" class="toc-item"><div class="toc-num">5</div><div class="toc-text"><h4>Benchmarks</h4><p>Measured results on Llama 3.2 1B and Qwen3.5</p></div></a>
+      <a href="#papers" class="toc-item"><div class="toc-num">6</div><div class="toc-text"><h4>Research Papers</h4><p>Academic foundations behind each technique</p></div></a>
+    </div>
+  </div>
+</section>
+
+<!-- ===== Chapter 1: The Problem ===== -->
+<section id="problem">
+  <div class="container">
+    <div class="section-label">Chapter 1</div>
+    <h2 class="reveal">The Real Bottleneck in AI</h2>
+    <p class="reveal">When you chat with an AI, it needs to remember everything you've said. This memory is called the <strong>KV cache</strong>. The shocking truth:</p>
+
+    <div class="viz reveal">
+      <div class="viz-title">Memory Usage: Model vs KV Cache</div>
+      <div class="mem-bar-container">
+        <div class="mem-bar-label"><span>AI Model (Llama 3.2 3B)</span><span>4.0 GB</span></div>
+        <div class="mem-bar"><div class="mem-bar-fill bar-fp32" style="--w:50%">4.0 GB</div></div>
+      </div>
+      <div class="mem-bar-container">
+        <div class="mem-bar-label"><span>KV Cache (32K context, FP16)</span><span style="color:var(--red)">8.0 GB</span></div>
+        <div class="mem-bar"><div class="mem-bar-fill bar-fp32" style="--w:100%">8.0 GB &mdash; larger than the model!</div></div>
+      </div>
+      <div class="mem-bar-container" style="margin-top:1.5rem;padding-top:1rem;border-top:1px solid rgba(255,255,255,.06)">
+        <div class="mem-bar-label"><span>KV Cache with quant.cpp (6.4x)</span><span style="color:var(--green)">1.3 GB</span></div>
+        <div class="mem-bar"><div class="mem-bar-fill bar-aggr" style="--w:16%">1.3 GB</div></div>
+      </div>
+    </div>
+
+    <p class="reveal">The KV cache grows with every token in the conversation. At 32K context, it's <strong>2x larger than the model itself</strong>. This is why your laptop runs out of memory during long conversations — not because the model is too big, but because its <em>memory</em> is.</p>
+  </div>
+</section>
+
+<!-- ===== Chapter 2: What is KV Cache ===== -->
+<section id="kv-cache" style="background:var(--bg2)">
+  <div class="container">
+    <div class="section-label">Chapter 2</div>
+    <h2 class="reveal">What is KV Cache?</h2>
+
+    <p class="reveal">In a Transformer, every token "attends" to all previous tokens. To do this, each token creates a <strong>Key</strong> (what am I?) and a <strong>Value</strong> (what do I contain?). These are stored so future tokens can look back at them.</p>
+
+    <div class="viz reveal">
+      <div class="viz-title">How Attention Works (Simplified)</div>
+      <div style="font-family:monospace;font-size:.85rem;line-height:2;color:var(--text2)">
+        <div>Current token creates: <strong style="color:var(--accent2)">Query</strong> = "What am I looking for?"</div>
+        <div>Each past token stored: <strong style="color:var(--orange)">Key</strong> = "This is what I am" &nbsp; <strong style="color:var(--green)">Value</strong> = "This is my content"</div>
+        <div style="margin-top:.5rem"><strong style="color:var(--accent3)">Attention</strong> = softmax(<strong style="color:var(--accent2)">Q</strong> &times; <strong style="color:var(--orange)">K</strong><sup>T</sup>) &times; <strong style="color:var(--green)">V</strong></div>
+        <div style="margin-top:.5rem;color:var(--text3)">&rarr; "Look at all past tokens, focus on the relevant ones, blend their values"</div>
+      </div>
+    </div>
+
+    <h3 class="reveal">Why It's Expensive</h3>
+    <p class="reveal">For <strong>every layer</strong> and <strong>every token position</strong>, we store a Key vector and a Value vector. A typical model has 16-32 layers. At 32K context:</p>
+
+    <div class="viz reveal">
+      <div class="viz-title">KV Cache Growth</div>
+      <div id="kv-growth" style="display:flex;align-items:flex-end;gap:3px;height:120px;padding-top:20px">
+        <!-- Filled by JS -->
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:.7rem;color:var(--text3);margin-top:.5rem">
+        <span>1K tokens</span><span>8K</span><span>16K</span><span>32K</span><span>64K</span><span>128K</span>
+      </div>
+    </div>
+
+    <p class="reveal">Every doubling of context = doubling of KV cache. And the <strong>attention cost is O(n)</strong> per token — at 1000 tokens, attention is already 35% of total compute time.</p>
+  </div>
+</section>
+
+<!-- ===== Chapter 3: The Insight ===== -->
+<section id="solution">
+  <div class="container">
+    <div class="section-label">Chapter 3</div>
+    <h2 class="reveal">The Key Insight</h2>
+    <p class="reveal" style="font-size:1.2rem;color:var(--text);font-weight:500;margin:1.5rem 0">Not all memories are equally important. AI attention, like human attention, concentrates on what matters.</p>
+
+    <div class="card-grid stagger">
+      <div class="info-card">
+        <div class="card-icon">&#x23F0;</div>
+        <h4>Recent tokens matter most</h4>
+        <p>~70% of attention weight falls on the last 128 tokens. Old tokens rarely get looked at.</p>
+      </div>
+      <div class="info-card">
+        <div class="card-icon">&#x1F511;</div>
+        <h4>Keys are more sensitive than Values</h4>
+        <p>Key errors get amplified by softmax (nonlinear). Value errors propagate linearly — much more forgiving.</p>
+      </div>
+      <div class="info-card">
+        <div class="card-icon">&#x2B50;</div>
+        <h4>A few tokens carry most information</h4>
+        <p>Attention follows a power law: "heavy hitter" tokens get high attention across all queries.</p>
+      </div>
+      <div class="info-card">
+        <div class="card-icon">&#x1F4CA;</div>
+        <h4>Deep layers attend sharply</h4>
+        <p>Layer 11 entropy = 1.84 bits (~4 tokens). Layer 1 entropy = 6.29 bits (~78 tokens). Deep layers need less KV.</p>
+      </div>
+    </div>
+
+    <p class="reveal" style="margin-top:2rem">These four observations correspond to four <strong>orthogonal compression dimensions</strong>. Because they're independent, their effects multiply:</p>
+  </div>
+</section>
+
+<!-- ===== Chapter 4: Four Techniques ===== -->
+<section id="techniques" style="background:var(--bg2)">
+  <div class="container">
+    <div class="section-label">Chapter 4</div>
+    <h2 class="reveal">Four Dimensions of Compression</h2>
+
+    <!-- Pipeline visualization -->
+    <div class="pipeline reveal" id="pipeline">
+      <div class="pipe-stage" style="transition-delay:.1s"><div class="stage-icon">&#x23F0;</div><div class="stage-name">Progressive</div><div class="stage-detail">Time dimension</div></div>
+      <div class="pipe-arrow">&rarr;</div>
+      <div class="pipe-stage" style="transition-delay:.3s"><div class="stage-icon">&#x1F511;</div><div class="stage-name">K/V Asymmetry</div><div class="stage-detail">Tensor dimension</div></div>
+      <div class="pipe-arrow">&rarr;</div>
+      <div class="pipe-stage" style="transition-delay:.5s"><div class="stage-icon">&#x2B50;</div><div class="stage-name">H2O Eviction</div><div class="stage-detail">Token dimension</div></div>
+      <div class="pipe-arrow">&rarr;</div>
+      <div class="pipe-stage" style="transition-delay:.7s"><div class="stage-icon">&#x1F4CA;</div><div class="stage-name">PyramidKV</div><div class="stage-detail">Layer dimension</div></div>
+      <div class="pipe-arrow">&rarr;</div>
+      <div class="pipe-result"><div class="stage-icon">&#x1F3AF;</div><div class="stage-name">6.4x + 59% faster</div><div class="stage-detail">+3% PPL</div></div>
+    </div>
+
+    <!-- Technique 1: Progressive -->
+    <h3 class="reveal">1. Progressive Compression <span style="color:var(--text3);font-size:.9rem">(Time Dimension)</span></h3>
+    <p class="reveal">Keep the last 128 tokens' Keys at full precision (FP32). Compress everything else to 4-bit. The attention mechanism naturally focuses on recent tokens, so the compressed old tokens barely affect output quality.</p>
+
+    <div class="viz reveal">
+      <div class="viz-title">KV Cache Layout: Progressive k128</div>
+      <div id="kv-progressive" class="kv-anim"><!-- Filled by JS --></div>
+      <div style="display:flex;gap:1.5rem;font-size:.75rem;margin-top:.8rem">
+        <span><span style="display:inline-block;width:12px;height:12px;background:var(--accent2);border-radius:2px;vertical-align:middle"></span> FP32 (recent 128)</span>
+        <span><span style="display:inline-block;width:12px;height:12px;background:var(--green);border-radius:2px;vertical-align:middle"></span> 4-bit (older tokens)</span>
+      </div>
+      <div style="margin-top:1rem;font-size:.85rem;color:var(--text2)"><strong>Result:</strong> 2.9x compression at +1.3% PPL. Context-length invariant — works at 4K, 32K, or 128K.</div>
+    </div>
+
+    <!-- Technique 2: K/V Asymmetry -->
+    <h3 class="reveal">2. K/V Asymmetric Quantization <span style="color:var(--text3);font-size:.9rem">(Tensor Dimension)</span></h3>
+    <p class="reveal">Key errors pass through <code>softmax(Q &times; K<sup>T</sup>)</code> — a nonlinear function that amplifies small errors exponentially. Value errors are simply multiplied by attention weights — a linear operation with no amplification.</p>
+
+    <div class="viz reveal">
+      <div class="viz-title">Error Propagation: Key vs Value</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:2rem;margin:1rem 0">
+        <div>
+          <div style="font-weight:600;color:var(--orange);margin-bottom:.5rem">Key Error Path</div>
+          <div style="font-family:monospace;font-size:.8rem;line-height:2;color:var(--text2)">
+            K + error<br>
+            &darr; Q &times; (K + error)<sup>T</sup><br>
+            &darr; <strong style="color:var(--red)">softmax</strong> &larr; nonlinear amplification!<br>
+            &darr; wrong attention distribution<br>
+            &darr; <strong style="color:var(--red)">cascading output error</strong>
+          </div>
+        </div>
+        <div>
+          <div style="font-weight:600;color:var(--green);margin-bottom:.5rem">Value Error Path</div>
+          <div style="font-family:monospace;font-size:.8rem;line-height:2;color:var(--text2)">
+            V + error<br>
+            &darr; attention_weights &times; (V + error)<br>
+            &darr; <strong style="color:var(--green)">linear sum</strong> &larr; no amplification<br>
+            &darr; small output perturbation<br>
+            &darr; <strong style="color:var(--green)">bounded, predictable error</strong>
+          </div>
+        </div>
+      </div>
+      <div style="margin-top:1rem;font-size:.85rem;color:var(--text2)"><strong>Result:</strong> K=4bit + V=4bit + k128 = <strong>6.4x compression at +3.0% PPL</strong>. Adding V=Q4 on top of k128 costs only +1.7pp.</div>
+    </div>
+
+    <!-- Technique 3: H2O -->
+    <h3 class="reveal">3. H2O Token Eviction <span style="color:var(--text3);font-size:.9rem">(Token Dimension)</span></h3>
+    <p class="reveal">Not all tokens contribute equally to attention. The Heavy-Hitter Oracle (H2O) tracks cumulative attention weight per token and evicts the ones that consistently receive near-zero attention.</p>
+
+    <div class="viz reveal">
+      <div class="viz-title">Token Importance Distribution (Power Law)</div>
+      <div id="token-importance" style="display:flex;align-items:flex-end;gap:2px;height:100px"><!-- Filled by JS --></div>
+      <div style="display:flex;justify-content:space-between;font-size:.7rem;color:var(--text3);margin-top:.5rem">
+        <span>&larr; Sink tokens (always kept)</span><span>Heavy hitters</span><span>Low attention &rarr; evict</span>
+      </div>
+      <div style="margin-top:1rem;font-size:.85rem;color:var(--text2)"><strong>Result:</strong> Attention cost reduced by <strong>59%</strong> at budget=128. Output quality preserved — evicted tokens had near-zero attention anyway.</div>
+    </div>
+
+    <!-- Technique 4: PyramidKV -->
+    <h3 class="reveal">4. PyramidKV <span style="color:var(--text3);font-size:.9rem">(Layer Dimension)</span></h3>
+    <p class="reveal">Different layers have vastly different attention patterns. Early layers attend broadly (high entropy), deep layers attend sharply (low entropy). Allocating uniform KV budget wastes memory on layers that only look at 4 tokens.</p>
+
+    <div class="viz reveal">
+      <div class="viz-title">Attention Entropy by Layer (Llama 3.2 1B, measured)</div>
+      <div id="entropy-chart">
+        <!-- Filled by JS -->
+      </div>
+      <div style="margin-top:1rem;font-size:.85rem;color:var(--text2)">
+        <strong>Pyramid budget:</strong> Layer 0 gets 256 KV entries, Layer 15 gets 64. Deep layers with 1.84-bit entropy need only ~4 tokens — giving them 256 is pure waste.
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== Chapter 5: Benchmarks ===== -->
+<section id="benchmarks">
+  <div class="container">
+    <div class="section-label">Chapter 5</div>
+    <h2 class="reveal">Benchmarks</h2>
+    <p class="reveal">All measurements on Llama 3.2 1B Instruct (Q8_0 GGUF), Apple M1 Pro, 8 threads.</p>
+
+    <h3 class="reveal">Compression vs Quality</h3>
+    <div class="reveal">
+      <table>
+        <thead><tr><th>Configuration</th><th>PPL</th><th>vs FP32</th><th>Compression</th><th>Attention</th></tr></thead>
+        <tbody>
+          <tr><td>FP32 baseline</td><td>151.2</td><td class="dim">—</td><td>1.0x</td><td>100%</td></tr>
+          <tr><td>K=4b + V=FP16 + k128</td><td>153.2</td><td>+1.3%</td><td>2.9x</td><td>100%</td></tr>
+          <tr class="highlight-row"><td><strong>K=4b + V=Q4 + k128</strong></td><td><strong>155.7</strong></td><td><strong>+3.0%</strong></td><td><strong>6.4x</strong></td><td>100%</td></tr>
+          <tr class="highlight-row"><td><strong>+ PyramidKV (b=256)</strong></td><td><strong>~same</strong></td><td><strong>~same</strong></td><td><strong>6.4x+</strong></td><td><strong>41%</strong></td></tr>
+          <tr><td>K=3b + V=Q4 + k128</td><td>166.0</td><td>+9.8%</td><td>7.1x</td><td>100%</td></tr>
+          <tr><td>K=4b + V=Q2 + k128</td><td style="color:var(--red)">306.1</td><td style="color:var(--red)">+102%</td><td>8.0x</td><td class="dim">failed</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 class="reveal">vs llama.cpp</h3>
+    <p class="reveal">Same 4-bit budget, 3.5x less quality degradation:</p>
+    <div class="viz reveal">
+      <div class="viz-title">PPL Degradation at 4-bit (lower is better)</div>
+      <div class="mem-bar-container">
+        <div class="mem-bar-label"><span>llama.cpp Q4_0 KV</span><span style="color:var(--red)">+10.6%</span></div>
+        <div class="mem-bar"><div class="mem-bar-fill bar-fp32" style="--w:100%"></div></div>
+      </div>
+      <div class="mem-bar-container">
+        <div class="mem-bar-label"><span>quant.cpp K=4b + V=Q4 + k128</span><span style="color:var(--green)">+3.0%</span></div>
+        <div class="mem-bar"><div class="mem-bar-fill bar-aggr" style="--w:28%"></div></div>
+      </div>
+    </div>
+
+    <h3 class="reveal">Context Length on 8GB Mac</h3>
+    <div class="reveal">
+      <table>
+        <thead><tr><th>Context</th><th>FP32 KV</th><th>Progressive (2.9x)</th><th>Aggressive (6.4x)</th><th>+ Eviction</th></tr></thead>
+        <tbody>
+          <tr><td>4K</td><td>OK</td><td>OK</td><td>OK</td><td>OK (fastest)</td></tr>
+          <tr><td>16K</td><td>borderline</td><td>OK</td><td>OK</td><td>OK</td></tr>
+          <tr><td>32K</td><td style="color:var(--red)">OOM</td><td>5.5 GB</td><td><strong>2.5 GB</strong></td><td><strong>~1.5 GB</strong></td></tr>
+          <tr><td>64K</td><td style="color:var(--red)">OOM</td><td style="color:var(--red)">OOM</td><td>5.0 GB</td><td>~3 GB</td></tr>
+          <tr class="highlight-row"><td><strong>128K</strong></td><td style="color:var(--red)">OOM</td><td style="color:var(--red)">OOM</td><td>16GB Mac</td><td><strong>~5 GB</strong></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ===== Chapter 6: Papers ===== -->
+<section id="papers" style="background:var(--bg2)">
+  <div class="container">
+    <div class="section-label">Chapter 6</div>
+    <h2 class="reveal">Research Foundations</h2>
+    <p class="reveal">Each technique in quant.cpp is grounded in peer-reviewed research:</p>
+
+    <div class="stagger" style="margin-top:1.5rem">
+      <div class="paper">
+        <div class="paper-title">TurboQuant: Redefining AI Efficiency with Extreme Compression</div>
+        <div class="paper-meta">ICLR 2026 &middot; Google Research &middot; <a href="https://arxiv.org/abs/2504.19874">arXiv:2504.19874</a></div>
+        <div class="paper-desc">Random Hadamard Transform (RHT) normalizes activation distributions before Lloyd-Max codebook quantization. Foundation of our <code>turbo_kv_*</code> types.</div>
+      </div>
+      <div class="paper">
+        <div class="paper-title">KIVI: A Tuning-Free Asymmetric 2bit Quantization for KV Cache</div>
+        <div class="paper-meta">ICML 2024 &middot; <a href="https://arxiv.org/abs/2402.02750">arXiv:2402.02750</a></div>
+        <div class="paper-desc">Key insight: per-channel quantization for Keys, per-token for Values. K and V have fundamentally different error sensitivity due to softmax nonlinearity.</div>
+      </div>
+      <div class="paper">
+        <div class="paper-title">H2O: Heavy-Hitter Oracle for Efficient Generative Inference</div>
+        <div class="paper-meta">NeurIPS 2023 &middot; <a href="https://arxiv.org/abs/2306.14048">arXiv:2306.14048</a></div>
+        <div class="paper-desc">Attention follows a power law. Keep "sink" tokens + "heavy hitters" (high cumulative attention) + recent window. Evict the rest for O(1) KV budget.</div>
+      </div>
+      <div class="paper">
+        <div class="paper-title">PyramidKV: Dynamic KV Cache Compression based on Pyramidal Information Funneling</div>
+        <div class="paper-meta">Dec 2024 &middot; <a href="https://arxiv.org/abs/2406.02069">arXiv:2406.02069</a></div>
+        <div class="paper-desc">Attention entropy decreases with layer depth. Allocate larger KV budgets to early (high-entropy) layers, smaller to deep (low-entropy) layers.</div>
+      </div>
+      <div class="paper">
+        <div class="paper-title">PolarQuant &amp; QJL</div>
+        <div class="paper-meta"><a href="https://arxiv.org/abs/2502.02617">arXiv:2502.02617</a> &middot; <a href="https://arxiv.org/abs/2406.03482">arXiv:2406.03482</a></div>
+        <div class="paper-desc">Polar decomposition for vector quantization; Johnson-Lindenstrauss random projection for 1-bit sign hashing. Both used in our hybrid turbo types.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== Glossary ===== -->
+<section id="glossary">
+  <div class="container">
+    <div class="section-label">Reference</div>
+    <h2 class="reveal">Glossary</h2>
+
+    <dl class="stagger">
+      <div class="glossary-item"><dt>KV Cache</dt><dd>Key-Value cache. Stores the Key and Value vectors for all past tokens, so they don't need to be recomputed. Grows linearly with sequence length.</dd></div>
+      <div class="glossary-item"><dt>Attention</dt><dd>The mechanism by which each token decides how much to "look at" each past token. Computed as softmax(Q &times; K<sup>T</sup>) &times; V. Cost is O(n) per token where n is sequence length.</dd></div>
+      <div class="glossary-item"><dt>Perplexity (PPL)</dt><dd>Measures how well the model predicts the next token. Lower is better. PPL=100 means the model is "100-ways confused" on average. A +3% increase means barely noticeable quality change.</dd></div>
+      <div class="glossary-item"><dt>Softmax</dt><dd>Converts raw scores into a probability distribution. Small changes in input can cause large changes in output (nonlinear amplification), which is why Key quantization errors are more damaging than Value errors.</dd></div>
+      <div class="glossary-item"><dt>Quantization</dt><dd>Reducing the number of bits per value. FP32 (32-bit) &rarr; FP16 (16-bit) &rarr; 4-bit &rarr; 2-bit. Each halving saves 50% memory but introduces approximation error.</dd></div>
+      <div class="glossary-item"><dt>RHT (Random Hadamard Transform)</dt><dd>A mathematical rotation that spreads out the distribution of values, making them more uniform and easier to quantize without large errors. Used in TurboQuant.</dd></div>
+      <div class="glossary-item"><dt>Progressive Compression</dt><dd>Keep recent tokens at full precision, compress older tokens aggressively. Inspired by how human memory works: recent events are vivid, old memories are fuzzy but sufficient.</dd></div>
+      <div class="glossary-item"><dt>Heavy Hitter</dt><dd>A token that consistently receives high attention weight from many queries. These tokens are informationally critical and should never be evicted.</dd></div>
+      <div class="glossary-item"><dt>Attention Entropy</dt><dd>Measures how spread out the attention distribution is. Low entropy = sharp focus on few tokens. High entropy = diffuse attention across many tokens. Measured in bits.</dd></div>
+      <div class="glossary-item"><dt>GGUF</dt><dd>The standard file format for quantized LLM model weights, created by the llama.cpp project. quant.cpp loads GGUF models directly.</dd></div>
+    </dl>
+  </div>
+</section>
+
+<!-- ===== CTA ===== -->
+<section class="cta" style="background:var(--bg2)">
+  <div class="container reveal">
+    <h2 style="margin-bottom:1rem">Try It Yourself</h2>
+    <p style="color:var(--text2);margin-bottom:2rem;max-width:500px;margin-left:auto;margin-right:auto">Three lines of Python. No GPU, no API key, no setup.</p>
+    <pre style="text-align:left;display:inline-block;margin-bottom:2rem"><code>pip install quantcpp
+
+from quantcpp import Model
+m = Model.from_pretrained("Llama-3.2-1B")
+print(m.ask("What is gravity?"))</code></pre>
+    <br>
+    <a href="https://github.com/quantumaikr/quant.cpp" class="cta-btn cta-primary">GitHub</a>
+    <a href="https://pypi.org/project/quantcpp/" class="cta-btn cta-secondary">PyPI</a>
+    <a href="https://quantumaikr.github.io/quant.cpp/" class="cta-btn cta-secondary">WASM Demo</a>
+  </div>
+</section>
+
+<!-- ===== Footer ===== -->
+<footer>
+  <div class="container">
+    <p>quant.cpp &middot; Apache 2.0 &middot; <a href="https://github.com/quantumaikr/quant.cpp">GitHub</a> &middot; Made by <a href="https://github.com/quantumaikr">quantumaikr</a></p>
+  </div>
+</footer>
+
+<!-- ===== JavaScript ===== -->
+<script>
+// === Scroll reveal ===
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach(e => {
+    if (e.isIntersecting) {
+      e.target.classList.add('visible');
+      // Trigger animated bars
+      e.target.querySelectorAll('.mem-bar-fill').forEach(bar => bar.classList.add('animated'));
+      // Trigger pipeline stages
+      e.target.querySelectorAll('.pipe-stage, .pipe-arrow').forEach(el => el.classList.add('visible'));
+      // Trigger entropy bars
+      e.target.querySelectorAll('.bar-value').forEach(bar => {
+        bar.style.width = bar.dataset.w;
+      });
+    }
+  });
+}, { threshold: 0.15 });
+
+document.querySelectorAll('.reveal, .reveal-left, .reveal-right, .stagger, .viz').forEach(el => observer.observe(el));
+
+// === KV growth chart ===
+const kvGrowth = document.getElementById('kv-growth');
+if (kvGrowth) {
+  const contexts = [1,2,4,8,16,32,48,64,96,128];
+  contexts.forEach((c, i) => {
+    const bar = document.createElement('div');
+    bar.style.cssText = `flex:1;background:linear-gradient(to top,var(--red),var(--orange));border-radius:3px 3px 0 0;height:0;transition:height 1s ease ${i*.08}s`;
+    kvGrowth.appendChild(bar);
+    setTimeout(() => { bar.style.height = (c/128*100)+'%'; }, 500);
+  });
+}
+
+// === KV progressive visualization ===
+const kvProg = document.getElementById('kv-progressive');
+if (kvProg) {
+  for (let i = 0; i < 64; i++) {
+    const block = document.createElement('div');
+    block.className = 'kv-block';
+    const isFp32 = i >= 64 - 8; // last 8 blocks = FP32
+    block.classList.add(isFp32 ? 'kv-fp32' : 'kv-4bit');
+    block.style.height = '0px';
+    block.style.transitionDelay = (i * 0.02) + 's';
+    kvProg.appendChild(block);
+    setTimeout(() => {
+      block.style.height = (30 + Math.random() * 50) + 'px';
+    }, 800);
+  }
+}
+
+// === Token importance chart ===
+const tokImp = document.getElementById('token-importance');
+if (tokImp) {
+  for (let i = 0; i < 80; i++) {
+    const bar = document.createElement('div');
+    let h;
+    if (i < 4) h = 90 + Math.random()*10; // sink tokens
+    else if (i < 20) h = 30 + Math.random()*60; // heavy hitters
+    else h = 2 + Math.random()*15; // low attention
+
+    const isEvicted = i >= 20 && Math.random() > 0.3;
+    bar.style.cssText = `flex:1;border-radius:2px 2px 0 0;height:0;transition:height 1s ease ${i*.02}s;background:${
+      i < 4 ? 'var(--accent2)' : isEvicted ? 'var(--bg3)' : 'var(--green)'
+    };opacity:${isEvicted ? '.3' : '1'}`;
+    tokImp.appendChild(bar);
+    setTimeout(() => { bar.style.height = h + 'px'; }, 800);
+  }
+}
+
+// === Entropy chart ===
+const entChart = document.getElementById('entropy-chart');
+if (entChart) {
+  const data = [
+    {l:0,e:5.52,c:'bar-hot'},{l:1,e:6.29,c:'bar-hot'},{l:2,e:2.30,c:'bar-cold'},
+    {l:3,e:2.67,c:'bar-cool'},{l:4,e:2.59,c:'bar-cool'},{l:5,e:3.26,c:'bar-warm'},
+    {l:6,e:3.81,c:'bar-warm'},{l:7,e:4.43,c:'bar-warm'},{l:8,e:3.43,c:'bar-warm'},
+    {l:9,e:3.32,c:'bar-warm'},{l:10,e:3.32,c:'bar-warm'},{l:11,e:1.84,c:'bar-cold'},
+    {l:12,e:2.88,c:'bar-cool'},{l:13,e:3.11,c:'bar-warm'},{l:14,e:4.10,c:'bar-warm'},
+    {l:15,e:3.60,c:'bar-warm'}
+  ];
+  data.forEach(d => {
+    const row = document.createElement('div');
+    row.className = 'entropy-bar';
+    row.innerHTML = `<span class="layer-id">Layer ${d.l}</span>
+      <div class="bar-track"><div class="bar-value ${d.c}" data-w="${d.e/7*100}%">${d.e.toFixed(1)}</div></div>
+      <span class="ent-val">${d.e.toFixed(2)} bits</span>`;
+    entChart.appendChild(row);
+  });
+}
+
+// === Active nav highlight ===
+const sections = document.querySelectorAll('section[id]');
+const navLinks = document.querySelectorAll('nav ul a');
+window.addEventListener('scroll', () => {
+  let current = '';
+  sections.forEach(s => {
+    if (window.scrollY >= s.offsetTop - 200) current = s.id;
+  });
+  navLinks.forEach(a => {
+    a.classList.toggle('active', a.getAttribute('href') === '#' + current);
+  });
+});
+</script>
+</body>
+</html>

@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'wasm/**'
+      - 'site/**'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
@@ -32,12 +33,14 @@ jobs:
 
       - name: Prepare pages directory
         run: |
-          mkdir -p _site
+          mkdir -p _site _site/guide
+          # WASM demo (root)
           cp wasm/index.html _site/
-          cp wasm/quant.js _site/
-          cp wasm/quant.wasm _site/
-          # COOP/COEP headers for SharedArrayBuffer support
+          cp wasm/quant.js _site/ 2>/dev/null || true
+          cp wasm/quant.wasm _site/ 2>/dev/null || true
           cp wasm/_headers _site/_headers 2>/dev/null || true
+          # Educational guide (/guide)
+          cp site/index.html _site/guide/ 2>/dev/null || true
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
