@@ -356,20 +356,37 @@ function formatText(text) {
 }
 
 function loadModelFromBytes(bytes, name) {
-    showLoading('Loading model into WASM...');
-    // Transfer ArrayBuffer to worker (zero-copy)
-    const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-    worker.postMessage({ type: 'load', bytes: buffer, name: name }, [buffer]);
+    try {
+        Module.FS.writeFile('/model.gguf', bytes);
+        showLoading('Initializing model...');
+        const rc = Module._wasm_load_model(Module.allocateUTF8('/model.gguf'));
+        if (rc === 0) {
+            modelLoaded = true;
+            const dropzone = document.getElementById('dropzone');
+            dropzone.classList.add('loaded');
+            dropzone.innerHTML = `<h2>✓ ${name} (${(bytes.length/1048576).toFixed(0)} MB)</h2>
+                <p style="color:#6ee7b7">KV compression active — 3x longer context</p>`;
+            document.getElementById('kvBadge').style.display = '';
+            document.getElementById('prompt').disabled = false;
+            document.getElementById('sendBtn').disabled = false;
+            document.getElementById('prompt').focus();
+            addMessage('system', `Model loaded! ${name} (${(bytes.length/1048576).toFixed(0)} MB). Ask anything.`);
+        } else {
+            addMessage('system', 'Failed to load model.');
+        }
+    } catch(e) {
+        addMessage('system', `Error: ${e.message}`);
+    }
+    hideLoading();
 }
 
 async function loadModel(file) {
     showLoading(`Loading ${file.name} (${(file.size/1024/1024).toFixed(0)} MB)...`);
     addMessage('system', `Loading ${file.name}...`);
-    activeModelId = null; // custom model — use generic template
+    activeModelId = null;
     try {
         const buffer = await file.arrayBuffer();
-        const bytes = new Uint8Array(buffer);
-        loadModelFromBytes(bytes, file.name);
+        loadModelFromBytes(new Uint8Array(buffer), file.name);
     } catch(e) {
         addMessage('system', `Error: ${e.message}`);
     }
@@ -380,85 +397,11 @@ function getChatPrompt(text) {
     if (activeModelId && MODELS[activeModelId]) {
         return MODELS[activeModelId].chatTemplate(text);
     }
-    // Generic ChatML fallback for custom GGUF
     return `<|im_start|>user\n${text}<|im_end|>\n<|im_start|>assistant\n`;
 }
 
-// ---- Web Worker inference engine (no ASYNCIFY overhead) ----
-let worker = null;
-let pendingAssistantDiv = null;
-let pendingOutput = '';
-let pendingTokenCount = 0;
-let pendingStartTime = 0;
-
-function initWorker() {
-    worker = new Worker('inference-worker.js');
-    worker.onmessage = function(e) {
-        const msg = e.data;
-
-        if (msg.type === 'ready') {
-            addMessage('system', 'Runtime ready. Choose a model or drop your own GGUF file.');
-        }
-        else if (msg.type === 'status') {
-            if (msg.msg === 'thinking' && pendingAssistantDiv) {
-                pendingAssistantDiv.innerHTML = '<span class="thinking"><span class="spinner" style="display:inline-block;width:12px;height:12px;vertical-align:middle;margin-right:6px"></span>Thinking...</span>';
-                document.getElementById('statTokens').textContent = 'Processing prompt...';
-                document.getElementById('statSpeed').textContent = '';
-            } else {
-                addMessage('system', msg.msg);
-            }
-        }
-        else if (msg.type === 'loaded') {
-            modelLoaded = true;
-            const dropzone = document.getElementById('dropzone');
-            dropzone.classList.add('loaded');
-            dropzone.innerHTML = `<h2>✓ ${msg.name} (${(msg.size/1048576).toFixed(0)} MB)</h2>
-                <p style="color:#6ee7b7">KV compression active — 3x longer context</p>`;
-            document.getElementById('kvBadge').style.display = '';
-            document.getElementById('prompt').disabled = false;
-            document.getElementById('sendBtn').disabled = false;
-            document.getElementById('prompt').focus();
-            hideLoading();
-        }
-        else if (msg.type === 'token' && pendingAssistantDiv) {
-            pendingOutput += msg.text;
-            pendingTokenCount++;
-            pendingAssistantDiv.textContent = pendingOutput;
-            const cursor = document.createElement('span');
-            cursor.className = 'cursor';
-            cursor.textContent = '▌';
-            pendingAssistantDiv.appendChild(cursor);
-            const chat = document.getElementById('chat');
-            chat.scrollTop = chat.scrollHeight;
-            const elapsed = (performance.now() - pendingStartTime) / 1000;
-            if (elapsed > 0.1) {
-                document.getElementById('statTokens').textContent = `${pendingTokenCount} tokens`;
-                document.getElementById('statSpeed').textContent = `${(pendingTokenCount / elapsed).toFixed(1)} tok/s`;
-            }
-        }
-        else if (msg.type === 'done') {
-            if (pendingAssistantDiv) {
-                if (pendingOutput) {
-                    pendingAssistantDiv.innerHTML = formatText(pendingOutput);
-                } else {
-                    pendingAssistantDiv.innerHTML = '<em style="color:#666">No output generated. Try a longer prompt.</em>';
-                }
-                const elapsed = (performance.now() - pendingStartTime) / 1000;
-                const tps = pendingTokenCount > 0 ? (pendingTokenCount / elapsed).toFixed(1) : '0';
-                document.getElementById('statTokens').textContent = `${pendingTokenCount} tokens`;
-                document.getElementById('statSpeed').textContent = `${tps} tok/s`;
-            }
-            generating = false;
-            document.getElementById('sendBtn').disabled = false;
-            document.getElementById('prompt').disabled = false;
-            document.getElementById('prompt').focus();
-            pendingAssistantDiv = null;
-        }
-    };
-}
-
-function generate() {
-    if (!modelLoaded || generating || !worker) return;
+async function generate() {
+    if (!modelLoaded || generating) return;
     const input = document.getElementById('prompt');
     const text = input.value.trim();
     if (!text) return;
@@ -469,19 +412,70 @@ function generate() {
     input.disabled = true;
 
     addMessage('user', text);
-    pendingAssistantDiv = addMessage('assistant', '');
-    pendingAssistantDiv.innerHTML = '<span class="thinking"><span class="spinner" style="display:inline-block;width:12px;height:12px;vertical-align:middle;margin-right:6px"></span>Thinking...</span>';
-    pendingOutput = '';
-    pendingTokenCount = 0;
-    pendingStartTime = performance.now();
+    const assistantDiv = addMessage('assistant', '');
+    assistantDiv.innerHTML = '<span class="thinking"><span class="spinner" style="display:inline-block;width:12px;height:12px;vertical-align:middle;margin-right:6px"></span>Thinking...</span>';
+    let output = '';
+    let tokenCount = 0;
+    const startTime = performance.now();
+    document.getElementById('statTokens').textContent = 'Processing prompt...';
+    document.getElementById('statSpeed').textContent = '';
+
+    Module.onToken = (token) => {
+        output += token;
+        tokenCount++;
+        assistantDiv.textContent = output;
+        const cursor = document.createElement('span');
+        cursor.className = 'cursor';
+        cursor.textContent = '▌';
+        assistantDiv.appendChild(cursor);
+        document.getElementById('chat').scrollTop = document.getElementById('chat').scrollHeight;
+        const elapsed = (performance.now() - startTime) / 1000;
+        if (elapsed > 0.1) {
+            document.getElementById('statTokens').textContent = `${tokenCount} tokens`;
+            document.getElementById('statSpeed').textContent = `${(tokenCount / elapsed).toFixed(1)} tok/s`;
+        }
+    };
+
+    Module.onDone = (nTokens, elapsedMs) => {
+        assistantDiv.innerHTML = formatText(output);
+        const tps = nTokens > 0 ? (nTokens / (elapsedMs / 1000)).toFixed(1) : '0';
+        document.getElementById('statTokens').textContent = `${nTokens} tokens`;
+        document.getElementById('statSpeed').textContent = `${tps} tok/s`;
+        generating = false;
+        document.getElementById('sendBtn').disabled = false;
+        input.disabled = false;
+        input.focus();
+    };
 
     const chatPrompt = getChatPrompt(text);
-    worker.postMessage({ type: 'generate', prompt: chatPrompt, temperature: 0.7, maxTokens: 256 });
-}
+    const promptPtr = Module.allocateUTF8(chatPrompt);
+    try {
+        await Module._wasm_generate_async(promptPtr, 0.7, 256);
+    } catch(e) {
+        Module._wasm_generate(promptPtr, 0.7, 256);
+    }
+    Module._free(promptPtr);
 
-// Initialize worker on page load
-initWorker();
+    if (!output) {
+        assistantDiv.innerHTML = '<em style="color:#666">No output generated. Try a longer prompt.</em>';
+    }
+    generating = false;
+    document.getElementById('sendBtn').disabled = false;
+    input.disabled = false;
+}
 </script>
+
+<script>
+var Module = {
+    onToken: null, onDone: null, onStatus: null,
+    print: function(text) { console.log(text); },
+    printErr: function(text) { console.warn(text); },
+    onRuntimeInitialized: function() {
+        addMessage('system', 'Runtime ready. Choose a model or drop your own GGUF file.');
+    }
+};
+</script>
+<script src="quant.js"></script>
 
 </body>
 </html>

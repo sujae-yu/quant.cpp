@@ -1586,7 +1586,13 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
                             + (size_t)l * s->quant_kv_stride
                             + (size_t)t * cache_n_kv_heads * s->quant_head_stride
                             + (size_t)kv_h * s->quant_head_stride;
-                        traits->dequantize(quant_src, dequant_buf, head_dim);
+                        /* Multi-block dequant for head_dim > TQ_BK */
+                        for (int blk = 0; blk < head_dim; blk += TQ_BK) {
+                            int blen = head_dim - blk;
+                            if (blen > TQ_BK) blen = TQ_BK;
+                            traits->dequantize(quant_src + (blk / TQ_BK) * traits->type_size,
+                                               dequant_buf + blk, blen);
+                        }
                         for (int d = 0; d < head_dim; d++) {
                             recon_key[d] += dequant_buf[d];
                         }
@@ -1703,7 +1709,13 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
                             + (size_t)l * s->quant_kv_stride
                             + (size_t)t * cache_n_kv_heads * s->quant_head_stride
                             + (size_t)kv_h * s->quant_head_stride;
-                        traits->dequantize(quant_src, dequant_buf, head_dim);
+                        /* Multi-block dequant for head_dim > TQ_BK */
+                        for (int blk = 0; blk < head_dim; blk += TQ_BK) {
+                            int blen = head_dim - blk;
+                            if (blen > TQ_BK) blen = TQ_BK;
+                            traits->dequantize(quant_src + (blk / TQ_BK) * traits->type_size,
+                                               dequant_buf + blk, blen);
+                        }
                         if (needs_post_norm) {
                             tq_rmsnorm(dequant_buf, dequant_buf, layer->k_norm,
                                        head_dim, c->rms_norm_eps);
