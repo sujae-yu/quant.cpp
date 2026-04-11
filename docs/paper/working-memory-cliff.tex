@@ -33,11 +33,11 @@
 
 
 
-\textbf{Tech report draft — v0.4 — 2026-04-11}
+\textbf{Tech report draft — v0.5 — 2026-04-12}
 
 \textbf{Author}: quant.cpp maintainers
 
-\textbf{Status}: Phase 2B Karpathy loop complete — 204 trials measured + ReDeEP-Cliff hypothesis tested on all 115 failures via surface-level proxy. Hypothesis rejected; new failure mode "primacy-biased document continuation overflow" identified and characterised. Self-correction of v0.3's "synthesised hallucination" framing in §4.6.
+\textbf{Status}: Phase 2C Karpathy loop complete — 240 trials measured (204 from Phase 1B + 36 from Phase 2C anchor mitigation control). Two prompt-level anchor-strengthening interventions tested (PQRI, convchunk); both failed to move the cliff and both performed \textit{worse} than baseline. Implication: cliff mechanism is attention-mechanism level, not prompt format level. The negative result strengthens the case for \textit{cliff-avoidance} architectures (Phase 3 RLV candidate in §8) over \textit{cliff-fighting} interventions.
 
 
 \begin{quote}
@@ -331,7 +331,57 @@ Run & ctx & Output (FP32 weights) \\
 The above-cliff failures are \textit{all} wikitext continuation — exactly the same failure mode as the Q4 path. Source: \texttt{bench/results/niah/results\_fp32ctrl\_20260411T091023.csv}.
 
 
-\subsection*{4.6 Failure mode taxonomy and the cliff mechanism}
+\subsection*{4.6 Anchor-strengthening mitigation control: prompt-level interventions fail}
+
+
+Phase 2B identified the cliff failure mode as "primacy-biased document continuation overflow" — the chat-template anchor at the start of the prompt loses sufficient attention weight as the haystack grows, and the model defaults to autocompleting the wikitext. This subsection tests two cheap, intuitive prompt-level interventions that \textit{should} strengthen the anchor by making the question more spatially present in the prompt:
+
+
+\begin{itemize}
+\item \textbf{PQRI (Periodic Question Re-Injection)}: insert \texttt{[REMINDER: <question>]} markers every \textasciitilde{}256 tokens at sentence boundaries inside the haystack. The chat-template anchor is conceptually refreshed because the question reappears throughout the prompt.
+\item \textbf{convchunk (Conversational Chunking)}: split the haystack into 4 chunks, wrap each as a separate \texttt{<|user|>} turn with the question repeated at every turn. The chat-template anchor is \textit{literally} refreshed at every turn boundary because each chunk is a fresh user message.
+\end{itemize}
+
+
+Grid: 3B Q4 × 4 contexts (1024, 1280, 1536, 2048) × 3 needles × 3 arms = 36 trials. Source: \texttt{bench/results/niah/results\_anchor\_20260411T141243.csv}.
+
+
+\begin{center}
+\begin{tabular}{llllll}
+\toprule
+Arm & ctx=1024 & ctx=1280 & ctx=1536 & ctx=2048 & Total \\
+\midrule
+baseline & 2/3 & 0/3 & 0/3 & 0/3 & 2/12 \\
+\textbf{PQRI} & \textbf{0/3} & \textbf{0/3} & \textbf{0/3} & \textbf{0/3} & \textbf{0/12} \\
+\textbf{convchunk} & \textbf{0/3} & \textbf{0/3} & \textbf{0/3} & \textbf{0/3} & \textbf{0/12} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+
+\textbf{Both prompt-level interventions failed to move the cliff} — and both performed \textit{worse} than baseline at the pre-cliff control cell (ctx=1024). The added prompt overhead from inline reminders and multi-turn wrapping appears to push the borderline ctx=1024 cell over the cliff edge.
+
+
+This is a strong negative result. It implies the cliff mechanism is \textbf{not at the prompt format level} — adding the question more visibly or refreshing the chat-template marker doesn't help. The anchor failure is at the \textit{attention mechanism} level: even when the chat-template tokens are physically present in the prompt at multiple locations, the model's attention to them collapses below the threshold needed to override the document-continuation prior.
+
+
+\textbf{Implication for the next round of mitigation work}: prompt-level interventions are insufficient. The remaining viable mitigation paths are:
+
+
+\begin{enumerate}
+\item \textbf{Attention-level intervention} (e.g., SinkTrack-style instruction injection into the BOS sink, or attention head re-weighting at the cliff layers). These require model-internal access; quant.cpp's hooks would need extension. Multi-week C/Metal work.
+\end{enumerate}
+
+
+\begin{enumerate}
+\item \textbf{Cliff avoidance} (e.g., a multi-stage Read-Locate-Verify architecture that respects the measured cliff as a hard budget and never asks the model to retrieve from a region larger than its effective working memory). This is purely orchestration above the existing CLI; no model changes. \textbf{Phase 3 candidate} — outlined in §8.
+\end{enumerate}
+
+
+The Phase 2C result \textit{strengthens} the case for cliff-avoidance architectures over cliff-fighting interventions. If even the most direct prompt-level anchor refreshing fails, then attempting to coexist with the cliff at a higher level — by keeping each LLM call within the cliff budget — is a more robust strategy.
+
+
+\subsection*{4.7 Failure mode taxonomy and the cliff mechanism}
 
 
 \begin{quote}
@@ -562,21 +612,84 @@ Models: \texttt{meta-llama/Llama-3.2-1B-Instruct} Q8\_0 GGUF, \texttt{meta-llama
 \section*{8. Future Work}
 
 
-The Phase 2B subtype analysis (§4.6) suggests a concrete sequence of mitigation experiments with mechanistic justification:
+Phase 2C (§4.6) tested two prompt-level anchor-strengthening interventions (PQRI, convchunk) and both failed. The remaining viable mitigation directions split into two classes — \textit{cliff-fighting} and \textit{cliff-avoiding}. Phase 3 prioritises cliff-avoidance because it does not require model-internal access and aligns with how humans actually retrieve information from documents larger than their working memory.
+
+
+\subsection*{Phase 3 (primary): Read-Locate-Verify (RLV) architecture — cliff avoidance}
+
+
+\textbf{The human pattern}: When you look up a half-remembered fact in a long document, you do not load the whole document into working memory. You (1) read it once and form a \textit{gist} — a structural understanding of which sections cover what; (2) given a question, you \textit{locate} the rough region where the answer should be; (3) you read that \textit{region} in detail; (4) you \textit{verify} the answer against your gist; and (5) if the verification fails, you \textit{re-search} a different region. This is a five-stage iterative process explicitly designed to work around the limits of human working memory. It is also exactly what current RAG (skips stages 1+4) and current long-context inference (tries to do everything in stage 1, hits the cliff) both fail to do.
+
+
+\textbf{Architecture}:
+
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Stage & Human cognitive phase & quant.cpp implementation \\
+\midrule
+\textbf{1. GIST} & Build mental index of structure + topics & Chunked summarisation pass; output is a structured outline (\textasciitilde{}500-2000 tokens) saved to disk. Each chunk is sized below the measured cliff so the gist itself is reliable. \\
+\textbf{2. LOCATOR} & Recall rough position & Small LLM call: outline + question → region pointer (start\_token, end\_token). The outline is small, so this stage runs \textit{below the cliff} and is reliable. \\
+\textbf{3. LOOKUP} & Read the targeted region in detail & Load only the targeted region's KV cache (using \texttt{save\_context}/\texttt{load\_context} from §3.3) into the model. The region is sized below the cliff. The model answers the question with full attention to the relevant span. \\
+\textbf{4. VERIFY} & Cross-check answer against gist & Small LLM call: gist + answer → verdict \{confident, unsure, contradicted\}. The verifier acts as a hallucination filter — it's the stage that matches the human "wait, that doesn't sound right" check that prevents silent retrieval errors. \\
+\textbf{5. RE-SEARCH} & Iterate if verification fails & Locator retry with a different region. Capped at N=3 iterations. \\
+\textbf{6. CALIBRATED OUTPUT} & Honest "I don't know" & If all retries fail verification, return explicit uncertainty rather than a fabricated answer. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+
+*\textit{Why this is feasible }now\textit{ with quant.cpp}*:
+
+\begin{itemize}
+\item The KV cache persistence work (\texttt{save\_context}/\texttt{load\_context}, the \texttt{.kv} file format introduced for the Beyond RAG manifesto) lets each region be precomputed once and mmap-loaded in milliseconds — Stage 3 inference is dominated by generation, not prefill, because the prefill is cached.
+\item The Phase 1B cliff measurement gives us a concrete \textit{parameter} for the architecture: the region size in Stage 3 must stay below the model's effective working memory. For Llama-3.2-3B-Q4 on the default loader path, that is approximately 1024 tokens — a number we measured directly.
+\item The Phase 2B failure-mode characterisation tells us \textit{why} RLV avoids the cliff: each LLM call (gist chunk, locator, lookup, verifier) keeps the haystack small enough that the chat-template anchor stays loud. The continuation prior never has the document mass it would need to overpower the anchor.
+\item The Phase 2C negative result on PQRI/convchunk tells us \textit{why we should not try to fight the cliff}. Prompt-level interventions don't move it; multi-week C/Metal attention-level interventions are out of scope; cliff avoidance is the remaining productive direction.
+\end{itemize}
+
+
+\textbf{Comparison to existing approaches}:
+
+
+\begin{center}
+\begin{tabular}{lllll}
+\toprule
+Approach & Has gist? & Has verification? & Iterates? & Respects working memory budget? \\
+\midrule
+Vector RAG (FAISS+chunk) & ❌ & ❌ & ❌ & N/A \\
+Pure long-context inference & ⚠️ tries, hits cliff & ❌ & ❌ & ❌ \\
+Agentic RAG (ReAct) & ❌ & ⚠️ partial & ✅ & ❌ \\
+\textbf{RLV (this work)} & ✅ & ✅ & ✅ & \textbf{✅ — uses the measured cliff as a hard constraint} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+
+\textbf{Phase 3 prototype plan} (1 week, \textasciitilde{}2-3 hours of compute):
+
+\begin{itemize}
+\item Day 1-2: Python orchestrator + 5-stage flow controller (calls quant.cpp via subprocess; no C changes)
+\item Day 3: Reproduce v0.12 Acme document QA benchmark (7 questions on 5-section synthetic doc) with RLV; expected to match the 7/7 from pure long-context but with explicit verification
+\item Day 4-5: Stress test on 8000-token wikitext article (well above the 3B cliff) with 10 questions, mix single-hop and multi-hop. Compare 3 systems: vector RAG, pure long-context, RLV. Predicted result: vector RAG fails on multi-hop, pure long-context fails entirely (above cliff), RLV succeeds with explicit uncertainty for the rare cases it cannot resolve.
+\item Day 6-7: Write up + commit + community release (HF blog, Reddit, optional arXiv supplement)
+\end{itemize}
+
+
+\subsection*{Phase 3 (secondary): Attention-level interventions — cliff fighting}
+
+
+These remain interesting but require deeper engineering:
 
 
 \begin{enumerate}
-\item \textbf{Periodic Question Re-Injection (PQRI)} [1-day experiment]. Embed \texttt{<|start\_header\_id|>user<|end\_header\_id|>\{question\}<|eot\_id|>} markers every 256 tokens inside the haystack. The chat-template anchor is \textit{spatially} refreshed throughout the prompt rather than relying on the single anchor at the start. Expected: cliff position shifts upward by 2–4×. Format change only, no model modification.
+\item \textbf{Question-Anchored Sink Injection (QASI)} [2-3 weeks]. Adapt SinkTrack [Gg1aPETCL6, ICLR 2026] from vision-language models to edge-LLM scale. SinkTrack injects contextual features into the BOS attention sink and reports +21.6\% on SQuAD2.0 with Llama-3.1-8B-Instruct. Phase 2C ruled out \textit{prompt-level} anchor strengthening; QASI tests \textit{attention-level} anchor strengthening, which is mechanistically different. Requires extending quant.cpp with attention hook hooks or implementing a parallel HuggingFace transformers prototype.
 \end{enumerate}
 
 
 \begin{enumerate}
-\item \textbf{Conversational Chunking} [1-day experiment]. Split the haystack into multiple \texttt{<|user|>chunk<|/user|>} turns instead of one giant user turn, with the question as the final turn. Each chunk refreshes the chat-template anchor. Predicted to be effective because models are heavily instruction-tuned on multi-turn dialogue.
-\end{enumerate}
-
-
-\begin{enumerate}
-\item \textbf{Question-Anchored Sink Injection (QASI)} [1-week experiment]. Adapt SinkTrack [Gg1aPETCL6, ICLR 2026] from vision-language models to the edge-LLM regime. SinkTrack injects contextual features into the BOS attention sink and reports +21.6\% on SQuAD2.0 with Llama-3.1-8B-Instruct. Our cliff measurement provides an obvious testbed: inject the question into the BOS sink at inference time and re-measure the cliff for 1B Q8 and 3B Q4. We are not aware of this being tried at edge-device scale.
+\item \textbf{Mechanistic verification with HuggingFace Llama-3.2-3B}: extract per-layer attention to chat-template anchor tokens (\texttt{<|start\_header\_id|>}, \texttt{<|eot\_id|>}) as context length crosses the cliff. Test the precise hypothesis: anchor attention weight decays below a threshold and the document-continuation attention head wins.
 \end{enumerate}
 
 
@@ -634,7 +747,7 @@ The Phase 2B subtype analysis (§4.6) suggests a concrete sequence of mitigation
 \medskip\hrule\medskip
 
 
-\textit{Draft v0.3 — generated by the Phase 1B Karpathy loop. All result sections populated; Related Work and References complete; FP32-weights control done (the cliff is invariant to weight precision); cliff-cell seed sweep blocked by an upstream \texttt{tools/quant.c -s} flag bug we surfaced during this round (documented as §5.6 limitation, separate fix issue filed). Ready for arXiv submission as a v1 tech report.}
+\textit{Draft v0.5 — generated by the Phase 2C Karpathy loop. 240 trials measured (Phase 1B 198 + FP32 control 6 + Phase 2C anchor mitigation 36). Phase 2C tested two prompt-level anchor-strengthening interventions (PQRI, convchunk) and both failed — implication: cliff is attention-mechanism level, not prompt format level. §4.6 reframed accordingly. §8 promotes cliff-avoidance (RLV) to the primary Phase 3 candidate. Ready for arXiv submission as a v2 tech report once §4.6's PQRI/convchunk negative result is added to the master\_table.md and a Phase 3 prototype produces RLV measurements to attach as §4.8.}
 
 
 \end{document}

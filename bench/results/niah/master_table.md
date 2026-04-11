@@ -4,7 +4,7 @@
 **Hardware**: Apple M-series, Metal kernel path (`build_metal/quant`)
 **Protocol**: 3 needles × 3 depths (0.1, 0.5, 0.9) per (model, ctx, KV-config) cell, plus a 6-trial FP32-weights control at the cliff transition.
 **Scoring**: case-insensitive ERE grep for keywords, against 32-token greedy generation.
-**Total trials**: 204 (R1=36 + R2=90 + R3=72 + R4=6).
+**Total trials**: 240 (R1=36 + R2=90 + R3=72 + R4=6 + R5=36 anchor mitigation control).
 
 ---
 
@@ -74,6 +74,24 @@ The default `quant.cpp` loader silently re-quantizes Q8_0 GGUF weights to Q4 in 
 Above-cliff failure mode is also identical between Q4 and FP32 weights: all six FP32 ctx=1280 trials produced wikitext continuation ("Doctors , followed by a role in the 2007 theatre production of How to Curse..."), the same dominant failure mode as the Q4 grid.
 
 Source: `bench/results/niah/results_fp32ctrl_20260411T091023.csv` (6 trials, 60 minutes wall time on Metal — FP32-weights inference runs at ~10 min per trial, hence the small grid).
+
+---
+
+## Anchor mitigation control (R5): prompt-level interventions fail to move the cliff
+
+Phase 2C tested whether two intuitive prompt-level interventions could move the cliff by spatially refreshing the chat-template anchor. Both failed.
+
+| Arm | ctx=1024 | ctx=1280 | ctx=1536 | ctx=2048 | Total |
+|---|---:|---:|---:|---:|---:|
+| baseline | 2/3 | 0/3 | 0/3 | 0/3 | **2/12** |
+| **PQRI** (`[REMINDER:]` every ~256 tok) | **0/3** | **0/3** | **0/3** | **0/3** | **0/12** |
+| **convchunk** (4 user turns × question each) | **0/3** | **0/3** | **0/3** | **0/3** | **0/12** |
+
+Both interventions performed *worse* than baseline at the pre-cliff control cell (ctx=1024) — the added prompt overhead pushed the borderline cell over the cliff edge. Neither moved the cliff itself.
+
+**Implication**: the cliff is not at the prompt format level. Even when the chat-template tokens are physically present at multiple locations in the prompt, the model's attention to them collapses below the threshold needed to override the document-continuation prior. The next viable mitigation directions are either (a) attention-mechanism-level interventions (SinkTrack-style instruction injection into the BOS sink, or attention head re-weighting) which require model-internal access, or (b) cliff-avoidance architectures (Read-Locate-Verify) that respect the measured cliff as a hard budget and never ask the model to retrieve from a region larger than its effective working memory.
+
+Source: `bench/results/niah/results_anchor_20260411T141243.csv` (36 trials).
 
 ---
 

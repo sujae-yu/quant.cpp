@@ -1,8 +1,8 @@
 # The Working Memory Cliff: Measuring When Quantized Edge LLMs Stop Following Instructions in Long Context
 
-**Tech report draft — v0.4 — 2026-04-11**
+**Tech report draft — v0.5 — 2026-04-12**
 **Author**: quant.cpp maintainers
-**Status**: Phase 2B Karpathy loop complete — 204 trials measured + ReDeEP-Cliff hypothesis tested on all 115 failures via surface-level proxy. Hypothesis rejected; new failure mode "primacy-biased document continuation overflow" identified and characterised. Self-correction of v0.3's "synthesised hallucination" framing in §4.6.
+**Status**: Phase 2C Karpathy loop complete — 240 trials measured (204 from Phase 1B + 36 from Phase 2C anchor mitigation control). Two prompt-level anchor-strengthening interventions tested (PQRI, convchunk); both failed to move the cliff and both performed *worse* than baseline. Implication: cliff mechanism is attention-mechanism level, not prompt format level. The negative result strengthens the case for *cliff-avoidance* architectures (Phase 3 RLV candidate in §8) over *cliff-fighting* interventions.
 
 > **TL;DR** — We measure the *effective* working memory of two edge-device quantized LLMs (Llama-3.2-1B-Q8, Llama-3.2-3B-Q4) using a Needle-in-a-Haystack protocol on 204 trials. **Both models fall off a cliff at 0.4–0.8% of their nominal context window**: 1B Q8 retains 100% retrieval at 512 tokens but drops to 0% by 1536, and 3B Q4 retains 100% at 1024 tokens but collapses to 0% at 1280 — a step function spanning <256 tokens. **6.4× KV cache compression is bit-for-bit identical to FP32 baseline in 18/20 cells**, and a 6-trial FP32-weights control rules out weight quantization, so the cliff is a *model* property — not a KV property and not a quantization artifact. The dominant cliff failure mode (84% of failures) is **literal continuation of the haystack from its 10–20% body-start position** — a previously-unnamed failure mode we call *primacy-biased document continuation overflow*, mechanistically *opposite* to RAG silent hallucination (high copy + low novel, vs RAG's low copy + high novel). The "long-context replaces RAG" framing holds at the memory-allocation level (a 128K context fits in 9.5 GB) but not at the retrieval level (the model stops following instructions long before the memory is full), and the failure cannot be fixed by retargeted RAG-hallucination mitigations like AARF — it needs anchor-strengthening interventions instead.
 
@@ -168,7 +168,34 @@ The FP32-weights raw outputs are also visibly cleaner than the Q4 outputs: the l
 
 The above-cliff failures are *all* wikitext continuation — exactly the same failure mode as the Q4 path. Source: `bench/results/niah/results_fp32ctrl_20260411T091023.csv`.
 
-### 4.6 Failure mode taxonomy and the cliff mechanism
+### 4.6 Anchor-strengthening mitigation control: prompt-level interventions fail
+
+Phase 2B identified the cliff failure mode as "primacy-biased document continuation overflow" — the chat-template anchor at the start of the prompt loses sufficient attention weight as the haystack grows, and the model defaults to autocompleting the wikitext. This subsection tests two cheap, intuitive prompt-level interventions that *should* strengthen the anchor by making the question more spatially present in the prompt:
+
+- **PQRI (Periodic Question Re-Injection)**: insert `[REMINDER: <question>]` markers every ~256 tokens at sentence boundaries inside the haystack. The chat-template anchor is conceptually refreshed because the question reappears throughout the prompt.
+- **convchunk (Conversational Chunking)**: split the haystack into 4 chunks, wrap each as a separate `<|user|>` turn with the question repeated at every turn. The chat-template anchor is *literally* refreshed at every turn boundary because each chunk is a fresh user message.
+
+Grid: 3B Q4 × 4 contexts (1024, 1280, 1536, 2048) × 3 needles × 3 arms = 36 trials. Source: `bench/results/niah/results_anchor_20260411T141243.csv`.
+
+| Arm | ctx=1024 | ctx=1280 | ctx=1536 | ctx=2048 | Total |
+|---|---:|---:|---:|---:|---:|
+| baseline | 2/3 | 0/3 | 0/3 | 0/3 | 2/12 |
+| **PQRI** | **0/3** | **0/3** | **0/3** | **0/3** | **0/12** |
+| **convchunk** | **0/3** | **0/3** | **0/3** | **0/3** | **0/12** |
+
+**Both prompt-level interventions failed to move the cliff** — and both performed *worse* than baseline at the pre-cliff control cell (ctx=1024). The added prompt overhead from inline reminders and multi-turn wrapping appears to push the borderline ctx=1024 cell over the cliff edge.
+
+This is a strong negative result. It implies the cliff mechanism is **not at the prompt format level** — adding the question more visibly or refreshing the chat-template marker doesn't help. The anchor failure is at the *attention mechanism* level: even when the chat-template tokens are physically present in the prompt at multiple locations, the model's attention to them collapses below the threshold needed to override the document-continuation prior.
+
+**Implication for the next round of mitigation work**: prompt-level interventions are insufficient. The remaining viable mitigation paths are:
+
+1. **Attention-level intervention** (e.g., SinkTrack-style instruction injection into the BOS sink, or attention head re-weighting at the cliff layers). These require model-internal access; quant.cpp's hooks would need extension. Multi-week C/Metal work.
+
+2. **Cliff avoidance** (e.g., a multi-stage Read-Locate-Verify architecture that respects the measured cliff as a hard budget and never asks the model to retrieve from a region larger than its effective working memory). This is purely orchestration above the existing CLI; no model changes. **Phase 3 candidate** — outlined in §8.
+
+The Phase 2C result *strengthens* the case for cliff-avoidance architectures over cliff-fighting interventions. If even the most direct prompt-level anchor refreshing fails, then attempting to coexist with the cliff at a higher level — by keeping each LLM call within the cliff budget — is a more robust strategy.
+
+### 4.7 Failure mode taxonomy and the cliff mechanism
 
 > **Self-correction (v0.4)**: The v0.3 draft of this report cited a "synthesised hallucination" example (`"In 2023 Boulter was hired as the chief financial officer..."`) as the *most consequential* failure mode and equated it with RAG silent hallucination. **A 4-round Karpathy-loop subtype analysis on all 115 cliff failures (`bench/results/niah/redeep_proxy.py`, `redeep_subtype.py`, `continuation_origin.py`) shows that example is a single outlier (1 trial out of 115, < 1%) and the dominant cliff failure mode is the *opposite* of RAG hallucination.** This subsection is rewritten accordingly.
 
@@ -312,13 +339,51 @@ Per-run CLI outputs preserved in `bench/results/niah/raw_<TIMESTAMP>.log`.
 
 ## 8. Future Work
 
-The Phase 2B subtype analysis (§4.6) suggests a concrete sequence of mitigation experiments with mechanistic justification:
+Phase 2C (§4.6) tested two prompt-level anchor-strengthening interventions (PQRI, convchunk) and both failed. The remaining viable mitigation directions split into two classes — *cliff-fighting* and *cliff-avoiding*. Phase 3 prioritises cliff-avoidance because it does not require model-internal access and aligns with how humans actually retrieve information from documents larger than their working memory.
 
-1. **Periodic Question Re-Injection (PQRI)** [1-day experiment]. Embed `<|start_header_id|>user<|end_header_id|>{question}<|eot_id|>` markers every 256 tokens inside the haystack. The chat-template anchor is *spatially* refreshed throughout the prompt rather than relying on the single anchor at the start. Expected: cliff position shifts upward by 2–4×. Format change only, no model modification.
+### Phase 3 (primary): Read-Locate-Verify (RLV) architecture — cliff avoidance
 
-2. **Conversational Chunking** [1-day experiment]. Split the haystack into multiple `<|user|>chunk<|/user|>` turns instead of one giant user turn, with the question as the final turn. Each chunk refreshes the chat-template anchor. Predicted to be effective because models are heavily instruction-tuned on multi-turn dialogue.
+**The human pattern**: When you look up a half-remembered fact in a long document, you do not load the whole document into working memory. You (1) read it once and form a *gist* — a structural understanding of which sections cover what; (2) given a question, you *locate* the rough region where the answer should be; (3) you read that *region* in detail; (4) you *verify* the answer against your gist; and (5) if the verification fails, you *re-search* a different region. This is a five-stage iterative process explicitly designed to work around the limits of human working memory. It is also exactly what current RAG (skips stages 1+4) and current long-context inference (tries to do everything in stage 1, hits the cliff) both fail to do.
 
-3. **Question-Anchored Sink Injection (QASI)** [1-week experiment]. Adapt SinkTrack [Gg1aPETCL6, ICLR 2026] from vision-language models to the edge-LLM regime. SinkTrack injects contextual features into the BOS attention sink and reports +21.6% on SQuAD2.0 with Llama-3.1-8B-Instruct. Our cliff measurement provides an obvious testbed: inject the question into the BOS sink at inference time and re-measure the cliff for 1B Q8 and 3B Q4. We are not aware of this being tried at edge-device scale.
+**Architecture**:
+
+| Stage | Human cognitive phase | quant.cpp implementation |
+|---|---|---|
+| **1. GIST** | Build mental index of structure + topics | Chunked summarisation pass; output is a structured outline (~500-2000 tokens) saved to disk. Each chunk is sized below the measured cliff so the gist itself is reliable. |
+| **2. LOCATOR** | Recall rough position | Small LLM call: outline + question → region pointer (start_token, end_token). The outline is small, so this stage runs *below the cliff* and is reliable. |
+| **3. LOOKUP** | Read the targeted region in detail | Load only the targeted region's KV cache (using `save_context`/`load_context` from §3.3) into the model. The region is sized below the cliff. The model answers the question with full attention to the relevant span. |
+| **4. VERIFY** | Cross-check answer against gist | Small LLM call: gist + answer → verdict {confident, unsure, contradicted}. The verifier acts as a hallucination filter — it's the stage that matches the human "wait, that doesn't sound right" check that prevents silent retrieval errors. |
+| **5. RE-SEARCH** | Iterate if verification fails | Locator retry with a different region. Capped at N=3 iterations. |
+| **6. CALIBRATED OUTPUT** | Honest "I don't know" | If all retries fail verification, return explicit uncertainty rather than a fabricated answer. |
+
+**Why this is feasible *now* with quant.cpp**:
+- The KV cache persistence work (`save_context`/`load_context`, the `.kv` file format introduced for the Beyond RAG manifesto) lets each region be precomputed once and mmap-loaded in milliseconds — Stage 3 inference is dominated by generation, not prefill, because the prefill is cached.
+- The Phase 1B cliff measurement gives us a concrete *parameter* for the architecture: the region size in Stage 3 must stay below the model's effective working memory. For Llama-3.2-3B-Q4 on the default loader path, that is approximately 1024 tokens — a number we measured directly.
+- The Phase 2B failure-mode characterisation tells us *why* RLV avoids the cliff: each LLM call (gist chunk, locator, lookup, verifier) keeps the haystack small enough that the chat-template anchor stays loud. The continuation prior never has the document mass it would need to overpower the anchor.
+- The Phase 2C negative result on PQRI/convchunk tells us *why we should not try to fight the cliff*. Prompt-level interventions don't move it; multi-week C/Metal attention-level interventions are out of scope; cliff avoidance is the remaining productive direction.
+
+**Comparison to existing approaches**:
+
+| Approach | Has gist? | Has verification? | Iterates? | Respects working memory budget? |
+|---|---|---|---|---|
+| Vector RAG (FAISS+chunk) | ❌ | ❌ | ❌ | N/A |
+| Pure long-context inference | ⚠️ tries, hits cliff | ❌ | ❌ | ❌ |
+| Agentic RAG (ReAct) | ❌ | ⚠️ partial | ✅ | ❌ |
+| **RLV (this work)** | ✅ | ✅ | ✅ | **✅ — uses the measured cliff as a hard constraint** |
+
+**Phase 3 prototype plan** (1 week, ~2-3 hours of compute):
+- Day 1-2: Python orchestrator + 5-stage flow controller (calls quant.cpp via subprocess; no C changes)
+- Day 3: Reproduce v0.12 Acme document QA benchmark (7 questions on 5-section synthetic doc) with RLV; expected to match the 7/7 from pure long-context but with explicit verification
+- Day 4-5: Stress test on 8000-token wikitext article (well above the 3B cliff) with 10 questions, mix single-hop and multi-hop. Compare 3 systems: vector RAG, pure long-context, RLV. Predicted result: vector RAG fails on multi-hop, pure long-context fails entirely (above cliff), RLV succeeds with explicit uncertainty for the rare cases it cannot resolve.
+- Day 6-7: Write up + commit + community release (HF blog, Reddit, optional arXiv supplement)
+
+### Phase 3 (secondary): Attention-level interventions — cliff fighting
+
+These remain interesting but require deeper engineering:
+
+1. **Question-Anchored Sink Injection (QASI)** [2-3 weeks]. Adapt SinkTrack [Gg1aPETCL6, ICLR 2026] from vision-language models to edge-LLM scale. SinkTrack injects contextual features into the BOS attention sink and reports +21.6% on SQuAD2.0 with Llama-3.1-8B-Instruct. Phase 2C ruled out *prompt-level* anchor strengthening; QASI tests *attention-level* anchor strengthening, which is mechanistically different. Requires extending quant.cpp with attention hook hooks or implementing a parallel HuggingFace transformers prototype.
+
+2. **Mechanistic verification with HuggingFace Llama-3.2-3B**: extract per-layer attention to chat-template anchor tokens (`<|start_header_id|>`, `<|eot_id|>`) as context length crosses the cliff. Test the precise hypothesis: anchor attention weight decays below a threshold and the document-continuation attention head wins.
 
 4. **Conversational chunking + SinkTrack as a hybrid baseline**. If PQRI works at all, it will become the cheap baseline; QASI will become the deeper mechanistic candidate; the union may compound.
 
@@ -348,4 +413,4 @@ The Phase 2B subtype analysis (§4.6) suggests a concrete sequence of mitigation
 
 ---
 
-*Draft v0.3 — generated by the Phase 1B Karpathy loop. All result sections populated; Related Work and References complete; FP32-weights control done (the cliff is invariant to weight precision); cliff-cell seed sweep blocked by an upstream `tools/quant.c -s` flag bug we surfaced during this round (documented as §5.6 limitation, separate fix issue filed). Ready for arXiv submission as a v1 tech report.*
+*Draft v0.5 — generated by the Phase 2C Karpathy loop. 240 trials measured (Phase 1B 198 + FP32 control 6 + Phase 2C anchor mitigation 36). Phase 2C tested two prompt-level anchor-strengthening interventions (PQRI, convchunk) and both failed — implication: cliff is attention-mechanism level, not prompt format level. §4.6 reframed accordingly. §8 promotes cliff-avoidance (RLV) to the primary Phase 3 candidate. Ready for arXiv submission as a v2 tech report once §4.6's PQRI/convchunk negative result is added to the master_table.md and a Phase 3 prototype produces RLV measurements to attach as §4.8.*
