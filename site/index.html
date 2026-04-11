@@ -896,7 +896,24 @@ var i18n = {
     "glossary.gguf.term": "GGUF",
     "glossary.gguf.def": "The standard file format for quantized LLM model weights, created by the llama.cpp project. quant.cpp loads GGUF models directly.",
     "cta.title": "Try It Yourself",
-    "cta.desc": "Three lines of Python. No GPU, no API key, no setup."
+    "cta.desc": "Three lines of Python. No GPU, no API key, no setup.",
+    "rag.label": "Movement",
+    "rag.title": "Beyond RAG",
+    "rag.intro": "Traditional RAG splits documents into 512-token chunks, embeds them in a vector database, and retrieves fragments. This was a reasonable engineering compromise when LLMs had 2K context windows. <strong>Now they have 128K. The compromise should have started disappearing.</strong>",
+    "rag.viz.title": "Chunk-Level RAG vs Document-Level RAG",
+    "rag.chunk.title": "Chunk-Level RAG",
+    "rag.chunk.result": "✗ Cross-page info lost",
+    "rag.doc.title": "Document-Level RAG",
+    "rag.doc.result": "✓ Full document understanding",
+    "rag.complementary.title": "Complementary, Not Competitive",
+    "rag.complementary.desc": "RAG decides <strong>which documents</strong> to look at. Long-context decides <strong>how deeply</strong> to understand them. Each does what it's best at.",
+    "rag.card1.t": "RAG's weakness → Long-Context solves",
+    "rag.card1.d": "Chunk boundaries lose cross-page relationships. Multi-hop reasoning fails. Long-context keeps the full document — no information loss.",
+    "rag.card2.t": "Long-Context's weakness → RAG solves",
+    "rag.card2.d": "Can't fit 100K documents in context. Prefill is slow. RAG narrows the search to 2-3 relevant documents that DO fit.",
+    "rag.card3.t": "Read Once, Query Forever",
+    "rag.card3.d": "Pre-process documents into .kv files (GPU, once). Load instantly on any laptop (0.5s). Query offline, unlimited, private.",
+    "rag.pipeline.title": "Pre-computed KV Library Pattern"
   },
   ko: {
     "nav.problem": "\uBB38\uC81C\uC810",
@@ -1043,7 +1060,24 @@ var i18n = {
     "glossary.gguf.term": "GGUF",
     "glossary.gguf.def": "\uC591\uC790\uD654\uB41C LLM \uBAA8\uB378 \uAC00\uC911\uCE58\uC758 \uD45C\uC900 \uD30C\uC77C \uD615\uC2DD. llama.cpp \uD504\uB85C\uC81D\uD2B8\uC5D0\uC11C \uB9CC\uB4E4\uC5C8\uC2B5\uB2C8\uB2E4. quant.cpp\uB294 GGUF \uBAA8\uB378\uC744 \uC9C1\uC811 \uB85C\uB4DC\uD569\uB2C8\uB2E4.",
     "cta.title": "\uC9C1\uC811 \uD574\uBCF4\uAE30",
-    "cta.desc": "Python 3\uC904. GPU\uB3C4, API \uD0A4\uB3C4, \uC124\uCE58\uB3C4 \uD544\uC694 \uC5C6\uC2B5\uB2C8\uB2E4."
+    "cta.desc": "Python 3\uC904. GPU\uB3C4, API \uD0A4\uB3C4, \uC124\uCE58\uB3C4 \uD544\uC694 \uC5C6\uC2B5\uB2C8\uB2E4.",
+    "rag.label": "운동",
+    "rag.title": "Beyond RAG",
+    "rag.intro": "전통적인 RAG는 문서를 512토큰 청크로 나누고, 벡터 DB에 임베딩하고, 조각을 검색합니다. 이것은 LLM이 2K 컨텍스트만 가졌을 때 합리적인 엔지니어링 타협이었습니다. <strong>지금은 128K입니다. 그 타협은 사라지기 시작했어야 합니다.</strong>",
+    "rag.viz.title": "Chunk-Level RAG vs Document-Level RAG",
+    "rag.chunk.title": "Chunk-Level RAG",
+    "rag.chunk.result": "✗ 페이지 간 정보 손실",
+    "rag.doc.title": "Document-Level RAG",
+    "rag.doc.result": "✓ 전체 문서 이해",
+    "rag.complementary.title": "경쟁이 아닌 상호 보완",
+    "rag.complementary.desc": "RAG는 <strong>어떤 문서를</strong> 볼지 결정합니다. Long-context는 <strong>얼마나 깊이</strong> 이해할지 결정합니다. 각자 잘하는 것을 합니다.",
+    "rag.card1.t": "RAG의 약점 → Long-Context가 해결",
+    "rag.card1.d": "청크 경계에서 페이지 간 관계가 사라집니다. Multi-hop 추론은 실패합니다. Long-context는 전체 문서를 유지합니다 — 정보 손실 없음.",
+    "rag.card2.t": "Long-Context의 약점 → RAG가 해결",
+    "rag.card2.d": "100K 문서를 한 번에 컨텍스트에 넣을 수 없습니다. Prefill이 느립니다. RAG는 검색을 2-3개 관련 문서로 좁혀줍니다.",
+    "rag.card3.t": "한 번 읽고, 영원히 질문",
+    "rag.card3.d": "문서를 .kv 파일로 사전 처리 (GPU, 1회). 어떤 노트북에서든 즉시 로드 (0.5초). 오프라인, 무제한, 프라이빗 질문.",
+    "rag.pipeline.title": "사전 계산된 KV 라이브러리 패턴"
   }
 };
 
