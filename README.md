@@ -149,7 +149,9 @@ The bug was using the same tool for both. The fix is using each for what it's go
 **Full benchmark report:** [bench/results/document_level_rag_breakthrough.md](bench/results/document_level_rag_breakthrough.md)
 **Manifesto:** [docs/beyond-rag-manifesto.md](docs/beyond-rag-manifesto.md)
 
-> **Honest disclaimer:** v1 is a synthetic 5-section document with 7 questions on a single 3B model. We're not claiming this is LongBench. We *are* claiming it's enough to start a conversation about the failure mode chunk-RAG has been hiding. v2 with real benchmarks is in progress.
+> **Honest disclaimer:** v1 is a synthetic 5-section document with 7 questions on a single 3B model. We're not claiming this is LongBench. We *are* claiming it's enough to start a conversation about the failure mode chunk-RAG has been hiding.
+
+> **v2 update — the Working Memory Cliff (2026-04-11):** We followed up the v1 result with 204 NIAH trials across 1B and 3B at context lengths 256–2048, plus a 6-trial FP32-weights control. Both models hit a sharp cliff at **less than 1% of their nominal 128K context window** (1B Q8 at 512–1024, 3B Q4 at 1024–1280 *as a step function*). The 6.4× KV compression is bit-for-bit identical to FP32 baseline in 18 of 20 cells, so the cliff is a model property — not a KV property and not a weight-quantization artifact. The honest reframing: Beyond RAG works for documents that fit in the model's *effective* working memory, which is 2–3 orders of magnitude smaller than the nominal context window. Full tech report: [`docs/paper/working-memory-cliff.md`](docs/paper/working-memory-cliff.md). HF blog post draft: [`docs/paper/hf-blog-draft.md`](docs/paper/hf-blog-draft.md).
 
 ---
 

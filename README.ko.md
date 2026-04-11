@@ -58,6 +58,8 @@ Chunk-RAG가 잘못된 섹션을 검색하면, 모델은 **"모른다"고 하지
 
 **핵심**: KV 압축은 단순한 메모리 절감이 아니라 **근본적으로 다른 RAG 접근**을 가능하게 합니다. RAG는 "어떤 문서를 볼지" 결정하고, long-context는 "그 문서를 얼마나 깊이 이해할지" 결정합니다. 전체 결과: [bench/results/document_level_rag_breakthrough.md](bench/results/document_level_rag_breakthrough.md)
 
+> **v2 후속 — Working Memory Cliff (2026-04-11)**: v1 결과를 더 큰 grid로 확장 측정했습니다 (1B/3B 모델, ctx 256-2048, 204 NIAH trials + FP32-weights 통제 실험). 두 모델 모두 명목 128K context window의 **1% 미만**에서 sharp cliff가 존재합니다 (1B Q8 cliff 512-1024, 3B Q4 cliff 1024-1280을 **step function**으로). 6.4× KV 압축은 20개 cell 중 18개에서 fp32 baseline과 bit-for-bit 일치 — cliff는 model property이지 KV/weight quantization artifact가 아닙니다. 정직한 재해석: Beyond RAG는 *유효* working memory 안에 들어가는 문서에 대해서만 동작하며, 그 크기는 명목 context window의 100분의 1에서 1000분의 1입니다. 전체 tech report: [`docs/paper/working-memory-cliff.md`](docs/paper/working-memory-cliff.md). HuggingFace blog post draft: [`docs/paper/hf-blog-draft.md`](docs/paper/hf-blog-draft.md).
+
 ---
 
 ## 왜 quant.cpp인가?

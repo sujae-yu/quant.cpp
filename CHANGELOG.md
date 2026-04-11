@@ -1,5 +1,29 @@
 # Changelog
 
+## [Unreleased]
+
+### Research — Working Memory Cliff tech report (Phase 1B)
+
+We measured 204 NIAH trials across Llama-3.2-1B-Q8 and Llama-3.2-3B-Q4 to find where the "long-context replaces RAG" framing actually holds at edge-device scale. Both models exhibit a sharp cliff at less than 1% of their nominal 128K context window:
+
+- **Llama-3.2-1B-Q8**: 100% retrieval at ctx=512, 44% at ctx=1024, 0% by ctx=1536 (graded cliff)
+- **Llama-3.2-3B-Q4**: 100% at ctx=1024, 0% at ctx=1280 (**step function cliff**, no degradation interval)
+
+A 6-trial FP32-weights control (`TQ_NO_Q4=1`) confirms the cliff sits in the **same place** when on-the-fly weight requantization is disabled — the cliff is a model property, not a quantization artifact. 6.4× KV compression is bit-for-bit identical to FP32 baseline in 18 of 20 cells. The cliff is also independent of the KV cache.
+
+Above the cliff, the dominant failure mode is **synthesised hallucination** — the model fuses the planted needle into the haystack subject's biography (e.g., "In 2023 Boulter was hired as the chief financial officer..." where Boulter is the wikitext subject and Sarah Chen is the needle). This is the same silent-hallucination failure that vector RAG produces on retrieval miss, occurring in the regime that was supposed to *eliminate* it.
+
+The honest reframing of v0.12's Beyond RAG result: it works for documents that fit in the model's *effective* working memory, which is two to three orders of magnitude smaller than the nominal context window for the configurations we measured.
+
+- 📄 Tech report: [`docs/paper/working-memory-cliff.md`](docs/paper/working-memory-cliff.md)
+- 📊 Master table: [`bench/results/niah/master_table.md`](bench/results/niah/master_table.md)
+- 🐦 Launch thread: [`docs/paper/twitter-thread.md`](docs/paper/twitter-thread.md)
+- 📝 HF blog draft: [`docs/paper/hf-blog-draft.md`](docs/paper/hf-blog-draft.md)
+
+### Fixed
+
+- **`-s <seed>` CLI flag**: documented in `--help` since the project's first release but never actually wired up. Passing `-s 42` previously fell through to the positional-arg branch and was parsed as a model path (`Loading model from 42... cannot open '42'`). Discovered while attempting a sampled NIAH seed sweep for the Working Memory Cliff tech report; fixed in `a8f6d8a`. Backwards compatible: callers that don't pass `-s` get bit-identical behaviour.
+
 ## [0.12.0] — 2026-04-11 — Beyond RAG
 
 > **Chunking RAG was a workaround for small context windows.**
