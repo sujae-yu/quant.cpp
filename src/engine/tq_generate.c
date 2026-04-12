@@ -219,12 +219,22 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
 
     if (tokenizer && prompt) {
         /* BOS token handling:
-         * Gemma 3/4: BOS=2 (required)
-         * LLaMA 3: BOS=128000 (<|begin_of_text|>) — but tokenizer usually adds it
-         * Qwen3.5: no BOS needed */
+         * Gemma 3/4: model_type==1, BOS=2 (required)
+         * Phi-3 / LLaMA 2: vocab has <s> as BOS (required)
+         * LLaMA 3: BOS=128000 (<|begin_of_text|>) — tq_encode lookup chain handles it
+         * Qwen3.5 / GPT-2 BPE: no native BOS, skip */
         int add_bos = 0;
         if (model->config.model_type == 1) {
             add_bos = 1; /* Gemma: always prepend BOS=2 */
+        } else {
+            /* Auto-detect: if vocab[0..7] contains <s>, add BOS.
+             * This covers Phi-3, LLaMA 2, and any future model
+             * that uses <s> as BOS without needing model-specific flags. */
+            for (int i = 0; i < tokenizer->vocab_size && i < 8; i++) {
+                if (tokenizer->vocab[i] && strcmp(tokenizer->vocab[i], "<s>") == 0) {
+                    add_bos = 1; break;
+                }
+            }
         }
         n_prompt = tq_encode(tokenizer, prompt, prompt_tokens, 4096, add_bos);
     } else {
@@ -645,7 +655,16 @@ int tq_generate_continue(tq_model_t* model,
     if (!new_tokens) return -1;
     int n_new = 0;
     if (tokenizer && prompt) {
-        int add_bos = (model->config.model_type == 1) ? 1 : 0;
+        int add_bos = 0;
+        if (model->config.model_type == 1) {
+            add_bos = 1;
+        } else {
+            for (int i = 0; i < tokenizer->vocab_size && i < 8; i++) {
+                if (tokenizer->vocab[i] && strcmp(tokenizer->vocab[i], "<s>") == 0) {
+                    add_bos = 1; break;
+                }
+            }
+        }
         n_new = tq_encode(tokenizer, prompt, new_tokens, max_prompt, add_bos);
     }
     if (n_new <= 0) {
@@ -905,6 +924,7 @@ static int chat_find_marker(const char* h, int hlen, const char* m) {
 static const char* const CHAT_END_MARKERS[] = {
     "<|im_end|>", "<|eot_id|>", "<end_of_turn>", "<|endoftext|>",
     "<|im_start|>", "<|start_header_id|>", "<|eom_id|>",
+    "</s>", "<|end|>",
     NULL,
 };
 
