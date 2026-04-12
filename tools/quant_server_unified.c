@@ -41,14 +41,20 @@ typedef struct {
     int          port;
     int          n_threads;
     int          has_fused_qkv;   /* Phi-3 detection */
+    int          template_type;   /* TMPL_CHATML / TMPL_PHI3 / TMPL_GEMMA */
     pthread_mutex_t mutex;
 } server_t;
 
 /* ============================================================
  * Chat template
  * ============================================================ */
+/* Template types: 0=ChatML (Qwen/Llama), 1=Phi-3, 2=Gemma */
+#define TMPL_CHATML  0
+#define TMPL_PHI3    1
+#define TMPL_GEMMA   2
+
 static char* build_prompt(const char** roles, const char** contents,
-                           int n_msgs, int is_phi3) {
+                           int n_msgs, int template_type) {
     size_t total = 256;
     for (int i = 0; i < n_msgs; i++)
         total += 64 + (contents[i] ? strlen(contents[i]) : 0);
@@ -61,20 +67,31 @@ static char* build_prompt(const char** roles, const char** contents,
     for (int i = 0; i < n_msgs; i++) {
         const char* c = contents[i] ? contents[i] : "";
         int n;
-        if (is_phi3) {
+        if (template_type == TMPL_PHI3) {
             if (strcmp(roles[i], "system") == 0)
                 n = snprintf(w, rem, "<|system|>\n%s<|end|>\n", c);
             else if (strcmp(roles[i], "user") == 0)
                 n = snprintf(w, rem, "<|user|>\n%s<|end|>\n", c);
             else
                 n = snprintf(w, rem, "<|assistant|>\n%s<|end|>\n", c);
+        } else if (template_type == TMPL_GEMMA) {
+            /* Gemma: <start_of_turn>user\n...<end_of_turn>\n */
+            if (strcmp(roles[i], "system") == 0)
+                n = snprintf(w, rem, "<start_of_turn>user\n%s<end_of_turn>\n", c);
+            else if (strcmp(roles[i], "user") == 0)
+                n = snprintf(w, rem, "<start_of_turn>user\n%s<end_of_turn>\n", c);
+            else
+                n = snprintf(w, rem, "<start_of_turn>model\n%s<end_of_turn>\n", c);
         } else {
+            /* ChatML: <|im_start|>role\n...<|im_end|>\n */
             n = snprintf(w, rem, "<|im_start|>%s\n%s<|im_end|>\n", roles[i], c);
         }
         if (n > 0 && (size_t)n < rem) { w += n; rem -= (size_t)n; }
     }
-    if (is_phi3)
+    if (template_type == TMPL_PHI3)
         snprintf(w, rem, "<|assistant|>\n");
+    else if (template_type == TMPL_GEMMA)
+        snprintf(w, rem, "<start_of_turn>model\n");
     else
         snprintf(w, rem, "<|im_start|>assistant\n");
 
@@ -223,11 +240,13 @@ static void stream_on_token(const char* text, void* user_data) {
     stream_ctx_t* sc = (stream_ctx_t*)user_data;
     if (!text || !text[0]) return;
 
-    /* Skip template tokens */
+    /* Skip template tokens (all supported chat formats) */
     if (strstr(text, "<|end|>") || strstr(text, "<|assistant|>") ||
         strstr(text, "<|user|>") || strstr(text, "<|system|>") ||
         strstr(text, "<|im_end|>") || strstr(text, "<|im_start|>") ||
-        strstr(text, "<|endoftext|>")) return;
+        strstr(text, "<|endoftext|>") ||
+        strstr(text, "<start_of_turn>") || strstr(text, "<end_of_turn>") ||
+        strstr(text, "<eos>")) return;
 
     /* JSON-escape the token */
     char escaped[1024];
@@ -257,11 +276,13 @@ static void collect_on_token(const char* text, void* user_data) {
     collect_ctx_t* cc = (collect_ctx_t*)user_data;
     if (!text || !text[0]) return;
 
-    /* Skip template tokens */
+    /* Skip template tokens (all supported chat formats) */
     if (strstr(text, "<|end|>") || strstr(text, "<|assistant|>") ||
         strstr(text, "<|user|>") || strstr(text, "<|system|>") ||
         strstr(text, "<|im_end|>") || strstr(text, "<|im_start|>") ||
-        strstr(text, "<|endoftext|>")) return;
+        strstr(text, "<|endoftext|>") ||
+        strstr(text, "<start_of_turn>") || strstr(text, "<end_of_turn>") ||
+        strstr(text, "<eos>")) return;
 
     size_t tlen = strlen(text);
     if (cc->len + tlen >= cc->cap) {
@@ -364,7 +385,7 @@ static void handle_request(server_t* srv, int fd) {
         }
 
         /* Build prompt */
-        char* prompt = build_prompt(roles, contents, n_msgs, srv->has_fused_qkv);
+        char* prompt = build_prompt(roles, contents, n_msgs, srv->template_type);
 
         /* Generate completion ID — unique per request (A14: timestamp + counter) */
         static int req_counter = 0;
@@ -546,17 +567,20 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    /* Detect Phi-3 architecture by checking if the model loaded fused QKV.
-     * We do a quick test: try a dummy generate to see if model works. */
-    /* Simple heuristic: check model_path for "phi" */
-    int has_fused_qkv = 0;
+    /* Detect model architecture for chat template selection.
+     * Check model filename for architecture hints. */
+    int template_type = TMPL_CHATML;  /* default */
     const char* bn = strrchr(model_path, '/');
     bn = bn ? bn + 1 : model_path;
     if (strstr(bn, "hi-3") || strstr(bn, "hi3") || strstr(bn, "Hi-3") || strstr(bn, "Hi3") ||
         strstr(bn, "phi-3") || strstr(bn, "phi3") || strstr(bn, "Phi-3") || strstr(bn, "Phi3")) {
-        has_fused_qkv = 1;
+        template_type = TMPL_PHI3;
         fprintf(stderr, "Detected Phi-3 model — using Phi-3 chat template\n");
+    } else if (strstr(bn, "gemma") || strstr(bn, "Gemma")) {
+        template_type = TMPL_GEMMA;
+        fprintf(stderr, "Detected Gemma model — using Gemma chat template\n");
     }
+    int has_fused_qkv = (template_type == TMPL_PHI3) ? 1 : 0;
 
     /* Extract model ID from filename */
     char model_id[256];
@@ -570,6 +594,7 @@ int main(int argc, char** argv) {
         .port = port,
         .n_threads = n_threads,
         .has_fused_qkv = has_fused_qkv,
+        .template_type = template_type,
     };
     pthread_mutex_init(&srv.mutex, NULL);
 
@@ -603,7 +628,8 @@ int main(int argc, char** argv) {
     fprintf(stderr, "\nquant-server-unified listening on http://0.0.0.0:%d\n", port);
     fprintf(stderr, "  Model: %s\n", model_id);
     fprintf(stderr, "  Threads: %d\n", n_threads);
-    fprintf(stderr, "  Template: %s\n", has_fused_qkv ? "phi3" : "chatml");
+    const char* tmpl_names[] = {"chatml", "phi3", "gemma"};
+    fprintf(stderr, "  Template: %s\n", tmpl_names[template_type]);
     fprintf(stderr, "  POST /v1/chat/completions\n");
     fprintf(stderr, "  GET  /v1/models\n");
     fprintf(stderr, "  GET  /health\n\n");

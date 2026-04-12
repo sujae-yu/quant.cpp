@@ -8364,6 +8364,74 @@ int tq_encode(const tq_tokenizer_t* tok, const char* text,
 
     if (*text == '\0') return n_tokens;
 
+    /* Pre-pass: split text on special tokens BEFORE BPE encoding.
+     *
+     * GPT-2/Qwen tokenizers have "added_tokens" (e.g., <|im_start|>,
+     * <|im_end|>, <|endoftext|>) that must be matched as WHOLE strings
+     * and mapped to their token IDs directly — NOT decomposed by BPE.
+     *
+     * Without this, `<|im_start|>` gets BPE'd into `<`, `|`, `im`,
+     * `_start`, `|`, `>` (6 tokens) instead of a single ID (151644).
+     * The model was trained to see the single ID, so BPE fragments
+     * produce garbage output. */
+    {
+        /* Known special tokens that must be matched verbatim.
+         * We scan for ANY vocab entry that starts with `<|` and ends
+         * with `|>` — this covers all Qwen/GPT added_tokens without
+         * a hardcoded list. For SentencePiece models (Gemma, Phi-3)
+         * this also handles `<bos>`, `<eos>`, etc. */
+        const char* p = text;
+        while (*p && n_tokens < max_tokens) {
+            /* Check if position p starts a special token */
+            if (*p == '<') {
+                int best_len = 0;
+                int best_id = -1;
+                /* Try matching known patterns: <|...|>, <...> */
+                for (int slen = 3; slen <= 32 && p + slen <= text + strlen(text); slen++) {
+                    if (p[slen - 1] == '>') {
+                        char buf[64];
+                        if (slen >= (int)sizeof(buf)) break;
+                        memcpy(buf, p, (size_t)slen);
+                        buf[slen] = '\0';
+                        int id = str_lookup(tok, buf);
+                        if (id >= 0 && slen > best_len) {
+                            best_len = slen;
+                            best_id = id;
+                        }
+                    }
+                }
+                if (best_id >= 0) {
+                    /* Found a special token — emit it directly and
+                     * recursively encode any text before/after it. */
+                    if (p > text) {
+                        /* Encode the prefix (normal text before this special token) */
+                        char* prefix = (char*)malloc((size_t)(p - text) + 1);
+                        if (prefix) {
+                            memcpy(prefix, text, (size_t)(p - text));
+                            prefix[p - text] = '\0';
+                            n_tokens += tq_encode(tok, prefix,
+                                                   tokens + n_tokens,
+                                                   max_tokens - n_tokens, 0);
+                            free(prefix);
+                        }
+                    }
+                    tokens[n_tokens++] = best_id;
+                    /* Recurse on the remaining text after the special token */
+                    const char* rest = p + best_len;
+                    if (*rest) {
+                        n_tokens += tq_encode(tok, rest,
+                                               tokens + n_tokens,
+                                               max_tokens - n_tokens, 0);
+                    }
+                    return n_tokens;
+                }
+            }
+            p++;
+        }
+    }
+
+    /* No special tokens found — proceed with standard BPE encoding */
+
     /* Detect tokenizer style: Gemma uses ▁ (U+2581) for spaces in vocab,
      * GPT2/Qwen uses byte-level BPE with Ġ/ĉ encoding.
      * Check if '▁' exists in vocab as a simple heuristic. */
@@ -11394,8 +11462,9 @@ tq_model_t* tq_load_gguf(const char* path) {
                                tq_gguf_get_f32(gguf, GGUF_KEY("rope.freq_base"), 10000.0f)));
     c->final_logit_softcap = tq_gguf_get_f32(gguf, GGUF_KEY("final_logit_softcapping"), 0.0f);
     c->attn_logit_softcap = tq_gguf_get_f32(gguf, GGUF_KEY("attn_logit_softcapping"), 0.0f);
-    /* Gemma 2/3/4 use attention softcap but it may not be in metadata — hardcode */
-    if (c->model_type == 1 && c->attn_logit_softcap == 0.0f) {
+    /* Gemma 2/3 use attention softcap (50.0) but Gemma 4 does NOT.
+     * Only apply hardcoded default for non-Gemma4 Gemma models. */
+    if (c->model_type == 1 && !c->is_gemma4 && c->attn_logit_softcap == 0.0f) {
         c->attn_logit_softcap = 50.0f;
     }
 
@@ -11449,10 +11518,15 @@ tq_model_t* tq_load_gguf(const char* path) {
         c->head_dim = c->hidden_dim / c->n_heads;
     }
 
-    /* For hybrid sliding/full attention (Gemma 4):
+    /* For hybrid sliding/full attention (Gemma 3/4 ONLY):
      * Override head_dim from first layer's K tensor shape (sliding layer),
-     * since sliding layers are the majority and determine KV cache layout. */
-    {
+     * since sliding layers are the majority and determine KV cache layout.
+     *
+     * MUST be gated to Gemma arch — running unconditionally breaks Qwen3
+     * (head_dim=128 gets overridden to 64 because 1024/64=16 passes the
+     * "hd < metadata_head_dim" check while 1024/128=8 doesn't). */
+    int is_gemma_arch = (strstr(gguf->arch, "gemma") != NULL);
+    if (is_gemma_arch) {
         const tq_gguf_tensor_t* k0 = tq_gguf_find_tensor(gguf, "blk.0.attn_k.weight");
         if (k0 && k0->n_dims >= 2) {
             int k_out = (int)k0->shape[1];
@@ -11517,12 +11591,11 @@ tq_model_t* tq_load_gguf(const char* path) {
         /* Gemma 4 (STEP35) detection: architecture string is "gemma4" */
         if (strstr(gguf->arch, "gemma4") != NULL) {
             c->is_gemma4 = 1;
-            /* STEP35: full attention layers use half the RoPE dimensions */
-            if (c->rope_n_dims_full > 0) {
-                c->rope_n_dims_full = c->rope_n_dims_full / 2;
-            }
+            /* Gemma 4: full attention layers use rope.dimension_count directly.
+             * Do NOT halve — split-source (tq_model.c) correctly keeps full=512.
+             * The /2 was a misport that caused garbage output. */
             fprintf(stderr, "tq_load_gguf: Gemma4 — RoPE dims swa=%d full=%d, "
-                    "GeGLU, rope_freqs for full layers only\n",
+                    "SiLU FFN, rope_freqs for full layers only\n",
                     c->rope_n_dims, c->rope_n_dims_full);
         }
         fprintf(stderr, "tq_load_gguf: Gemma family detected (sliding_window=%d)\n", c->sliding_window);
