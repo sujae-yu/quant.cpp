@@ -28,6 +28,7 @@ REPO = Path(__file__).resolve().parent.parent.parent.parent
 # that produced garbage for Phi-3.5/SmolLM2. The unified server compiles
 # quant.h as a single translation unit — no sync issues.
 # Phi-3.5: ~1.15 tok/s (CPU NEON), ~6.5 tok/s reported in PR #79.
+# Q8_0 is 2x faster than Q4_K_M on NEON (simpler dequant, 3.0 vs 1.5 tok/s).
 DEFAULT_MODEL = REPO / "models" / "Phi-3.5-mini-instruct-Q8_0.gguf"
 DEFAULT_SERVER_BINARY = REPO / "build_metal" / "quant-server-unified"
 DEFAULT_SERVER_HOST = "127.0.0.1"

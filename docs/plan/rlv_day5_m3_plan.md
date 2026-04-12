@@ -70,9 +70,11 @@ TQ_NO_METAL 환경변수 코드 제거 (더 이상 불필요):
 
 ### 2.3 Phi-3.5 모델 다운로드
 ```bash
-curl -L -o models/Phi-3.5-mini-instruct-Q4_K_M.gguf \
-  "https://huggingface.co/bartowski/Phi-3.5-mini-instruct-GGUF/resolve/main/Phi-3.5-mini-instruct-Q4_K_M.gguf"
-# ~2.2GB
+# Q8_0 사용 (Q4_K_M 대비 2배 빠름: 3.0 vs 1.5 tok/s on NEON)
+# Q8_0은 단순 int8 dequant라 NEON SIMD에서 효율적, Q4_K_M은 복잡한 super-block 구조
+curl -L -o models/Phi-3.5-mini-instruct-Q8_0.gguf \
+  "https://huggingface.co/bartowski/Phi-3.5-mini-instruct-GGUF/resolve/main/Phi-3.5-mini-instruct-Q8_0.gguf"
+# ~3.8GB
 ```
 
 ### 2.4 unified 서버 빌드
