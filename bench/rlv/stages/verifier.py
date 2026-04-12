@@ -165,36 +165,8 @@ def _literal_verify(
     if len(answer) < 200 and any(p in answer_head for p in refusal_phrases):
         return "UNSURE", f"answer is a refusal ('{answer[:60]}...')"
 
-    # Phase A-2: Answer-Question alignment check.
-    # The answer must actually ADDRESS the question type. An answer that
-    # contains region-grounded facts but doesn't answer the specific
-    # question is "related but wrong" — the hardest hallucination to catch.
-    # This is RLV's core differentiator: detecting WRONG answers, not just
-    # fabricated ones.
-    q_lower = question.lower()
-    answer_norm = answer.lower()
-
-    # "When/what year/what date" → answer must contain a year or date
-    if re.search(r'\b(what year|in what year|when did|what date|on what date)\b', q_lower):
-        has_year = bool(re.search(r'\b(1[0-9]{3}|20[0-9]{2})\b', answer))
-        has_month = bool(re.search(r'\b(january|february|march|april|may|june|july|august|september|october|november|december)\b', answer.lower()))
-        if not has_year and not has_month:
-            return "UNSURE", f"temporal question but answer has no year/date"
-
-    # "After/before which battle/event" → answer must name a specific event
-    # AND the answer must contain an event-type word (battle, war, etc.)
-    # "They were modernized in 1934" doesn't answer "after which battle?"
-    if re.search(r'\b(which battle|after which battle|what battle|which war|after which war)\b', q_lower):
-        event_words = ["battle", "war", "rebellion", "siege", "campaign", "invasion", "attack", "offensive"]
-        has_event_word = any(w in answer.lower() for w in event_words)
-        if not has_event_word:
-            return "UNSURE", f"battle/war question but answer names no battle/war"
-
-    # "What does X mean" → answer should contain a definition signal
-    if re.search(r'\b(what does|what is the meaning|what does the (?:name|word|term))\b', q_lower):
-        has_def = any(w in answer.lower() for w in ["means", "meaning", "refers to", "derived from", "to cut", "headed"])
-        if not has_def and len(answer) < 150:
-            return "UNSURE", f"definition question but answer lacks definition"
+    # Phase A-2: removed hardcoded type-specific alignment checks.
+    # The universal LLM coherence check in verify() handles this properly.
 
     word_terms, number_terms = _extract_answer_key_terms(answer)
     if not word_terms and not number_terms:
@@ -268,6 +240,54 @@ def verify(
             question, answer, region_text,
             chunk_id=chunk_id, gist=gist,
         )
+        if verdict == "CONFIDENT":
+            # Phase A-2: LLM coherence check — the CORE of RLV's value.
+            # ONE universal prompt, no type-specific branching.
+            #
+            # Speed optimization: skip coherence for high-confidence answers.
+            # - "[NONE]" answers: instant UNSURE (model already said it can't answer)
+            # - Short specific answers (names, numbers): fast-accept
+            # - Vague/generic answers: require coherence check
+            answer_stripped = answer.strip()
+
+            # Self-check: model said NONE → instant UNSURE
+            if answer_stripped.startswith("[NONE]"):
+                if verbose:
+                    print(f"[verifier] model self-check: NONE → UNSURE")
+                return VerifyResult(verdict="UNSURE", reason="model self-check: NONE", method="self-check")
+
+            # Fast-accept: short answer with specific entity (name/number/date)
+            # These are almost always correct when literal check passes
+            is_specific = (
+                len(answer_stripped) < 80 and
+                (bool(re.search(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b', answer_stripped)) or  # proper noun
+                 bool(re.search(r'\b\d{3,4}\b', answer_stripped)))  # year/number
+            )
+            if is_specific:
+                if verbose:
+                    print(f"[verifier] fast-accept: specific answer ({answer_stripped[:40]})")
+                return VerifyResult(verdict="CONFIDENT", reason=reason, method="literal+fast-accept")
+
+            # Generic/vague answer → LLM coherence check required
+            coherence_prompt = (
+                f"A user asked: \"{question}\"\n"
+                f"The system answered: \"{answer[:200]}\"\n\n"
+                f"Is the user's specific question answered? "
+                f"Not just related information, but the EXACT thing asked. "
+                f"YES or NO."
+            )
+            coherence_result = _llm.llm_call(coherence_prompt, max_tokens=4)
+            coherence_text = coherence_result.text.strip().lower()[:10]
+            if verbose:
+                print(f"[verifier] coherence check: {coherence_text!r}")
+            if "no" in coherence_text and "yes" not in coherence_text:
+                return VerifyResult(
+                    verdict="UNSURE",
+                    reason=f"literal:CONFIDENT but coherence:NO ({reason})",
+                    method="literal+coherence",
+                )
+            return VerifyResult(verdict="CONFIDENT", reason=reason, method="literal+coherence")
+
         if verdict != "UNSURE" or not use_llm_fallback:
             if verbose:
                 print(f"[verifier] literal -> {verdict} ({reason})")
