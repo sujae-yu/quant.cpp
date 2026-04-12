@@ -64,7 +64,17 @@ def research(
                 print(f"[researcher] locator returned excluded chunk {new_region.chunk_id}, stopping")
             break
 
-        new_lookup = lookup.lookup(question, new_region, doc_text, verbose=verbose)
+        try:
+            new_lookup = lookup.lookup(question, new_region, doc_text, verbose=verbose)
+        except Exception as e:
+            if verbose:
+                print(f"[researcher] lookup exception on chunk {new_region.chunk_id}: {e}")
+            excluded.append(new_region.chunk_id)
+            attempts.append({
+                "chunk": new_region.chunk_id, "answer": f"[EXCEPTION: {e}]",
+                "verdict": "ERROR", "reason": str(e),
+            })
+            continue
 
         # Skip verification if lookup returned an error (server crash/timeout)
         if new_lookup.method == "error":
@@ -104,9 +114,20 @@ def research(
 
         excluded.append(new_lookup.chunk_id)
 
-    # All retries exhausted. Return the best uncertain answer with explicit
-    # uncertainty marker. The orchestrator will format the final output.
-    last = attempts[-1]
+    # All retries exhausted (A13: explicit logging when all chunks tried)
+    if verbose:
+        n_available = len(gist.chunks)
+        n_tried = len(excluded)
+        print(f"[researcher] exhausted: tried {n_tried}/{n_available} chunks, "
+              f"no CONFIDENT answer found")
+
+    # Return the best uncertain answer. Prefer non-error, non-refusal answers.
+    best = attempts[-1]
+    for a in attempts:
+        if a["verdict"] not in ("ERROR", "CONTRADICTED"):
+            best = a
+            break
+    last = best
     return ResearchResult(
         final_answer=last["answer"],
         final_verdict="EXHAUSTED",

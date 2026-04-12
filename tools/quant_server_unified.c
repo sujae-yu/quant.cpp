@@ -278,15 +278,22 @@ static void collect_on_token(const char* text, void* user_data) {
  * Request handler
  * ============================================================ */
 static void handle_request(server_t* srv, int fd) {
+    /* B12: set read timeout to prevent slow-loris attacks.
+     * If client sends headers byte-by-byte with long pauses, we bail after 30s. */
+    struct timeval tv = { .tv_sec = 30, .tv_usec = 0 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
     char header[MAX_HEADER];
     int hlen = 0;
     while (hlen < MAX_HEADER - 1) {
         int n = read(fd, header + hlen, 1);
-        if (n <= 0) break;
+        if (n <= 0) break;  /* connection closed or timeout */
         hlen++;
         if (hlen >= 4 && memcmp(header + hlen - 4, "\r\n\r\n", 4) == 0) break;
     }
     header[hlen] = '\0';
+
+    if (hlen == 0) return;  /* empty request — client disconnected */
 
     /* Parse method and path */
     char method[8] = {0}, path[256] = {0};
@@ -359,9 +366,11 @@ static void handle_request(server_t* srv, int fd) {
         /* Build prompt */
         char* prompt = build_prompt(roles, contents, n_msgs, srv->has_fused_qkv);
 
-        /* Generate completion ID */
-        char comp_id[32];
-        snprintf(comp_id, sizeof(comp_id), "chatcmpl-%lx", (long)time(NULL));
+        /* Generate completion ID — unique per request (A14: timestamp + counter) */
+        static int req_counter = 0;
+        char comp_id[48];
+        snprintf(comp_id, sizeof(comp_id), "chatcmpl-%lx-%04x",
+                 (long)time(NULL), (++req_counter) & 0xFFFF);
 
         fprintf(stderr, "[%s] POST /v1/chat/completions msgs=%d max_tokens=%d stream=%d\n",
                 comp_id, n_msgs, max_tokens, stream);
@@ -495,6 +504,16 @@ int main(int argc, char** argv) {
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) port = atoi(argv[++i]);
         else if (strcmp(argv[i], "-j") == 0 && i + 1 < argc) n_threads = atoi(argv[++i]);
+    }
+
+    /* C6: validate port range */
+    if (port < 1 || port > 65535) {
+        fprintf(stderr, "Invalid port: %d (must be 1-65535)\n", port);
+        return 1;
+    }
+    if (n_threads < 1 || n_threads > 256) {
+        fprintf(stderr, "Invalid thread count: %d (must be 1-256)\n", n_threads);
+        return 1;
     }
 
     fprintf(stderr, "Loading %s ...\n", model_path);

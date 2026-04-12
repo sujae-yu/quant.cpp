@@ -212,6 +212,27 @@ def stop_server():
 DEFAULT_SYSTEM_PROMPT = "Answer in one short sentence. No reasoning steps."
 
 
+MAX_LLM_RETRIES = 2  # retry once on transient server errors
+
+
+def _check_server_alive() -> bool:
+    """Check if the server process is still running (J11: crash detection)."""
+    if _server_proc is None:
+        return False
+    return _server_proc.poll() is None
+
+
+def _restart_server_if_dead(model: str | Path = DEFAULT_MODEL, verbose: bool = True):
+    """Auto-restart server if it crashed (J4/J11: recovery)."""
+    global _server_url
+    if _server_proc is not None and _server_proc.poll() is not None:
+        exit_code = _server_proc.returncode
+        if verbose:
+            print(f"[server] crashed (exit code {exit_code}), restarting...")
+        stop_server()  # clean up
+        start_server(model=model, verbose=verbose)
+
+
 def llm_call(
     prompt: str,
     *,
@@ -226,6 +247,11 @@ def llm_call(
     The cliff invariant is enforced when enforce_budget=True (default):
     if the estimated prompt size exceeds the model's measured cliff
     budget, raises BudgetExceededError BEFORE invoking the model.
+
+    Resilience features (audit batch 1):
+    - Auto-restart server if it crashed between calls (J11)
+    - Retry once on transient network errors (B2)
+    - Distinguish network vs server vs timeout errors (B2)
     """
     global _server_url
 
@@ -237,10 +263,6 @@ def llm_call(
                 f"for {model}. Either chunk the prompt or use a model with a "
                 f"larger working memory."
             )
-
-    # Lazy server start if no server is running yet
-    if _server_url is None:
-        start_server(model=model)
 
     # Validate max_tokens
     if max_tokens <= 0:
@@ -259,23 +281,60 @@ def llm_call(
         "stream": False,
     }
     data = json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(
-        f"{_server_url}/v1/chat/completions",
-        data=data,
-        headers={"Content-Type": "application/json"},
-    )
 
-    t0 = time.time()
-    # Day 4: increased from 300s to 600s for CPU-only Phi-3.5 which
-    # generates ~10s/token. A 24-token response needs ~4 minutes.
-    try:
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, urllib.error.HTTPError, ConnectionResetError,
-            TimeoutError, OSError) as e:
+    last_error = None
+    for attempt in range(MAX_LLM_RETRIES + 1):
+        # Lazy start or auto-restart if crashed (J4, J11)
+        if _server_url is None:
+            start_server(model=model)
+        _restart_server_if_dead(model=model)
+
+        req = urllib.request.Request(
+            f"{_server_url}/v1/chat/completions",
+            data=data,
+            headers={"Content-Type": "application/json"},
+        )
+
+        t0 = time.time()
+        try:
+            with urllib.request.urlopen(req, timeout=600) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            break  # success
+        except urllib.error.HTTPError as e:
+            elapsed = time.time() - t0
+            # 429 = server busy (retryable), others = server error
+            if e.code == 429 and attempt < MAX_LLM_RETRIES:
+                last_error = e
+                time.sleep(2 ** attempt)  # exponential backoff: 1s, 2s
+                continue
+            return LLMResult(text=f"[ERROR: HTTP {e.code}: {e.reason}]",
+                             raw=str(e), n_tokens=0, elapsed=elapsed, is_error=True)
+        except (ConnectionResetError, ConnectionRefusedError) as e:
+            # Server likely crashed — try restart (B13)
+            elapsed = time.time() - t0
+            if attempt < MAX_LLM_RETRIES:
+                last_error = e
+                _restart_server_if_dead(model=model)
+                continue
+            return LLMResult(text=f"[ERROR: server connection lost: {e}]",
+                             raw=str(e), n_tokens=0, elapsed=elapsed, is_error=True)
+        except TimeoutError as e:
+            elapsed = time.time() - t0
+            return LLMResult(text=f"[ERROR: timeout after {elapsed:.0f}s]",
+                             raw=str(e), n_tokens=0, elapsed=elapsed, is_error=True)
+        except (urllib.error.URLError, OSError) as e:
+            elapsed = time.time() - t0
+            if attempt < MAX_LLM_RETRIES:
+                last_error = e
+                time.sleep(1)
+                continue
+            return LLMResult(text=f"[ERROR: network: {e}]",
+                             raw=str(e), n_tokens=0, elapsed=elapsed, is_error=True)
+    else:
+        # All retries exhausted
         elapsed = time.time() - t0
-        return LLMResult(text=f"[ERROR: {e}]", raw=str(e), n_tokens=0,
-                         elapsed=elapsed, is_error=True)
+        return LLMResult(text=f"[ERROR: {MAX_LLM_RETRIES+1} attempts failed: {last_error}]",
+                         raw=str(last_error), n_tokens=0, elapsed=elapsed, is_error=True)
     elapsed = time.time() - t0
 
     # Robust JSON response parsing — handle malformed/incomplete responses
