@@ -218,7 +218,7 @@ def verify(
     *,
     region_text: str = "",
     chunk_id: int | None = None,
-    use_llm_fallback: bool = True,
+    use_llm_fallback: bool = True,  # Keep LLM fallback for accuracy (Q7 needs it)
     verbose: bool = False,
 ) -> VerifyResult:
     """Verify a tentative answer.
@@ -257,7 +257,7 @@ def verify(
             question=question,
             answer=answer,
         )
-        result = _llm.llm_call(prompt, max_tokens=24)
+        result = _llm.llm_call(prompt, max_tokens=8)
         v2, r2 = _parse_llm_verify_response(result.text)
         return VerifyResult(
             verdict=v2,
@@ -275,6 +275,6 @@ def verify(
         question=question,
         answer=answer,
     )
-    result = _llm.llm_call(prompt, max_tokens=24)
+    result = _llm.llm_call(prompt, max_tokens=8)
     verdict, reason = _parse_llm_verify_response(result.text)
     return VerifyResult(verdict=verdict, reason=reason, raw=result.text, method="llm")

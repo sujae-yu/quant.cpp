@@ -362,32 +362,20 @@ def locate(
             score=0.0,
         )
 
-    # --- Step 4: LLM classification on top candidates ---
-    # Always run LLM on the top 5 RRF candidates (not just when ambiguous)
-    top_candidates = [cid for cid, _ in rrf_ranked[:5]]
-    llm_choice = _llm_locate(question, gist, excluded, top_candidates, verbose=verbose)
-
+    # --- Step 4: Pure RRF (no LLM call) ---
+    # Phase 1 speed optimization: removed LLM classification entirely.
+    # Loop 5 finding: BM25+keyword RRF is more accurate AND 1000x faster
+    # than LLM classification on small models. LLM consistently picked
+    # wrong chunks; RRF is deterministic and reliable.
+    # Savings: ~15s per locate call (one fewer inference round-trip).
     rrf_top1 = rrf_ranked[0][0]
     rrf_top1_score = rrf_ranked[0][1]
     rrf_top2_score = rrf_ranked[1][1] if len(rrf_ranked) > 1 else 0.0
     rrf_margin = (rrf_top1_score - rrf_top2_score) / max(rrf_top1_score, 0.001)
 
-    # Day 5: always trust RRF. LLM classification on small models is
-    # unreliable — it consistently picks the wrong chunk. BM25+keyword
-    # RRF is deterministic and more accurate for entity lookup queries.
-    # LLM is only used as a tiebreaker when RRF margin is essentially zero.
     chosen = rrf_top1
     method = "rrf"
     confidence = "high" if rrf_margin > 0.05 else "medium"
-
-    if llm_choice >= 0 and llm_choice == rrf_top1:
-        method = "rrf+llm"
-        confidence = "high"
-    elif llm_choice >= 0 and rrf_margin < 0.005:
-        # Dead tie — let LLM break it
-        chosen = llm_choice
-        method = "rrf+llm-tiebreak"
-        confidence = "medium"
 
     if verbose:
         print(f"[locator] chosen: chunk {chosen} via {method} (confidence={confidence})")

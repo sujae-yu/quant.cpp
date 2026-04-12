@@ -147,7 +147,7 @@ def lookup(
             mode = "direct-answer" if len(sentences) > MAX_SENTENCES_FOR_SELECT else "single-sentence"
             print(f"[lookup] chunk {region.chunk_id} ({len(region_text)} chars), "
                   f"{len(sentences)} sentences -> {mode}")
-        result = _llm.llm_call(prompt, max_tokens=64)
+        result = _llm.llm_call(prompt, max_tokens=32)
         if result.is_error:
             return LookupResult(
                 answer=result.text, region_text=region_text,
@@ -189,7 +189,7 @@ def lookup(
         prompt = LOOKUP_QUOTE_FALLBACK_TEMPLATE.format(
             region_text=region_text, question=question,
         )
-        result2 = _llm.llm_call(prompt, max_tokens=64)
+        result2 = _llm.llm_call(prompt, max_tokens=32)
         return LookupResult(
             answer=result2.text.strip(),
             region_text=region_text,

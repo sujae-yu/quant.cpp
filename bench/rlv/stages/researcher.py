@@ -13,7 +13,7 @@ from .lookup import LookupResult
 from .verifier import VerifyResult
 
 
-MAX_RETRIES = 3
+MAX_RETRIES = 2
 
 
 @dataclass

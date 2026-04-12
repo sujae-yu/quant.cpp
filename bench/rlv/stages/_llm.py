@@ -236,7 +236,7 @@ def _restart_server_if_dead(model: str | Path = DEFAULT_MODEL, verbose: bool = T
 def llm_call(
     prompt: str,
     *,
-    max_tokens: int = 64,
+    max_tokens: int = 32,
     temperature: float = 0.0,
     model: str | Path = DEFAULT_MODEL,
     enforce_budget: bool = True,
@@ -266,7 +266,7 @@ def llm_call(
 
     # Validate max_tokens
     if max_tokens <= 0:
-        max_tokens = 64
+        max_tokens = 32
 
     messages = []
     if system:
@@ -297,7 +297,7 @@ def llm_call(
 
         t0 = time.time()
         try:
-            with urllib.request.urlopen(req, timeout=600) as resp:
+            with urllib.request.urlopen(req, timeout=300) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
             break  # success
         except urllib.error.HTTPError as e:
