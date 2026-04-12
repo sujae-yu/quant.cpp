@@ -11597,24 +11597,9 @@ tq_model_t* tq_load_gguf(const char* path) {
         /* Gemma 4 (STEP35) detection: architecture string is "gemma4" */
         if (strstr(gguf->arch, "gemma4") != NULL) {
             c->is_gemma4 = 1;
-            /* Gemma 4 proportional RoPE for full attention layers:
-             * HuggingFace config has partial_rotary_factor=0.25 for full layers.
-             * GGUF rope.dimension_count=512 is the full head_dim, NOT the RoPE dim.
-             * Actual RoPE dims for full layers = full_head_dim * 0.25 = 128.
-             *
-             * Sliding layers: rope.dimension_count_swa=256 = full head_dim(256) → all rotated.
-             *
-             * We adjust rope_n_dims_full to reflect the partial rotation. */
-            if (c->rope_n_dims_full > 0 && c->full_head_dim > 0) {
-                /* partial_rotary_factor = 0.25 for Gemma 4 E2B/E4B */
-                int partial_rope = c->full_head_dim / 4;  /* 512/4 = 128 */
-                fprintf(stderr, "tq_load_gguf: Gemma4 p-RoPE — full layer RoPE dims %d -> %d "
-                        "(partial_rotary_factor=0.25)\n", c->rope_n_dims_full, partial_rope);
-                c->rope_n_dims_full = partial_rope;
-            }
-            fprintf(stderr, "tq_load_gguf: Gemma4 — RoPE dims swa=%d full=%d, "
-                    "GeGLU FFN, rope_freqs for full layers only\n",
-                    c->rope_n_dims, c->rope_n_dims_full);
+            /* Gemma 4 proportional RoPE: deferred to after hybrid attention
+             * detection sets full_head_dim (see below, ~line 12238). */
+            fprintf(stderr, "tq_load_gguf: Gemma4 detected (p-RoPE will be applied after hybrid detection)\n");
         }
         fprintf(stderr, "tq_load_gguf: Gemma family detected (sliding_window=%d)\n", c->sliding_window);
     } else if (c->is_moe) {
@@ -12251,6 +12236,17 @@ post_attn_load:
                         n_full, c->full_head_dim, c->full_n_kv_heads, c->full_n_heads);
             }
         }
+    }
+
+    /* Gemma 4 proportional RoPE: NOW apply, after hybrid detection set full_head_dim.
+     * HuggingFace config: partial_rotary_factor=0.25 for full attention layers.
+     * GGUF rope.dimension_count=512 is the full head_dim, NOT the rotated dim.
+     * Actual RoPE dims for full layers = full_head_dim / 4 = 128. */
+    if (c->is_gemma4 && c->rope_n_dims_full > 0 && c->full_head_dim > 0) {
+        int partial_rope = c->full_head_dim / 4;  /* 512/4 = 128 */
+        fprintf(stderr, "tq_load_gguf: Gemma4 p-RoPE — full layer RoPE dims %d -> %d "
+                "(partial_rotary_factor=0.25)\n", c->rope_n_dims_full, partial_rope);
+        c->rope_n_dims_full = partial_rope;
     }
 
     /* Load embedding + output weights */
