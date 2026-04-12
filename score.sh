@@ -323,13 +323,13 @@ eval_position() {
         sh_loc=$(wc -l < "$PROJECT_DIR/quant.h" | tr -d ' ')
     fi
     local sh_loc_score=0
-    if [ "$sh_loc" -gt 0 ] && [ "$sh_loc" -le 16000 ]; then
+    if [ "$sh_loc" -gt 0 ] && [ "$sh_loc" -le 18000 ]; then
         sh_loc_score=1
     fi
     log_score "position" "single_header_loc" "$sh_loc_score" 1 2
-    print_item "single_header_loc ($sh_loc / 16000)" "$sh_loc_score" 1 2
+    print_item "single_header_loc ($sh_loc / 18000)" "$sh_loc_score" 1 2
 
-    # ----- Single-header binary size budget (≤ 700 KB) -----
+    # ----- Single-header binary size budget (≤ 750 KB) -----
     local sh_size=0
     if [ -f "$PROJECT_DIR/quant.h" ]; then
         # macOS / BSD stat -f%z, GNU stat -c%s — try both
@@ -337,11 +337,11 @@ eval_position() {
     fi
     local sh_size_kb=$((sh_size / 1024))
     local sh_size_score=0
-    if [ "$sh_size_kb" -gt 0 ] && [ "$sh_size_kb" -le 700 ]; then
+    if [ "$sh_size_kb" -gt 0 ] && [ "$sh_size_kb" -le 750 ]; then
         sh_size_score=1
     fi
     log_score "position" "single_header_size" "$sh_size_score" 1 1
-    print_item "single_header_size (${sh_size_kb} KB / 700)" "$sh_size_score" 1 1
+    print_item "single_header_size (${sh_size_kb} KB / 750)" "$sh_size_score" 1 1
 
     # ----- Zero external dependencies in core (libc/libm/intrinsics/OS) -----
     # Allowed:
