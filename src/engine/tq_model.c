@@ -3038,9 +3038,15 @@ tq_model_t* tq_load_gguf(const char* path) {
             /* Gemma 4 (LLM_ARCH_GEMMA4): n_rot_full = rope.dimension_count (no halving).
              * rope_n_dims_full is already set from rope.dimension_count.
              * Refs: llama.cpp llama-model.cpp line 472-474 — reads ROPE_DIMENSION_COUNT directly. */
+            /* KV sharing: last N layers reuse K/V from earlier same-type layers */
+            c->n_kv_shared_layers = tq_gguf_get_i32(gguf, GGUF_KEY("attention.shared_kv_layers"), 0);
             fprintf(stderr, "tq_load_gguf: Gemma4 — RoPE dims swa=%d full=%d, "
                     "GeGLU, rope_freqs for full layers only\n",
                     c->rope_n_dims, c->rope_n_dims_full);
+            if (c->n_kv_shared_layers > 0) {
+                fprintf(stderr, "tq_load_gguf: KV sharing enabled — last %d layers reuse KV from earlier same-type layers\n",
+                        c->n_kv_shared_layers);
+            }
         }
         fprintf(stderr, "tq_load_gguf: Gemma family detected (sliding_window=%d)\n", c->sliding_window);
     } else if (c->is_moe) {
@@ -3635,6 +3641,38 @@ tq_model_t* tq_load_gguf(const char* path) {
                         n_sliding, c->head_dim, c->n_kv_heads,
                         n_full, c->full_head_dim, c->full_n_kv_heads, c->full_n_heads);
             }
+        }
+    }
+
+    /* Set up KV source layer mapping for Gemma 4 KV sharing.
+     * KV-shared layers (last n_kv_shared_layers) reuse the KV cache from the
+     * last non-shared layer of the same attention type (sliding or full).
+     * Non-shared layers use their own cache (kv_source_layer[l] = l). */
+    if (c->n_kv_shared_layers > 0 && model->layer_is_sliding) {
+        int first_shared = c->n_layers - c->n_kv_shared_layers;
+        model->kv_source_layer = (int*)calloc((size_t)c->n_layers, sizeof(int));
+        if (model->kv_source_layer) {
+            /* Non-shared layers: use own cache */
+            for (int l = 0; l < c->n_layers; l++) {
+                model->kv_source_layer[l] = l;  /* default: self */
+            }
+            /* Find the last non-shared sliding and full layers */
+            int last_sliding = -1, last_full = -1;
+            for (int l = 0; l < first_shared; l++) {
+                if (model->layer_is_sliding[l]) last_sliding = l;
+                else last_full = l;
+            }
+            /* Map shared layers to their source */
+            for (int l = first_shared; l < c->n_layers; l++) {
+                if (model->layer_is_sliding[l]) {
+                    model->kv_source_layer[l] = last_sliding >= 0 ? last_sliding : 0;
+                } else {
+                    model->kv_source_layer[l] = last_full >= 0 ? last_full : 0;
+                }
+            }
+            fprintf(stderr, "tq_load_gguf: KV source mapping — shared from layer %d, "
+                    "last_sliding=%d, last_full=%d\n",
+                    first_shared, last_sliding, last_full);
         }
     }
 
@@ -4437,6 +4475,7 @@ void tq_free_model(tq_model_t* model) {
     free(model->_q2_data);
     free(model->attn_layer_indices);
     free(model->layer_is_sliding);
+    free(model->kv_source_layer);
 
     /* Free MoE LRU caches (must happen before freeing layers) */
     tq_moe_cache_free();

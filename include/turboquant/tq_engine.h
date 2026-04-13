@@ -58,6 +58,7 @@ typedef struct {
     int full_head_dim;       /* head_dim for full attention layers (e.g., 512 vs sliding 256) */
     int full_n_heads;        /* n_heads for full layers (e.g., 8 vs sliding 16) */
     int full_n_kv_heads;     /* n_kv_heads for full layers (e.g., 2 vs sliding 8) */
+    int n_kv_shared_layers;  /* Gemma 4: last N layers reuse KV from earlier same-type layers */
     int rope_n_dims;         /* RoPE dimension count for sliding/SWA layers (0 = use head_dim) */
     int rope_n_dims_full;    /* RoPE dimension count for full/global layers (0 = use rope_n_dims) */
     float final_logit_softcap; /* logit soft-capping: logits = cap * tanh(logits/cap), 0=disabled */
@@ -231,6 +232,10 @@ typedef struct {
 
     /* Gemma3 sliding window support */
     int* layer_is_sliding;    /* [n_layers] per-layer flag: 1=sliding, 0=global (NULL if not used) */
+    int* kv_source_layer;     /* [n_layers] KV-shared: maps each layer to its KV cache source layer.
+                               * For non-shared layers: kv_source_layer[l] = l (uses own cache).
+                               * For shared layers: kv_source_layer[l] = last non-shared same-type layer.
+                               * NULL if KV sharing is not used. */
 
     /* Learned RoPE frequencies (Gemma 4) — NULL if using computed frequencies */
     float* rope_freqs;        /* [rope_dim/2] learned inv_freq values (F32) */

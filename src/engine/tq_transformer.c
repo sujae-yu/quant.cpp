@@ -1040,10 +1040,24 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
             tq_matmul(s->q, s->xb, layer->wq, n_heads * head_dim, dim);
         }
     }
-    /* Check V weight presence early — needed by Gemma 4 V-norm below */
+    /* Debug: compare Q projection with llama.cpp */
+    if (l == 0 && pos == 0 && getenv("TQ_CMP")) {
+        fprintf(stderr, "[CMP] L0 Q[0:8] = ");
+        for (int _d = 0; _d < 8; _d++) fprintf(stderr, "%.4f ", s->q[_d]);
+        fprintf(stderr, "... Q[2040:2048] = ");
+        for (int _d = 2040; _d < 2048 && _d < n_heads * head_dim; _d++) fprintf(stderr, "%.4f ", s->q[_d]);
+        fprintf(stderr, "\n");
+    }
+
+    /* Check if this is a KV-shared layer (reuse KV cache from source layer).
+     * KV-shared layers DO have K/V weights in GGUF but we skip them, matching
+     * llama.cpp's has_kv(il) which returns false for l >= n_layer - n_kv_shared_layers. */
     int has_v_weights = (layer->wv_q2 || layer->wv_q4 || layer->wv_q8 ||
                          layer->gguf_wv || layer->wv);
-    if (!has_fused_qkv_layer) {
+    int is_kv_shared = (c->n_kv_shared_layers > 0 && model->kv_source_layer &&
+                         l >= c->n_layers - c->n_kv_shared_layers);
+
+    if (!has_fused_qkv_layer && !is_kv_shared) {
         if (layer->wk_q2) {
             TQ_MATMUL_Q2_OR_1BIT(s->k, s->xb, layer->wk_q2, layer->wk_q2s, s->xb_q8, s->xb_q8s, kv_dim, dim, model->use_1bit_weights);
         } else if (layer->wk_q4) {
@@ -1087,14 +1101,15 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
      * This gives 2x V memory savings while preserving key precision. */
     int save_pre_norm_keys = 0; /* disabled — see above */
 
-    /* Apply QK-norm if present (per-head RMSNorm) */
+    /* Apply QK-norm if present (per-head RMSNorm).
+     * For KV-shared layers: only Q-norm is applied (no K/V to normalize). */
     if (layer->q_norm) {
         for (int h = 0; h < n_heads; h++) {
             tq_rmsnorm(s->q + h * head_dim, s->q + h * head_dim,
                        layer->q_norm, head_dim, c->rms_norm_eps);
         }
     }
-    if (layer->k_norm) {
+    if (layer->k_norm && !is_kv_shared) {
         for (int h = 0; h < n_kv_heads; h++) {
             tq_rmsnorm(s->k + h * head_dim, s->k + h * head_dim,
                        layer->k_norm, head_dim, c->rms_norm_eps);
@@ -1103,7 +1118,7 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
 
     /* Gemma 4: V normalization (RMS norm without learned weights).
      * Reference: refs/llama.cpp/src/models/gemma4-iswa.cpp line 82 */
-    if (c->is_gemma4 && has_v_weights) {
+    if (c->is_gemma4 && has_v_weights && !is_kv_shared) {
         for (int h = 0; h < n_kv_heads; h++) {
             float* vh = s->v + h * head_dim;
             float ss = 0.0f;
@@ -1207,20 +1222,22 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
             }
             /* Pairs beyond rope_pairs are left unrotated (pass-through) */
         }
-        for (int h = 0; h < n_kv_heads; h++) {
-            float* kh = s->k + h * head_dim;
-            for (int i = 0; i < rope_pairs; i++) {
-                float base_freq = 1.0f / powf(rope_base, 2.0f * i / (float)rope_n_dims);
-                float freq = base_freq / model->rope_freqs[i];
-                float theta = pos * freq;
-                float cos_t = cosf(theta);
-                float sin_t = sinf(theta);
-                int a = neox ? i        : 2 * i;
-                int b = neox ? i + half  : 2 * i + 1;
-                float k0 = kh[a];
-                float k1 = kh[b];
-                kh[a] = k0 * cos_t - k1 * sin_t;
-                kh[b] = k0 * sin_t + k1 * cos_t;
+        if (!is_kv_shared) {
+            for (int h = 0; h < n_kv_heads; h++) {
+                float* kh = s->k + h * head_dim;
+                for (int i = 0; i < rope_pairs; i++) {
+                    float base_freq = 1.0f / powf(rope_base, 2.0f * i / (float)rope_n_dims);
+                    float freq = base_freq / model->rope_freqs[i];
+                    float theta = pos * freq;
+                    float cos_t = cosf(theta);
+                    float sin_t = sinf(theta);
+                    int a = neox ? i        : 2 * i;
+                    int b = neox ? i + half  : 2 * i + 1;
+                    float k0 = kh[a];
+                    float k1 = kh[b];
+                    kh[a] = k0 * cos_t - k1 * sin_t;
+                    kh[b] = k0 * sin_t + k1 * cos_t;
+                }
             }
         }
     } else {
@@ -1282,16 +1299,37 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
                     qh[i + half] = q0 * sin_t + q1 * cos_t;
                 }
             }
-            for (int h = 0; h < n_kv_heads; h++) {
-                float* kh = s->k + h * head_dim;
-                for (int i = 0; i < half; i++) {
-                    float freq = 1.0f / powf(rope_base, 2.0f * i / (float)head_dim);
+            if (!is_kv_shared) {
+                for (int h = 0; h < n_kv_heads; h++) {
+                    float* kh = s->k + h * head_dim;
+                    for (int i = 0; i < half; i++) {
+                        float freq = 1.0f / powf(rope_base, 2.0f * i / (float)head_dim);
+                        float theta = pos * freq;
+                        float cos_t = cosf(theta);
+                        float sin_t = sinf(theta);
+                        float k0 = kh[i], k1 = kh[i + half];
+                        kh[i]        = k0 * cos_t - k1 * sin_t;
+                        kh[i + half] = k0 * sin_t + k1 * cos_t;
+                    }
+                }
+            }
+        } else if (is_kv_shared) {
+            /* KV-shared layer: only apply RoPE to Q, not K */
+            int half_dim = head_dim / 2;
+            for (int h = 0; h < n_heads; h++) {
+                float* qh = s->q + h * head_dim;
+                float r_base = rope_base;
+                for (int i = 0; i < half_dim; i++) {
+                    float freq = 1.0f / powf(r_base, 2.0f * i / (float)head_dim);
                     float theta = pos * freq;
                     float cos_t = cosf(theta);
                     float sin_t = sinf(theta);
-                    float k0 = kh[i], k1 = kh[i + half];
-                    kh[i]        = k0 * cos_t - k1 * sin_t;
-                    kh[i + half] = k0 * sin_t + k1 * cos_t;
+                    /* NeoX style for Gemma 4, interleaved for others */
+                    int a = c->is_gemma4 ? i : 2 * i;
+                    int b = c->is_gemma4 ? i + half_dim : 2 * i + 1;
+                    float q0 = qh[a], q1 = qh[b];
+                    qh[a] = q0 * cos_t - q1 * sin_t;
+                    qh[b] = q0 * sin_t + q1 * cos_t;
                 }
             }
         } else {
@@ -1309,8 +1347,18 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
     if (use_quant_kv && c->is_gemma4 && c->use_qk_norm) {
         use_quant_kv = 0; /* fall through to FP32 key storage */
     }
-    float* key_cache_layer = s->key_cache + l * kv_layer_stride;
-    if (!use_quant_kv) {
+    /* For KV-shared layers, use the source layer's cache instead of this layer's.
+     * The source layer already wrote K/V at each position, so we just read from it. */
+    int kv_cache_layer_idx = l;
+    if (is_kv_shared && model->kv_source_layer) {
+        kv_cache_layer_idx = model->kv_source_layer[l];
+    }
+    float* key_cache_layer = s->key_cache + kv_cache_layer_idx * kv_layer_stride;
+
+    /* Skip K/V cache write for KV-shared layers (source layer already wrote) */
+    if (is_kv_shared) {
+        /* No K/V to store — skip to attention */
+    } else if (!use_quant_kv) {
         /* Use cache_kv_dim for position stride (cache allocated with sliding dims).
          * Full layers write fewer floats (kv_dim < cache_kv_dim) but at correct stride. */
         memcpy(key_cache_layer + (size_t)pos * cache_kv_dim, s->k, kv_dim * sizeof(float));
@@ -1389,11 +1437,15 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
             f32_to_fp16_vec(s->v, hr_dst, kv_dim);
         }
     } else if (s->use_fp16_values) {
-        uint16_t* val_fp16_layer = s->value_cache_fp16 + l * kv_layer_stride;
-        f32_to_fp16_vec(s->v, val_fp16_layer + (size_t)pos * cache_kv_dim, kv_dim);
+        uint16_t* val_fp16_layer = s->value_cache_fp16 + kv_cache_layer_idx * kv_layer_stride;
+        if (!is_kv_shared) {
+            f32_to_fp16_vec(s->v, val_fp16_layer + (size_t)pos * cache_kv_dim, kv_dim);
+        }
     } else {
-        float* val_cache_layer = s->value_cache + l * kv_layer_stride;
-        memcpy(val_cache_layer + (size_t)pos * cache_kv_dim, s->v, kv_dim * sizeof(float));
+        float* val_cache_layer = s->value_cache + kv_cache_layer_idx * kv_layer_stride;
+        if (!is_kv_shared) {
+            memcpy(val_cache_layer + (size_t)pos * cache_kv_dim, s->v, kv_dim * sizeof(float));
+        }
     }
 
     /* Quantize the new key into the quantized cache for integer attention.
@@ -1487,7 +1539,7 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
                 sqrtf(cd1/head_dim), mse/head_dim, cn/(sqrtf(cd1)*sqrtf(cd2)+1e-10f));
     }
     float kv_prescale = 1.0f;
-    if (use_int_attn) {
+    if (use_int_attn && !is_kv_shared) {
         const tq_type_traits_t* traits = &TQ_TRAITS[s->kv_quant_type];
         for (int kh = 0; kh < n_kv_heads; kh++) {
             /* Use pre-QK-norm keys for quantization (better rms→cosine) */
@@ -2097,7 +2149,7 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
             }
         } else if (s->use_fp16_values) {
             /* FP16 value path: convert on the fly during weighted sum */
-            const uint16_t* vfp16_layer = s->value_cache_fp16 + l * kv_layer_stride;
+            const uint16_t* vfp16_layer = s->value_cache_fp16 + kv_cache_layer_idx * kv_layer_stride;
             for (int t = 0; t < seq_len; t++) {
                 const uint16_t* vt16 = vfp16_layer + (size_t)t * cache_kv_dim + kv_h * head_dim;
                 float a = atth[t];
@@ -2122,7 +2174,7 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
             }
         } else {
             /* FP32 value path (original) */
-            const float* val_cache_layer_fp32 = s->value_cache + l * kv_layer_stride;
+            const float* val_cache_layer_fp32 = s->value_cache + kv_cache_layer_idx * kv_layer_stride;
             for (int t = 0; t < seq_len; t++) {
                 const float* vt = val_cache_layer_fp32 + (size_t)t * cache_kv_dim + kv_h * head_dim;
                 float a = atth[t];
@@ -2194,6 +2246,13 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
         fprintf(stderr, "[DEBUG] layer%d attn_out min=%.3f max=%.3f (hd=%d, nh=%d, nkv=%d, %s)\n",
                 l, minv, maxv, head_dim, n_heads, n_kv_heads,
                 is_full_dbg ? "FULL" : "sliding");
+    }
+
+    /* Debug: compare wo output (xb2) with llama.cpp reference */
+    if (l == 0 && pos == 0 && getenv("TQ_CMP")) {
+        fprintf(stderr, "[CMP] L0 wo_out[0:8] = ");
+        for (int _d = 0; _d < 8 && _d < dim; _d++) fprintf(stderr, "%.4f ", s->xb2[_d]);
+        fprintf(stderr, "\n");
     }
 
     /* Residual */
@@ -2424,6 +2483,15 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
         /* Pre-attention/DeltaNet RMSNorm */
         tq_rmsnorm(s->xb, s->x, layer->attn_norm, dim, c->rms_norm_eps);
 
+        /* Debug: compare intermediate values with llama.cpp reference */
+        if (l == 0 && pos == 0 && getenv("TQ_CMP")) {
+            fprintf(stderr, "[CMP] L0 attn_norm[0:8] = ");
+            for (int _d = 0; _d < 8 && _d < dim; _d++) fprintf(stderr, "%.4f ", s->xb[_d]);
+            fprintf(stderr, "... [%d:%d] = ", dim-3, dim);
+            for (int _d = dim-3; _d < dim; _d++) fprintf(stderr, "%.4f ", s->xb[_d]);
+            fprintf(stderr, "\n");
+        }
+
         /* Begin layer-level GPU batch scope: all GGUF matmuls in this layer
          * (QKV, wo, gate, up, down) encode into shared command buffers.
          * Intermediate flushes synchronize where CPU needs GPU results.
@@ -2478,6 +2546,12 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
                 tq_rmsnorm(s->xb2, s->xb2, layer->post_attn_norm, dim, c->rms_norm_eps);
                 /* Re-add normalized output */
                 tq_add(s->x, s->x, s->xb2, dim);
+            }
+            /* Debug: compare attn_out (after post_attn_norm + residual) with llama.cpp */
+            if (l == 0 && pos == 0 && getenv("TQ_CMP")) {
+                fprintf(stderr, "[CMP] L0 attn_out[0:8] = ");
+                for (int _d = 0; _d < 8 && _d < dim; _d++) fprintf(stderr, "%.4f ", s->x[_d]);
+                fprintf(stderr, "\n");
             }
         }
         /* else: skip (should not happen for valid models) */
@@ -2827,7 +2901,7 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
 
         /* Debug: print layer output */
         if (pos == 0 && getenv("TQ_DEBUG")) {
-            if (l < 10 || l == c->n_layers - 1 || getenv("TQ_DEBUG_ALL")) {
+            if (l < 10 || l == c->n_layers - 1 || l % 10 == 0 || getenv("TQ_CMP")) {
                 float maxv = 0, minv = 0;
                 for (int i = 0; i < dim; i++) {
                     if (s->x[i] > maxv) maxv = s->x[i];
@@ -2868,7 +2942,7 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
     }
     TQ_PROF_STOP(_tp, matmul_ns);
 
-    if (pos <= 1 && getenv("TQ_DEBUG")) {
+    if ((pos <= 1 || getenv("TQ_CMP")) && getenv("TQ_DEBUG")) {
         /* Print top-5 logits for debugging */
         fprintf(stderr, "[DEBUG] pos=%d logits[0:8] = ", pos);
         for (int i = 0; i < 8; i++) fprintf(stderr, "%.2f ", s->logits[i]);

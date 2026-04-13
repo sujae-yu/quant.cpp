@@ -14170,9 +14170,10 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
      * attention type (sliding or full). Only Q is computed fresh. */
     int kv_shared_skip = 0;
     int kv_shared_ref_layer = -1;
-    /* KV sharing: disabled by default until segfault in value_cache
-     * FP16 stride is fixed. Enable with TQ_KV_SHARE=1 for testing. */
-    if (c->n_kv_shared_layers > 0 && getenv("TQ_KV_SHARE")) {
+    /* KV sharing: enabled for Gemma 4 (required for correct output).
+     * Shared layers skip K/V projection and reuse the KV cache from the
+     * last non-shared layer of the same attention type. */
+    if (c->n_kv_shared_layers > 0) {
         int shared_start = c->n_layers - c->n_kv_shared_layers;
         if (l >= shared_start) {
             kv_shared_skip = 1;
@@ -14263,35 +14264,9 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
     }
     if (kv_shared_skip && kv_shared_ref_layer >= 0) {
         /* KV sharing: skip K/V projection for shared layers.
-         * Read K from the reference layer's FP32 key cache.
-         * V: read from reference layer's value cache (FP32 or FP16).
-         * NOTE: we copy into s->k/s->v so the KV cache write below
-         * stores them into THIS layer's cache slot (for attention).
-         *
-         * IMPORTANT: kv_layer_stride is in FLOATS for key_cache (FP32).
-         * value_cache uses FP16 when use_fp16_values is set, but the
-         * stride is STILL in float-units because value_cache is cast
-         * to uint16_t* only at write/read time. The allocation uses
-         * sizeof(float) for FP32 and sizeof(uint16_t) for FP16 — but
-         * the STRIDE variable is in elements, not bytes. For FP16 values,
-         * the value_cache pointer is actually a uint16_t* in disguise.
-         */
-        float* ref_key_layer = s->key_cache + (size_t)kv_shared_ref_layer * kv_layer_stride;
-        memcpy(s->k, ref_key_layer + (size_t)pos * cache_kv_dim, (size_t)kv_dim * sizeof(float));
-
-        if (s->use_fp16_values) {
-            /* Value cache stores as FP16 (uint16_t). Stride is in FP16 elements. */
-            size_t v_stride = (size_t)c->max_seq_len * cache_kv_dim;  /* in uint16 elements */
-            const uint16_t* v16_cache = (const uint16_t*)s->value_cache;
-            const uint16_t* ref_v = v16_cache + (size_t)kv_shared_ref_layer * v_stride + (size_t)pos * cache_kv_dim;
-            for (int i = 0; i < kv_dim; i++) {
-                uint32_t bits = ((uint32_t)ref_v[i]) << 16;
-                memcpy(&s->v[i], &bits, 4);
-            }
-        } else {
-            float* ref_val_layer = s->value_cache + (size_t)kv_shared_ref_layer * kv_layer_stride;
-            memcpy(s->v, ref_val_layer + (size_t)pos * cache_kv_dim, (size_t)kv_dim * sizeof(float));
-        }
+         * Don't copy K/V — the attention will read directly from the
+         * reference layer's cache (see kv_shared_ref_layer usage below).
+         * This avoids double-applying QK-norm, V-norm, and RoPE on K. */
     } else if (has_fused_qkv_layer) {
         /* Already populated s->q/s->k/s->v above — skip the standard
          * K and V projection blocks. */
@@ -14342,7 +14317,7 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
                        layer->q_norm, head_dim, c->rms_norm_eps);
         }
     }
-    if (layer->k_norm) {
+    if (layer->k_norm && !kv_shared_skip) {
         for (int h = 0; h < n_kv_heads; h++) {
             tq_rmsnorm(s->k + h * head_dim, s->k + h * head_dim,
                        layer->k_norm, head_dim, c->rms_norm_eps);
@@ -14352,7 +14327,7 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
     /* Gemma 4: V also gets RMS norm (weight-free, just normalization).
      * llama.cpp gemma4-iswa.cpp line 92: Vcur = ggml_rms_norm(Vcur, eps)
      * This is applied when QK-norm is present (same condition). */
-    if (c->is_gemma4 && layer->k_norm) {
+    if (c->is_gemma4 && layer->k_norm && !kv_shared_skip) {
         for (int h = 0; h < n_kv_heads; h++) {
             /* Weight-free RMS norm: pass NULL weight → just normalize */
             float* vh = s->v + h * head_dim;
@@ -14465,20 +14440,22 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
             }
             /* Pairs beyond rope_pairs are left unrotated (pass-through) */
         }
-        for (int h = 0; h < n_kv_heads; h++) {
-            float* kh = s->k + h * head_dim;
-            for (int i = 0; i < rope_pairs; i++) {
-                float base_freq = 1.0f / powf(rope_base, 2.0f * i / (float)rope_n_dims);
-                float freq = base_freq / model->rope_freqs[i];
-                float theta = pos * freq;
-                float cos_t = cosf(theta);
-                float sin_t = sinf(theta);
-                int a = neox ? i        : 2 * i;
-                int b = neox ? i + half  : 2 * i + 1;
-                float k0 = kh[a];
-                float k1 = kh[b];
-                kh[a] = k0 * cos_t - k1 * sin_t;
-                kh[b] = k0 * sin_t + k1 * cos_t;
+        if (!kv_shared_skip) {
+            for (int h = 0; h < n_kv_heads; h++) {
+                float* kh = s->k + h * head_dim;
+                for (int i = 0; i < rope_pairs; i++) {
+                    float base_freq = 1.0f / powf(rope_base, 2.0f * i / (float)rope_n_dims);
+                    float freq = base_freq / model->rope_freqs[i];
+                    float theta = pos * freq;
+                    float cos_t = cosf(theta);
+                    float sin_t = sinf(theta);
+                    int a = neox ? i        : 2 * i;
+                    int b = neox ? i + half  : 2 * i + 1;
+                    float k0 = kh[a];
+                    float k1 = kh[b];
+                    kh[a] = k0 * cos_t - k1 * sin_t;
+                    kh[b] = k0 * sin_t + k1 * cos_t;
+                }
             }
         }
     } else {
@@ -14616,8 +14593,13 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
     if (use_quant_kv && c->is_gemma4 && c->use_qk_norm) {
         use_quant_kv = 0; /* fall through to FP32 key storage */
     }
-    float* key_cache_layer = s->key_cache + l * kv_layer_stride;
-    if (!use_quant_kv) {
+    /* For KV-shared layers, read K/V from the reference layer's cache */
+    int kv_cache_l = (kv_shared_skip && kv_shared_ref_layer >= 0) ? kv_shared_ref_layer : l;
+    float* key_cache_layer = s->key_cache + kv_cache_l * kv_layer_stride;
+    if (kv_shared_skip) {
+        /* KV-shared layer: don't write to cache — source layer already wrote.
+         * Attention reads from the reference layer's cache via kv_cache_l. */
+    } else if (!use_quant_kv) {
         /* Use cache_kv_dim for position stride (cache allocated with sliding dims).
          * Full layers write fewer floats (kv_dim < cache_kv_dim) but at correct stride. */
         memcpy(key_cache_layer + (size_t)pos * cache_kv_dim, s->k, kv_dim * sizeof(float));
@@ -14696,11 +14678,13 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
             f32_to_fp16_vec(s->v, hr_dst, kv_dim);
         }
     } else if (s->use_fp16_values) {
-        uint16_t* val_fp16_layer = s->value_cache_fp16 + l * kv_layer_stride;
-        f32_to_fp16_vec(s->v, val_fp16_layer + (size_t)pos * cache_kv_dim, kv_dim);
+        uint16_t* val_fp16_layer = s->value_cache_fp16 + kv_cache_l * kv_layer_stride;
+        if (!kv_shared_skip)
+            f32_to_fp16_vec(s->v, val_fp16_layer + (size_t)pos * cache_kv_dim, kv_dim);
     } else {
-        float* val_cache_layer = s->value_cache + l * kv_layer_stride;
-        memcpy(val_cache_layer + (size_t)pos * cache_kv_dim, s->v, kv_dim * sizeof(float));
+        float* val_cache_layer = s->value_cache + kv_cache_l * kv_layer_stride;
+        if (!kv_shared_skip)
+            memcpy(val_cache_layer + (size_t)pos * cache_kv_dim, s->v, kv_dim * sizeof(float));
     }
 
     /* Quantize the new key into the quantized cache for integer attention.
@@ -15242,7 +15226,7 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
             }
         } else if (s->use_fp16_values) {
             /* FP16 value path: convert on the fly during weighted sum */
-            const uint16_t* vfp16_layer = s->value_cache_fp16 + l * kv_layer_stride;
+            const uint16_t* vfp16_layer = s->value_cache_fp16 + kv_cache_l * kv_layer_stride;
             for (int t = 0; t < seq_len; t++) {
                 const uint16_t* vt16 = vfp16_layer + (size_t)t * cache_kv_dim + kv_h * head_dim;
                 float a = atth[t];
@@ -15267,7 +15251,7 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
             }
         } else {
             /* FP32 value path (original) */
-            const float* val_cache_layer_fp32 = s->value_cache + l * kv_layer_stride;
+            const float* val_cache_layer_fp32 = s->value_cache + kv_cache_l * kv_layer_stride;
             for (int t = 0; t < seq_len; t++) {
                 const float* vt = val_cache_layer_fp32 + (size_t)t * cache_kv_dim + kv_h * head_dim;
                 float a = atth[t];
