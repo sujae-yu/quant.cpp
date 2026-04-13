@@ -532,9 +532,10 @@ int main(int argc, char** argv) {
             "quant-server-unified — OpenAI-compatible server (quant.h unified build)\n\n"
             "Usage: %s <model.gguf> [options]\n\n"
             "Options:\n"
-            "  -p <port>     Listen port (default: 8080)\n"
-            "  -j <threads>  Threads per inference (default: 4)\n"
-            "  --help        Show this help\n\n"
+            "  -p <port>       Listen port (default: 8080)\n"
+            "  -j <threads>    Threads per inference (default: 4)\n"
+            "  --template T    Chat template: chatml (default), phi3, gemma\n"
+            "  --help          Show this help\n\n"
             "Example:\n"
             "  %s model.gguf -p 8080 -j 8\n"
             "  curl http://localhost:8080/v1/chat/completions \\\n"
@@ -584,18 +585,37 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    /* Detect model architecture for chat template selection.
-     * Check model filename for architecture hints. */
-    int template_type = TMPL_CHATML;  /* default */
+    /* Detect chat template from filename or --template flag.
+     * Supports: chatml (default), phi3, gemma.
+     * #86: auto-detection covers Phi-3/3.5/4, Gemma 2/3/4. */
+    int template_type = TMPL_CHATML;
     const char* bn = strrchr(model_path, '/');
     bn = bn ? bn + 1 : model_path;
-    if (strstr(bn, "hi-3") || strstr(bn, "hi3") || strstr(bn, "Hi-3") || strstr(bn, "Hi3") ||
-        strstr(bn, "phi-3") || strstr(bn, "phi3") || strstr(bn, "Phi-3") || strstr(bn, "Phi3")) {
-        template_type = TMPL_PHI3;
-        fprintf(stderr, "Detected Phi-3 model — using Phi-3 chat template\n");
-    } else if (strstr(bn, "gemma") || strstr(bn, "Gemma")) {
-        template_type = TMPL_GEMMA;
-        fprintf(stderr, "Detected Gemma model — using Gemma chat template\n");
+
+    /* Check --template CLI override first */
+    for (int i = 2; i < argc; i++) {
+        if (strcmp(argv[i], "--template") == 0 && i + 1 < argc) {
+            const char* t = argv[++i];
+            if (strcmp(t, "phi3") == 0) template_type = TMPL_PHI3;
+            else if (strcmp(t, "gemma") == 0) template_type = TMPL_GEMMA;
+            else if (strcmp(t, "chatml") == 0) template_type = TMPL_CHATML;
+            fprintf(stderr, "Chat template: %s (--template override)\n", t);
+        }
+    }
+
+    /* Auto-detect from filename if no override */
+    if (template_type == TMPL_CHATML) {
+        /* Phi family: Phi-3, Phi-3.5, Phi-4 all use <|user|>...<|end|> */
+        if (strstr(bn, "phi-3") || strstr(bn, "phi3") || strstr(bn, "Phi-3") || strstr(bn, "Phi3") ||
+            strstr(bn, "phi-4") || strstr(bn, "phi4") || strstr(bn, "Phi-4") || strstr(bn, "Phi4")) {
+            template_type = TMPL_PHI3;
+            fprintf(stderr, "Detected Phi model — using Phi chat template\n");
+        }
+        /* Gemma family */
+        else if (strstr(bn, "gemma") || strstr(bn, "Gemma")) {
+            template_type = TMPL_GEMMA;
+            fprintf(stderr, "Detected Gemma model — using Gemma chat template\n");
+        }
     }
     int has_fused_qkv = (template_type == TMPL_PHI3) ? 1 : 0;
 
