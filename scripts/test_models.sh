@@ -30,6 +30,7 @@ run_test() {
     local expected="$3"
     local tier="$4"
     local extra_env="${5:-}"
+    local extra_args="${6:-}"
 
     if [[ ! -f "$MODELS_DIR/$model" ]]; then
         printf "  %-50s [SKIP] not found\n" "$model"
@@ -40,7 +41,7 @@ run_test() {
     local out
     # Capture full output (replace newlines with space) — avoids missing
     # output when first line is empty (newline-prefixed generation).
-    out=$(env $extra_env "$QUANT_BIN" "$MODELS_DIR/$model" -p "$prompt" -n 10 -T 0 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g')
+    out=$(env $extra_env "$QUANT_BIN" "$MODELS_DIR/$model" $extra_args -p "$prompt" -n 10 -T 0 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g')
 
     case "$tier" in
         STRICT)
@@ -86,6 +87,10 @@ echo "--- COHERENT tier (must produce non-garbage text) ---"
 run_test "Llama-3.2-1B-Instruct-Q8_0.gguf"     "Hello" ""  COHERENT "TQ_NO_METAL=1"
 run_test "Llama-3.2-3B-Instruct-Q8_0.gguf"     "Hello" ""  COHERENT "TQ_NO_METAL=1"
 run_test "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"   "Hello" ""  COHERENT "TQ_NO_METAL=1"
+# Regression guard: DeltaNet layers must NOT be treated as self_attn.
+# Fixed in f0091fc (2026-04-15); before that CLI produced whitespace garbage.
+# Uses --chat so the ChatML template wrapping is tested end-to-end.
+run_test "Qwen3.5-4B-Q4_K_M.gguf"              "Hi" "Hello" STRICT "TQ_NO_METAL=1" "--chat"
 
 echo ""
 echo "--- Summary ---"

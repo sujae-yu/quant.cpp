@@ -140,6 +140,35 @@ echo "[7] GGUF dequant memory free"
 check_both_have "free(layer->attn_norm)" "free(layer->attn_norm)" \
     "$HEADER" "src/engine/tq_model.c"
 
+# --- 8. DeltaNet / Phi-3 fused-QKV disambiguation ---
+# Regression guard (f0091fc, 2026-04-15): when a layer has attn_qkv.weight,
+# the Phi-3 fused-QKV path must NOT trigger for Qwen3.5 DeltaNet layers.
+# Both files must probe for ssm_a (DeltaNet marker) and skip the fused path.
+echo ""
+echo "[8] DeltaNet vs Phi-3 fused-QKV disambiguation"
+check_guard() {
+    local label="$1"
+    local file="$2"
+    # Inspect the `if (wqkv_t ...)` conditional: it must also test a DeltaNet
+    # marker (ssm_probe, layer_is_deltanet, or !deltanet). A bare `if (wqkv_t)`
+    # means the Phi-3 fused-QKV path will mis-match Qwen3.5 DeltaNet layers.
+    local cond
+    cond=$(grep -E "if \(wqkv_t[^)]*\)" "$file" | head -1)
+    if [ -z "$cond" ]; then
+        echo -e "  ${YELLOW}—${NC} $label: no wqkv_t conditional found (OK if Phi-3 path absent)"
+        return
+    fi
+    if echo "$cond" | grep -qE "ssm_probe|layer_is_deltanet|is_deltanet|!deltanet"; then
+        echo -e "  ${GREEN}✓${NC} $label: DeltaNet guard in conditional"
+    else
+        echo -e "  ${RED}✗${NC} $label: bare 'if (wqkv_t)' — Phi-3 path will mis-match Qwen3.5 DeltaNet layers"
+        echo "      offending line: $cond"
+        ERRORS=$((ERRORS + 1))
+    fi
+}
+check_guard "quant.h" "$HEADER"
+check_guard "split-source tq_model.c" "src/engine/tq_model.c"
+
 # --- Summary ---
 echo ""
 echo "========================================="

@@ -13,6 +13,7 @@
 
 <table align="center">
 <tr>
+<td align="center"><b>10/10 on 12K tokens</b><br>RLV crosses the cliff</td>
 <td align="center"><b>7/7 vs 0/7</b><br>Beyond RAG measured</td>
 <td align="center"><b>6.4x compression</b><br>+3% PPL</td>
 <td align="center"><b>128K context</b><br>on 16GB Mac</td>
@@ -159,6 +160,8 @@ The bug was using the same tool for both. The fix is using each for what it's go
 > **Honest disclaimer:** v1 is a synthetic 5-section document with 7 questions on a single 3B model. We're not claiming this is LongBench. We *are* claiming it's enough to start a conversation about the failure mode chunk-RAG has been hiding.
 
 > **v2 update — the Working Memory Cliff (2026-04-11):** We followed up the v1 result with 204 NIAH trials across 1B and 3B at context lengths 256–2048, plus a 6-trial FP32-weights control. Both models hit a sharp cliff at **less than 1% of their nominal 128K context window** (1B Q8 at 512–1024, 3B Q4 at 1024–1280 *as a step function*). The 6.4× KV compression is bit-for-bit identical to FP32 baseline in 18 of 20 cells, so the cliff is a model property — not a KV property and not a weight-quantization artifact. The honest reframing: Beyond RAG works for documents that fit in the model's *effective* working memory, which is 2–3 orders of magnitude smaller than the nominal context window. Full tech report: [`docs/paper/working-memory-cliff.md`](docs/paper/working-memory-cliff.md). HF blog post draft: [`docs/paper/hf-blog-draft.md`](docs/paper/hf-blog-draft.md).
+
+> **v3 update — Crossing the Cliff with RLV (2026-04-14):** If the cliff is real, the fix is to stop asking one LLM call to hold a full document in working memory. **RLV (Read-Locate-Verify)** is a 5-stage pipeline — gist → locate → lookup → verify → research — where each stage stays below the ~1K-token cliff while the *document* can be arbitrarily long. On 12K-token wikitext (≈10× the cliff for Llama 3.2 3B Q4), **RLV scores 10/10** vs. 8/10 for verify-only and 1/10 for long-context-only. Key trick: BM25 + Reciprocal Rank Fusion does the locating; the LLM is only a tiebreaker. Runs on the same 16GB Mac as the 3B model — no RAG index, no embeddings. [`bench/rlv/`](bench/rlv/) · [`docs/phase3_rlv_challenge.md`](docs/phase3_rlv_challenge.md)
 
 ---
 
