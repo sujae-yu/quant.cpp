@@ -1244,26 +1244,50 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    /* Auto-wrap prompt with chat template when --chat is used */
+    /* Auto-wrap prompt with chat template when --chat is used.
+     * Template detection order:
+     *   1. Gemma 4 → <|turn>...<turn|> + thinking mode
+     *   2. Gemma 2/3 → <start_of_turn>...<end_of_turn>
+     *   3. Phi-3/Phi-4 (by filename) → <|user|>...<|end|>
+     *   4. Llama 3.x (by filename) → <|start_header_id|>...<|eot_id|>
+     *   5. Default → ChatML <|im_start|>...<|im_end|> (Qwen/Qwen3/Qwen3.5) */
     char chat_prompt[8192];
     if (chat_mode) {
         tq_model_config_t* mc = &model->config;
+        const char* mp = model_path ? model_path : "";
+        /* Basename for filename detection */
+        const char* bn = strrchr(mp, '/');
+        bn = bn ? bn + 1 : mp;
+
+        int is_phi = (strstr(bn, "phi-3") || strstr(bn, "phi3") ||
+                      strstr(bn, "Phi-3") || strstr(bn, "Phi3") ||
+                      strstr(bn, "phi-4") || strstr(bn, "phi4") ||
+                      strstr(bn, "Phi-4") || strstr(bn, "Phi4"));
+        int is_llama3 = (strstr(bn, "Llama-3") || strstr(bn, "llama-3") ||
+                         strstr(bn, "Llama3") || strstr(bn, "llama3") ||
+                         strstr(bn, "Meta-Llama-3"));
+
         if (mc->model_type == 1 && mc->is_gemma4) {
-            /* Gemma 4: uses <|turn> tokens + thinking mode.
-             * Reference: llama.cpp apply-template output for gemma4. */
+            /* Skip <|think|> in CLI — the server suppresses it via logit mask,
+             * but the CLI has no such suppression. Without it, the CLI uses
+             * plain Gemma 4 format without thinking mode. */
             snprintf(chat_prompt, sizeof(chat_prompt),
-                "<|turn>system\n<|think|><turn|>\n<|turn>user\n%s<turn|>\n<|turn>model\n", prompt);
+                "<|turn>user\n%s<turn|>\n<|turn>model\n", prompt);
         } else if (mc->model_type == 1) {
-            /* Gemma 2/3: <start_of_turn>user\n...\n<end_of_turn>\n<start_of_turn>model\n */
             snprintf(chat_prompt, sizeof(chat_prompt),
                 "<start_of_turn>user\n%s<end_of_turn>\n<start_of_turn>model\n", prompt);
-        } else if (strstr(prompt, "<|start_header_id|>") == NULL) {
-            /* Llama 3 / generic: wrap if not already wrapped */
+        } else if (is_phi) {
+            /* Phi-3/4: <|user|>...<|end|>\n<|assistant|>\n */
+            snprintf(chat_prompt, sizeof(chat_prompt),
+                "<|user|>\n%s<|end|>\n<|assistant|>\n", prompt);
+        } else if (is_llama3) {
             snprintf(chat_prompt, sizeof(chat_prompt),
                 "<|start_header_id|>user<|end_header_id|>\n\n%s<|eot_id|>"
                 "<|start_header_id|>assistant<|end_header_id|>\n\n", prompt);
         } else {
-            snprintf(chat_prompt, sizeof(chat_prompt), "%s", prompt);
+            /* Default ChatML (Qwen/Qwen3/Qwen3.5) */
+            snprintf(chat_prompt, sizeof(chat_prompt),
+                "<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n", prompt);
         }
         prompt = chat_prompt;
     }
