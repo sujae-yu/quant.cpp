@@ -13959,6 +13959,8 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
     float* K_all = s->delta_qkv + dn_kv * dk;
     float* V_all = s->delta_qkv + 2 * dn_kv * dk;
 
+    /* L2 normalization of Q/K: REQUIRED for Qwen3.5-4B.
+     * Removing this causes complete output collapse. */
     for (int h = 0; h < dn_kv; h++) {
         l2_normalize(Q_all + h * dk, dk);
         l2_normalize(K_all + h * dk, dk);
@@ -13991,13 +13993,21 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
         float decay = decay_vals[h]; /* precomputed exp(gate) */
 
 #ifdef __ARM_NEON
-        /* NEON-optimized: fused decay + sk computation.
-         * For each row i of state: decay state, accumulate sk.
-         * sk[j] = sum_i(S[i,j] * K[i]) after decay */
+        /* NEON-optimized: llama.cpp-aligned delta rule.
+         * Formula (matches gated_delta_net.cu):
+         *   sk = S @ K           (BEFORE decay)
+         *   d  = (V - g*sk) * beta
+         *   S  = g*S + K * d
+         *   o  = S @ Q
+         * The key difference from the previous impl: sk is computed
+         * on the ORIGINAL state, then decay is applied to both sk
+         * (in the delta) and S (in the update). This prevents
+         * short-prompt instability where early tokens have near-zero
+         * state and the decay-first approach loses information. */
         float* sk = s->delta_sk;
         memset(sk, 0, (size_t)dv * sizeof(float));
 
-        float32x4_t vdecay = vdupq_n_f32(decay);
+        /* Step A: sk = S @ K (on original state, BEFORE decay) */
         for (int i = 0; i < dk; i++) {
             float* sp = sh + i * dv;
             float ki = kh[i];
@@ -14005,36 +14015,34 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
             int j = 0;
             for (; j + 3 < dv; j += 4) {
                 float32x4_t vs = vld1q_f32(sp + j);
-                vs = vmulq_f32(vs, vdecay);  /* decay */
-                vst1q_f32(sp + j, vs);        /* store decayed state */
                 float32x4_t vsk = vld1q_f32(sk + j);
-                vsk = vfmaq_f32(vsk, vs, vki); /* accumulate sk */
+                vsk = vfmaq_f32(vsk, vs, vki);
                 vst1q_f32(sk + j, vsk);
             }
             for (; j < dv; j++) {
-                sp[j] *= decay;
                 sk[j] += sp[j] * ki;
             }
         }
 
-        /* Delta: d = beta * (V - sk) */
+        /* Step B: d = (V - g*sk) * beta */
         float* d_vec = s->delta_dvec;
         float32x4_t vbeta = vdupq_n_f32(beta_h);
+        float32x4_t vdecay = vdupq_n_f32(decay);
         {
             int j = 0;
             for (; j + 3 < dv; j += 4) {
                 float32x4_t vv = vld1q_f32(vh + j);
-                float32x4_t vs = vld1q_f32(sk + j);
-                float32x4_t vd = vmulq_f32(vbeta, vsubq_f32(vv, vs));
+                float32x4_t vsk = vld1q_f32(sk + j);
+                float32x4_t vd = vmulq_f32(vbeta, vsubq_f32(vv, vmulq_f32(vdecay, vsk)));
                 vst1q_f32(d_vec + j, vd);
             }
             for (; j < dv; j++) {
-                d_vec[j] = beta_h * (vh[j] - sk[j]);
+                d_vec[j] = beta_h * (vh[j] - decay * sk[j]);
             }
         }
 
-        /* State update: S[i][j] += K[i] * d[j] (rank-1 outer product)
-         * + Output: o[j] = sum_i(S[i,j] * Q[i]) (simultaneously) */
+        /* Step C: S = g*S + K*d (state update)
+         * + Output: o = S @ Q (simultaneously) */
         float* oh = s->delta_out + h * dv;
         memset(oh, 0, (size_t)dv * sizeof(float));
 
@@ -14047,26 +14055,24 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
             int j = 0;
             for (; j + 3 < dv; j += 4) {
                 float32x4_t vs = vld1q_f32(sp + j);
+                vs = vmulq_f32(vs, vdecay);           /* S = g*S */
                 float32x4_t vd = vld1q_f32(d_vec + j);
-                vs = vfmaq_f32(vs, vki, vd);  /* S += K[i] * d */
+                vs = vfmaq_f32(vs, vki, vd);           /* S += K[i] * d */
                 vst1q_f32(sp + j, vs);
                 float32x4_t vo = vld1q_f32(oh + j);
-                vo = vfmaq_f32(vo, vs, vqi);   /* o += S * Q[i] */
+                vo = vfmaq_f32(vo, vs, vqi);           /* o += S * Q[i] */
                 vst1q_f32(oh + j, vo);
             }
             for (; j < dv; j++) {
-                sp[j] += ki * d_vec[j];
+                sp[j] = decay * sp[j] + ki * d_vec[j];
                 oh[j] += sp[j] * qi;
             }
         }
 #else
-        /* Scalar fallback */
-        /* Decay: S = S * exp(gate) */
-        for (int i = 0; i < dk * dv; i++) {
-            sh[i] *= decay;
-        }
+        /* Scalar fallback — llama.cpp-aligned formula:
+         * sk = S @ K, d = (V - g*sk) * beta, S = g*S + K*d, o = S @ Q */
 
-        /* Compute sk */
+        /* Compute sk = S @ K (original state, before decay) */
         float* sk = s->delta_sk;
         for (int j = 0; j < dv; j++) {
             float sum = 0.0f;
@@ -14076,20 +14082,20 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
             sk[j] = sum;
         }
 
-        /* Delta */
+        /* Delta: d = (V - g*sk) * beta */
         float* d_vec = s->delta_dvec;
         for (int j = 0; j < dv; j++) {
-            d_vec[j] = beta_h * (vh[j] - sk[j]);
+            d_vec[j] = beta_h * (vh[j] - decay * sk[j]);
         }
 
-        /* State update */
+        /* State update: S = g*S + K*d */
         for (int i = 0; i < dk; i++) {
             for (int j = 0; j < dv; j++) {
-                sh[i * dv + j] += kh[i] * d_vec[j];
+                sh[i * dv + j] = decay * sh[i * dv + j] + kh[i] * d_vec[j];
             }
         }
 
-        /* Output */
+        /* Output: o = S @ Q */
         float* oh = s->delta_out + h * dv;
         for (int j = 0; j < dv; j++) {
             float sum = 0.0f;
@@ -16255,6 +16261,15 @@ tq_gen_skip_tokenize:
         }
     }
 
+    /* Suppress <think> token to disable thinking/reasoning mode.
+     * Qwen3.5 models default to thinking mode which adds many tokens
+     * of internal reasoning before the actual answer. By suppressing
+     * the <think> special token, the model goes directly to answering. */
+    int think_token_id = tokenizer ? str_lookup(tokenizer, "<think>") : -1;
+    if (think_token_id >= 0 && think_token_id < vocab_size) {
+        state->logits[think_token_id] = -1e30f;
+    }
+
     /* Sample first generated token. The seed is configurable via
      * config->rng_seed (default 42); 0 falls back to 42 so existing
      * callers that never set rng_seed get bit-identical behaviour. */
@@ -16271,6 +16286,7 @@ tq_gen_skip_tokenize:
     int generated = 0;
     int output_pos = 0;
     int prev_token = prompt_tokens[n_prompt - 1];
+    int seen_nonwhitespace = 0; /* track whether we've emitted non-whitespace yet */
 
     /* EOS token IDs — check common values across model families.
      * Qwen3.5: eos = 248044 (<|endoftext|>), 248046 (<|im_end|>)
@@ -16366,6 +16382,19 @@ tq_gen_skip_tokenize:
                     strstr(piece, "<1st>") || strstr(piece, "<2nd>") || strstr(piece, "<3rd>")) {
                     piece = "";
                 }
+                /* Skip leading whitespace-only tokens (Qwen3.5 thinking mode
+                 * produces <think>...</think> which gets filtered, but the
+                 * surrounding newlines remain as plain text tokens).
+                 * Only skip before any non-whitespace content has been emitted. */
+                if (!seen_nonwhitespace && piece[0] != '\0') {
+                    const char* p = piece;
+                    while (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t') p++;
+                    if (*p == '\0') {
+                        piece = ""; /* all whitespace — skip */
+                    } else {
+                        seen_nonwhitespace = 1;
+                    }
+                }
             }
             if (should_stop) break;
 
@@ -16387,7 +16416,11 @@ tq_gen_skip_tokenize:
         prev_token = next_token;
         tq_forward(model, state, next_token, pos);
         pos++;
-        generated++;
+        /* Only count tokens that produced visible output toward the limit.
+         * Leading whitespace from thinking mode should not consume the budget. */
+        if (seen_nonwhitespace) {
+            generated++;
+        }
 
         /* Apply repetition penalty before sampling */
         if (rep_penalty > 1.0f) {
@@ -16403,6 +16436,11 @@ tq_gen_skip_tokenize:
                         state->logits[tok] *= rep_penalty;
                 }
             }
+        }
+
+        /* Suppress <think> token to prevent entering thinking mode */
+        if (think_token_id >= 0 && think_token_id < vocab_size) {
+            state->logits[think_token_id] = -1e30f;
         }
 
         /* Sample next token */

@@ -113,8 +113,13 @@ static char* build_prompt(const char** roles, const char** contents,
         snprintf(w, rem, "<|turn>model\n");
     else if (template_type == TMPL_LLAMA3)
         snprintf(w, rem, "<|start_header_id|>assistant<|end_header_id|>\n\n");
-    else
+    else {
+        /* ChatML assistant prompt. Qwen3.5 thinking mode is handled by
+         * suppressing the <think> token logit in tq_generate (quant.h).
+         * The official enable_thinking=False method (injecting <think></think>)
+         * was tested and made results WORSE (3/7 vs 5/7 on Acme). */
         snprintf(w, rem, "<|im_start|>assistant\n");
+    }
 
     return p;
 }
@@ -268,7 +273,8 @@ static void stream_on_token(const char* text, void* user_data) {
         strstr(text, "<|endoftext|>") ||
         strstr(text, "<start_of_turn>") || strstr(text, "<end_of_turn>") ||
         strstr(text, "<|turn>") || strstr(text, "<turn|>") ||
-        strstr(text, "<|think|>") || strstr(text, "<|channel>") ||
+        strstr(text, "<|think|>") || strstr(text, "<think>") ||
+        strstr(text, "</think>") || strstr(text, "<|channel>") ||
         strstr(text, "<eos>") ||
         /* Llama 3.x special tokens */
         strstr(text, "<|begin_of_text|>") || strstr(text, "<|end_of_text|>") ||
@@ -310,7 +316,8 @@ static void collect_on_token(const char* text, void* user_data) {
         strstr(text, "<|endoftext|>") ||
         strstr(text, "<start_of_turn>") || strstr(text, "<end_of_turn>") ||
         strstr(text, "<|turn>") || strstr(text, "<turn|>") ||
-        strstr(text, "<|think|>") || strstr(text, "<|channel>") ||
+        strstr(text, "<|think|>") || strstr(text, "<think>") ||
+        strstr(text, "</think>") || strstr(text, "<|channel>") ||
         strstr(text, "<eos>") ||
         /* Llama 3.x special tokens */
         strstr(text, "<|begin_of_text|>") || strstr(text, "<|end_of_text|>") ||

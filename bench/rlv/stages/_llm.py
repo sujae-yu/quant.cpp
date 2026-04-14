@@ -113,7 +113,7 @@ def start_server(
     threads: int = 8,
     kv_type: str = "turbo_kv_4b",
     v_quant: str = "q4",
-    startup_timeout: float = 120.0,
+    startup_timeout: float = 180.0,
     verbose: bool = True,
 ) -> str:
     """Start a long-running quant-server. Returns the base URL."""
@@ -209,7 +209,7 @@ def stop_server():
 # reasoning chains in chat mode. Verified with the Acme test doc:
 # without this, the model picks the first entity (primacy bias);
 # with this, it correctly identifies the requested role.
-DEFAULT_SYSTEM_PROMPT = "/no_think\nAnswer in one short sentence. No reasoning steps."
+DEFAULT_SYSTEM_PROMPT = "Answer in one short sentence. No reasoning steps."
 
 
 MAX_LLM_RETRIES = 2  # retry once on transient server errors
@@ -297,7 +297,7 @@ def llm_call(
 
         t0 = time.time()
         try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with urllib.request.urlopen(req, timeout=180) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
             break  # success
         except urllib.error.HTTPError as e:
@@ -354,9 +354,13 @@ def llm_call(
         text = f"[ERROR: malformed response: {str(payload)[:200]}]"
 
     if not text and not is_error:
-        # Server returned empty content — treat as soft error
+        # Server returned empty content — likely state corruption.
+        # Restart server to get a clean state for next call.
         is_error = True
         text = "[ERROR: empty response from server]"
+        if _server_proc is not None:
+            stop_server()
+            # Next call will auto-restart via lazy start
 
     return LLMResult(text=text, raw=json.dumps(payload) if isinstance(payload, dict) else str(payload),
                      n_tokens=n_tokens, elapsed=elapsed, is_error=is_error)
