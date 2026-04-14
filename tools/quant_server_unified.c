@@ -105,8 +105,13 @@ static char* build_prompt(const char** roles, const char** contents,
         snprintf(w, rem, "<|assistant|>\n");
     else if (template_type == TMPL_GEMMA)
         snprintf(w, rem, "<|turn>model\n");
-    else
+    else {
+        /* ChatML assistant prompt. Qwen3.5 thinking mode is handled by
+         * suppressing the <think> token logit in tq_generate (quant.h).
+         * The official enable_thinking=False method (injecting <think></think>)
+         * was tested and made results WORSE (3/7 vs 5/7 on Acme). */
         snprintf(w, rem, "<|im_start|>assistant\n");
+    }
 
     return p;
 }
