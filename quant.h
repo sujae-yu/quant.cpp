@@ -13890,6 +13890,8 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
     float* K_all = s->delta_qkv + dn_kv * dk;
     float* V_all = s->delta_qkv + 2 * dn_kv * dk;
 
+    /* L2 normalization of Q/K: REQUIRED for Qwen3.5-4B.
+     * Removing this causes complete output collapse. */
     for (int h = 0; h < dn_kv; h++) {
         l2_normalize(Q_all + h * dk, dk);
         l2_normalize(K_all + h * dk, dk);
