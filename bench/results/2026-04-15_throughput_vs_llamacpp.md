@@ -32,6 +32,29 @@ llama-bench -m <model> -p 0 -n 64 -t 8 -ngl 0
 - **vs CPU (apples-to-apples)**: we're at **23-71%** of llama.cpp's pure-CPU speed depending on model. Phi-3.5 Q8_0 at 71% is competitive.
 - **Smaller models close the gap**: 1B Q8 at 52% vs 3B/4B Q4_K_M at 23-25% suggests our Q4_K dispatch (raw GGUF path) is the largest remaining gap. The Q4-converted path (3B Llama, 1B Llama) is more competitive.
 
+## Prefill (prompt processing) — biggest remaining gap
+
+Generation speed is what gets benchmarked, but for any RAG/long-context
+workload the user actually waits on **prefill**: running the prompt
+through the model to populate the KV cache. quant.cpp currently calls
+the same single-token forward path for every prompt token, so prefill
+runs at roughly the same speed as decode. llama.cpp uses batched
+matrix-matrix matmul during prefill, which is 30-50× faster.
+
+Reproduce: `bash scripts/test_prefill.sh` and `llama-bench -m <model> -p 512 -n 0 -ngl 0`.
+
+| Model | quant.cpp pp~450 | llama.cpp pp512 | Ratio |
+|---|---:|---:|---:|
+| Llama-3.2-1B Q8_0   | 10.2 | 358.7 | **35× behind** |
+| Llama-3.2-3B Q8_0   | 3.2  | 130.1 | **41× behind** |
+| Phi-3.5 Q4_K_M      | 1.9  | 90.8  | **48× behind** |
+| Qwen3.5-4B Q4_K_M   | 2.0  | 88.1  | **44× behind** |
+
+User-visible impact on a 16GB Mac: feeding a 1000-token prompt to
+Phi-3.5-mini takes ~10 minutes today. With a batched-prefill path it
+should be under 15 seconds. **This is the single biggest user-facing
+gap** — and the next major engineering project for the engine.
+
 ## Session improvements (2026-04-15)
 
 Compared to the same hardware before this session:
