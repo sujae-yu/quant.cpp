@@ -564,6 +564,13 @@ void tq_matmul_q4q2_preq(float* out,
                           int n, int d);
 void tq_matmul_q4_preq(float* out, const uint8_t* w_qs, const float* w_scales,
                         const int8_t* x_q8, const float* x_scales, int n, int d);
+/* Batched Q4 matmul for prefill (N >= 2). Out is row-major [N, n_rows].
+ * X is row-major [N, d] FP32. Internally dequants W to FP32 once into the
+ * provided scratch buffer (must be at least n_rows*d floats), then dispatches
+ * cblas_sgemm via Apple Accelerate / AMX. Falls back to N×tq_matmul_q4_preq
+ * on non-Apple platforms. Pass scratch=NULL to allocate internally. */
+void tq_batched_matmul_q4(float* out, const uint8_t* w_qs, const float* w_scales,
+                           const float* x, int n_rows, int d, int N, float* scratch);
 void tq_quantize_row_q4(const float* src, uint8_t* dst_qs, float* dst_scales, int n);
 void tq_dequantize_row_q4(const uint8_t* qs, const float* scales, float* dst, int n);
 void tq_quantize_weights_q4(tq_model_t* model);

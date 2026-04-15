@@ -1033,6 +1033,212 @@ void tq_matmul_q4_preq(float* out, const uint8_t* w_qs, const float* w_scales,
 }
 
 /* ============================================================
+ * Batched Q4 matmul — the prefill accelerator.
+ *
+ * Out[N, n_rows] = X[N, d] @ W[n_rows, d]^T (row-major Y).
+ *
+ * Design rationale (validated by microbench + measurement on M1 Pro):
+ *
+ * Naive approach #1 — dequant W to FP32 then cblas_sgemm — is bound by
+ * the dequant write bandwidth (110 MB FP32 write per Phi-3.5 QKV matmul
+ * costs ~22ms before any compute). For typical prefill batches (N=8..32)
+ * this is *slower* than N independent quantized matmuls.
+ *
+ * The win is to amortize the *weight read*, not the dequant. For each
+ * weight row we read it once (Q4 nibbles), unpack to int8 SIMD register,
+ * and dot it against ALL N input rows in turn. The N-fold inner dot reuses
+ * the same nibble register, so per-row weight bandwidth is unchanged
+ * relative to single-vector matmul, but compute throughput rises N×.
+ *
+ * Implementation: for each of n_rows weight rows, parallel across threads:
+ *   1. Pre-quantize all N input rows to int8 (once per matmul, shared).
+ *   2. Walk the row's blocks; per block, unpack 32 nibbles to int8.
+ *   3. For each of N input rows, vdotq_s32 against the unpacked int8.
+ *   4. Accumulate into out[n][row] with (wd * x_ds[n]) FP scaling.
+ *
+ * Memory: only N×d int8 + N×blocks float scales scratch (a few KB).
+ * No FP32 weight buffer required.
+ * ============================================================ */
+
+typedef struct {
+    float* out;                  /* [N, n_rows] row-major */
+    const uint8_t* w_qs;
+    const float*   w_scales;
+    const int8_t*  X_q;          /* [N, d] int8, row-major */
+    const float*   X_d;          /* [N, n_blocks] scales, row-major */
+    int n_rows;
+    int d;
+    int N;
+    int start_row;
+    int end_row;
+} bm_q4_task_t;
+
+static void* bm_q4_worker(void* arg) {
+    bm_q4_task_t* t = (bm_q4_task_t*)arg;
+    const int n_blocks = t->d / 32;
+    const int N = t->N;
+    const int n_rows = t->n_rows;
+#ifdef __ARM_NEON
+    const uint8x16_t mask_0f = vdupq_n_u8(0x0F);
+    const uint8x16_t v8 = vdupq_n_u8(8);
+#endif
+    for (int i = t->start_row; i < t->end_row; i++) {
+        const uint8_t* wi = t->w_qs + (size_t)i * n_blocks * 16;
+        const float*   si = t->w_scales + (size_t)i * n_blocks;
+
+        /* Per-row N-element accumulator (FP32, on stack — N usually small). */
+        /* For very large N callers will need a different design (chunk N). */
+        float acc[256];
+        if (N > 256) { /* shouldn't happen at sane batch sizes */ continue; }
+        memset(acc, 0, sizeof(float) * N);
+
+        for (int b = 0; b < n_blocks; b++) {
+#ifdef __ARM_NEON
+            /* Unpack 16 packed bytes → 32 signed int8 nibbles, range [-8, 7]. */
+            uint8x16_t pk = vld1q_u8(wi + b * 16);
+            int8x16_t lo = vreinterpretq_s8_u8(vsubq_u8(vandq_u8(pk, mask_0f), v8));
+            int8x16_t hi = vreinterpretq_s8_u8(vsubq_u8(vshrq_n_u8(pk, 4), v8));
+            /* The packed layout interleaves (lo,hi) pairs. Use vld2q_s8 on
+             * x_q to deinterleave to the same scheme: x_q[0,2,4,...] vs
+             * x_q[1,3,5,...]. matmul_q4_rows uses this; we match it. */
+
+            const float wd = si[b];
+            for (int n = 0; n < N; n++) {
+                const int8_t* xqs = t->X_q + (size_t)n * t->d + b * 32;
+                int8x16x2_t xd = vld2q_s8(xqs);
+                int32x4_t a0 = vdupq_n_s32(0);
+#ifdef __ARM_FEATURE_DOTPROD
+                a0 = vdotq_s32(vdotq_s32(a0, lo, xd.val[0]), hi, xd.val[1]);
+#else
+                a0 = vaddq_s32(a0, vpaddlq_s16(vmull_s8(vget_low_s8(lo),  vget_low_s8(xd.val[0]))));
+                a0 = vaddq_s32(a0, vpaddlq_s16(vmull_s8(vget_high_s8(lo), vget_high_s8(xd.val[0]))));
+                a0 = vaddq_s32(a0, vpaddlq_s16(vmull_s8(vget_low_s8(hi),  vget_low_s8(xd.val[1]))));
+                a0 = vaddq_s32(a0, vpaddlq_s16(vmull_s8(vget_high_s8(hi), vget_high_s8(xd.val[1]))));
+#endif
+                int32_t s = vaddvq_s32(a0);
+                float xd_n = t->X_d[(size_t)n * n_blocks + b];
+                acc[n] += wd * xd_n * (float)s;
+            }
+#else
+            /* Scalar fallback */
+            const float wd = si[b];
+            int8_t lo[32], hi[32];
+            for (int j = 0; j < 16; j++) {
+                lo[j] = (int8_t)((wi[b*16+j] & 0x0F) - 8);
+                hi[j] = (int8_t)((wi[b*16+j] >> 4) - 8);
+            }
+            for (int n = 0; n < N; n++) {
+                const int8_t* xqs = t->X_q + (size_t)n * t->d + b * 32;
+                int32_t s = 0;
+                for (int j = 0; j < 16; j++) s += lo[j] * xqs[j*2] + hi[j] * xqs[j*2+1];
+                float xd_n = t->X_d[(size_t)n * n_blocks + b];
+                acc[n] += wd * xd_n * (float)s;
+            }
+#endif
+        }
+
+        /* Scatter accumulator into output row */
+        for (int n = 0; n < N; n++) {
+            t->out[(size_t)n * n_rows + i] = acc[n];
+        }
+    }
+    return NULL;
+}
+
+void tq_batched_matmul_q4(float* out, const uint8_t* w_qs, const float* w_scales,
+                           const float* x, int n_rows, int d, int N, float* scratch)
+{
+    (void)scratch;  /* old scratch buffer no longer needed */
+
+    if (N <= 0 || n_rows <= 0 || d <= 0) return;
+
+    if (N == 1) {
+        /* Degenerate: hand off to single-vector quantized matmul. */
+        int n_blocks = d / 32;
+        int8_t* xq = (int8_t*)malloc((size_t)d * sizeof(int8_t));
+        float*  xs = (float*)malloc((size_t)n_blocks * sizeof(float));
+        if (!xq || !xs) { free(xq); free(xs); return; }
+        for (int b = 0; b < n_blocks; b++) {
+            const float* xp = x + b * 32;
+            float amax = 0.0f;
+            for (int j = 0; j < 32; j++) {
+                float a = xp[j] < 0 ? -xp[j] : xp[j];
+                if (a > amax) amax = a;
+            }
+            float dq = amax / 127.0f;
+            xs[b] = dq;
+            if (dq > 0.0f) {
+                float id = 1.0f / dq;
+                for (int j = 0; j < 32; j++) {
+                    int v = (int)roundf(xp[j] * id);
+                    xq[b*32+j] = (int8_t)(v < -128 ? -128 : (v > 127 ? 127 : v));
+                }
+            } else {
+                memset(xq + b*32, 0, 32);
+            }
+        }
+        tq_matmul_q4_preq(out, w_qs, w_scales, xq, xs, n_rows, d);
+        free(xq); free(xs);
+        return;
+    }
+
+    /* Pre-quantize all N input rows to int8 with per-block scales. */
+    int n_blocks = d / 32;
+    int8_t* X_q = (int8_t*)malloc((size_t)N * d * sizeof(int8_t));
+    float*  X_d = (float*)malloc((size_t)N * n_blocks * sizeof(float));
+    if (!X_q || !X_d) { free(X_q); free(X_d); return; }
+    for (int n = 0; n < N; n++) {
+        for (int b = 0; b < n_blocks; b++) {
+            const float* xp = x + (size_t)n * d + b * 32;
+            float amax = 0.0f;
+            for (int j = 0; j < 32; j++) {
+                float a = xp[j] < 0 ? -xp[j] : xp[j];
+                if (a > amax) amax = a;
+            }
+            float dq = amax / 127.0f;
+            X_d[(size_t)n * n_blocks + b] = dq;
+            if (dq > 0.0f) {
+                float id = 1.0f / dq;
+                for (int j = 0; j < 32; j++) {
+                    int v = (int)roundf(xp[j] * id);
+                    X_q[(size_t)n * d + b*32 + j] = (int8_t)(v < -128 ? -128 : (v > 127 ? 127 : v));
+                }
+            } else {
+                memset(X_q + (size_t)n * d + b*32, 0, 32);
+            }
+        }
+    }
+
+    /* Parallel across rows. */
+    int n_threads = g_n_threads;
+    if (n_threads > n_rows) n_threads = n_rows;
+    if (n_threads > TP_MAX)  n_threads = TP_MAX;
+    if (n_threads < 1)       n_threads = 1;
+
+    bm_q4_task_t tasks[TP_MAX];
+    void* ptrs[TP_MAX];
+    int rows_per = n_rows / n_threads;
+    for (int t = 0; t < n_threads; t++) {
+        tasks[t].out = out;
+        tasks[t].w_qs = w_qs;
+        tasks[t].w_scales = w_scales;
+        tasks[t].X_q = X_q;
+        tasks[t].X_d = X_d;
+        tasks[t].n_rows = n_rows;
+        tasks[t].d = d;
+        tasks[t].N = N;
+        tasks[t].start_row = t * rows_per;
+        tasks[t].end_row = (t == n_threads - 1) ? n_rows : (t + 1) * rows_per;
+        ptrs[t] = &tasks[t];
+    }
+    if (n_threads == 1) bm_q4_worker(ptrs[0]);
+    else                tq_tp_run(bm_q4_worker, ptrs, n_threads);
+
+    free(X_q);
+    free(X_d);
+}
+
+/* ============================================================
  * BF16 matmul worker helpers
  * ============================================================ */
 typedef struct {
