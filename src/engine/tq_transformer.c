@@ -3141,12 +3141,22 @@ int tq_forward_batch(tq_model_t* model, tq_state_t* s,
             tq_rmsnorm(XBN + (size_t)n * dim, Xres + (size_t)n * dim,
                        layer->attn_norm, dim, c->rms_norm_eps);
         }
+        if (l == 0 && dbg) {
+            fprintf(stderr, "[batch] L0 XBN (after attn_norm) tok0 [0:8] = ");
+            for (int i = 0; i < 8; i++) fprintf(stderr, "%.4f ", XBN[i]);
+            fprintf(stderr, "\n");
+        }
 
         /* 2. Q, K, V batched matmul (Q4 main weights) */
         tq_batched_matmul_q4(QB, layer->wq_q4, layer->wq_q4s, XBN, q_dim,  dim, N, NULL);
         tq_batched_matmul_q4(KB, layer->wk_q4, layer->wk_q4s, XBN, kv_dim, dim, N, NULL);
         tq_batched_matmul_q4(VB, layer->wv_q4, layer->wv_q4s, XBN, kv_dim, dim, N, NULL);
 
+        if (l == 0 && dbg) {
+            fprintf(stderr, "[batch] L0 VB (post-matmul) tok0 [0:8] = ");
+            for (int i = 0; i < 8; i++) fprintf(stderr, "%.4f ", VB[i]);
+            fprintf(stderr, "\n");
+        }
         /* 2-r. Add Q2 residual correction per-token (matches tq_matmul_q4q2_preq).
          * Load-time Q4 conversion stores BOTH Q4 main + Q2 residual. Skipping the
          * Q2 part causes large numerical drift. We do the Q2 part per-token using
@@ -3252,6 +3262,14 @@ int tq_forward_batch(tq_model_t* model, tq_state_t* s,
                 tq_rope(qn, kn, pos, c->head_dim, c->n_heads, c->n_kv_heads,
                         c->rope_freq_base);
             }
+            if (n == 0 && l == 0 && dbg) {
+                fprintf(stderr, "[batch] L0 QB (post-RoPE) tok0 [0:8] = ");
+                for (int i = 0; i < 8; i++) fprintf(stderr, "%.4f ", qn[i]);
+                fprintf(stderr, "\n");
+                fprintf(stderr, "[batch] L0 KB (post-RoPE) tok0 [0:8] = ");
+                for (int i = 0; i < 8; i++) fprintf(stderr, "%.4f ", kn[i]);
+                fprintf(stderr, "\n");
+            }
             /* Write to cache */
             memcpy(s->key_cache + (size_t)l * kv_layer_stride + (size_t)pos * kv_dim,
                    kn, (size_t)kv_dim * sizeof(float));
@@ -3259,36 +3277,12 @@ int tq_forward_batch(tq_model_t* model, tq_state_t* s,
                 memcpy(s->value_cache + (size_t)l * kv_layer_stride + (size_t)pos * kv_dim,
                        VB + (size_t)n * kv_dim, (size_t)kv_dim * sizeof(float));
             } else if (s->value_cache_fp16) {
-                /* FP32 → FP16 conversion for storage. */
+                /* Match tq_forward exactly: hardware FP16 conversion via NEON
+                 * vcvt_f16_f32. Inline manual conversion gave subtly different
+                 * rounding which propagated through attention and broke output. */
                 uint16_t* dst = s->value_cache_fp16
                               + (size_t)l * kv_layer_stride + (size_t)pos * kv_dim;
-                const float* src = VB + (size_t)n * kv_dim;
-                for (int i = 0; i < kv_dim; i++) {
-                    /* Use round-to-nearest IEEE 754 binary16 conversion via union */
-                    union { float f; uint32_t u; } v = { .f = src[i] };
-                    uint32_t b = v.u;
-                    uint16_t sign = (b >> 16) & 0x8000;
-                    int32_t  e    = (int32_t)((b >> 23) & 0xff) - 127 + 15;
-                    uint32_t m    = b & 0x7fffff;
-                    uint16_t out;
-                    if (e <= 0) {
-                        if (e < -10) out = sign;
-                        else {
-                            m = (m | 0x800000) >> (1 - e);
-                            if (m & 0x1000) m += 0x2000;
-                            out = sign | (uint16_t)(m >> 13);
-                        }
-                    } else if (e >= 31) {
-                        out = sign | 0x7c00 | (m ? (uint16_t)(m >> 13) : 0);
-                    } else {
-                        if (m & 0x1000) {
-                            m += 0x2000;
-                            if (m & 0x800000) { m = 0; e++; }
-                        }
-                        out = sign | ((uint16_t)e << 10) | (uint16_t)(m >> 13);
-                    }
-                    dst[i] = out;
-                }
+                f32_to_fp16_vec(VB + (size_t)n * kv_dim, dst, kv_dim);
             } else {
                 if (dbg) fprintf(stderr, "[batch] bail: no FP32/FP16 V cache\n");
                 free(X); free(Xres); free(XBN); free(QB); free(KB); free(VB);
@@ -3319,7 +3313,19 @@ int tq_forward_batch(tq_model_t* model, tq_state_t* s,
                 for (int t = 0; t <= pos; t++) {
                     float* kh = K_layer + (size_t)t * kv_dim + kvh * head_dim;
                     float score = 0.0f;
+#ifdef __ARM_NEON
+                    float32x4_t vsum = vdupq_n_f32(0.0f);
+                    int d = 0;
+                    for (; d + 3 < head_dim; d += 4) {
+                        float32x4_t vq = vld1q_f32(qh + d);
+                        float32x4_t vk = vld1q_f32(kh + d);
+                        vsum = vfmaq_f32(vsum, vq, vk);
+                    }
+                    score = vaddvq_f32(vsum);
+                    for (; d < head_dim; d++) score += qh[d] * kh[d];
+#else
                     for (int i = 0; i < head_dim; i++) score += qh[i] * kh[i];
+#endif
                     att[t] = score * scale;
                 }
                 tq_softmax(att, pos + 1);
@@ -3332,38 +3338,45 @@ int tq_forward_batch(tq_model_t* model, tq_state_t* s,
                         for (int i = 0; i < head_dim; i++) oh[i] += w * vh[i];
                     }
                 } else {
-                    /* FP16 V cache: dequant per element via shift. */
+                    /* FP16 V cache: use NEON vcvt_f32_f16 to exactly match the
+                     * per-token attention path. Inline IEEE-754 conversion gave
+                     * subtly different rounding (1 ULP) which compounded across
+                     * 16 layers into garbage output. */
                     for (int t = 0; t <= pos; t++) {
                         uint16_t* vh = V_layer_fp16 + (size_t)t * kv_dim + kvh * head_dim;
                         float w = att[t];
+                        if (w == 0.0f) continue;
+#ifdef __ARM_NEON
+                        float32x4_t va = vdupq_n_f32(w);
+                        int i = 0;
+                        for (; i + 3 < head_dim; i += 4) {
+                            uint16x4_t vh4 = vld1_u16(vh + i);
+                            float32x4_t vf = vcvt_f32_f16(vreinterpret_f16_u16(vh4));
+                            float32x4_t vx = vld1q_f32(oh + i);
+                            vst1q_f32(oh + i, vfmaq_f32(vx, va, vf));
+                        }
+                        for (; i < head_dim; i++) {
+                            uint16_t h16 = vh[i];
+                            __fp16 hf = *(const __fp16*)&h16;
+                            oh[i] += w * (float)hf;
+                        }
+#else
                         for (int i = 0; i < head_dim; i++) {
                             uint16_t h16 = vh[i];
-                            uint32_t sign = (uint32_t)(h16 >> 15) << 31;
-                            uint32_t exp  = (h16 >> 10) & 0x1f;
-                            uint32_t mant = h16 & 0x3ff;
-                            uint32_t bits;
-                            if (exp == 0) {
-                                if (mant == 0) bits = sign;
-                                else {
-                                    /* subnormal */
-                                    while (!(mant & 0x400)) { mant <<= 1; exp--; }
-                                    mant &= 0x3ff;
-                                    bits = sign | ((exp + 127 - 15 + 1) << 23) | (mant << 13);
-                                }
-                            } else if (exp == 31) {
-                                bits = sign | 0x7f800000u | (mant << 13);
-                            } else {
-                                bits = sign | ((exp + 127 - 15) << 23) | (mant << 13);
-                            }
-                            float vf;
-                            memcpy(&vf, &bits, 4);
-                            oh[i] += w * vf;
+                            __fp16 hf = *(const __fp16*)&h16;
+                            oh[i] += w * (float)hf;
                         }
+#endif
                     }
                 }
             }
         }
 
+        if (l == 0 && dbg) {
+            fprintf(stderr, "[batch] L0 OB (post-attn) tok0 [0:8] = ");
+            for (int i = 0; i < 8; i++) fprintf(stderr, "%.4f ", OB[i]);
+            fprintf(stderr, "\n");
+        }
         /* 5. O matmul batched + Q2 residual */
         tq_batched_matmul_q4(X, layer->wo_q4, layer->wo_q4s, OB, dim, q_dim, N, NULL);
         if (layer->wo_q2) {
@@ -3378,8 +3391,25 @@ int tq_forward_batch(tq_model_t* model, tq_state_t* s,
             free(tmp);
         }
 
+        if (l == 0 && dbg) {
+            fprintf(stderr, "[batch] L0 X (after wo matmul) tok0 [0:8] = ");
+            for (int i = 0; i < 8; i++) fprintf(stderr, "%.4f ", X[i]);
+            fprintf(stderr, "\n");
+        }
         /* 6. Residual: Xres += X */
         for (size_t i = 0; i < (size_t)N * dim; i++) Xres[i] += X[i];
+
+        if (l == 0 && dbg) {
+            fprintf(stderr, "[batch] L0 after-attn-residual Xres[tok0,0:8] = ");
+            for (int i = 0; i < 8; i++) fprintf(stderr, "%.4f ", Xres[i]);
+            fprintf(stderr, "\n");
+            fprintf(stderr, "[batch] L0 after-attn-residual QB[tok0,0:8] = ");
+            for (int i = 0; i < 8; i++) fprintf(stderr, "%.4f ", QB[i]);
+            fprintf(stderr, "\n");
+            fprintf(stderr, "[batch] L0 after-attn-residual KB[tok0,0:8] = ");
+            for (int i = 0; i < 8; i++) fprintf(stderr, "%.4f ", KB[i]);
+            fprintf(stderr, "\n");
+        }
 
         /* 7. ffn_norm */
         for (int n = 0; n < N; n++) {
@@ -3431,6 +3461,12 @@ int tq_forward_batch(tq_model_t* model, tq_state_t* s,
 
         /* 11. Residual: Xres += X */
         for (size_t i = 0; i < (size_t)N * dim; i++) Xres[i] += X[i];
+
+        if (l == 0 && dbg) {
+            fprintf(stderr, "[batch] L0 final Xres tok0 [0:8] = ");
+            for (int i = 0; i < 8; i++) fprintf(stderr, "%.4f ", Xres[i]);
+            fprintf(stderr, "\n");
+        }
     }
 
     free(X); free(XBN); free(QB); free(KB); free(VB); free(OB); free(GB); free(UB);

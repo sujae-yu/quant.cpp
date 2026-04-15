@@ -1182,31 +1182,19 @@ void tq_batched_matmul_q4(float* out, const uint8_t* w_qs, const float* w_scales
         return;
     }
 
-    /* Pre-quantize all N input rows to int8 with per-block scales. */
+    /* Pre-quantize all N input rows to int8 with per-block scales.
+     * Use tq_quantize_row_q8 (NEON round-to-nearest-even via vcvtnq_s32_f32)
+     * to exactly match the per-token path's quantization — otherwise tiny
+     * rounding differences (1 ULP) propagate through 16+ layers and produce
+     * garbage output even though the matmul math is identical. */
     int n_blocks = d / 32;
     int8_t* X_q = (int8_t*)malloc((size_t)N * d * sizeof(int8_t));
     float*  X_d = (float*)malloc((size_t)N * n_blocks * sizeof(float));
     if (!X_q || !X_d) { free(X_q); free(X_d); return; }
     for (int n = 0; n < N; n++) {
-        for (int b = 0; b < n_blocks; b++) {
-            const float* xp = x + (size_t)n * d + b * 32;
-            float amax = 0.0f;
-            for (int j = 0; j < 32; j++) {
-                float a = xp[j] < 0 ? -xp[j] : xp[j];
-                if (a > amax) amax = a;
-            }
-            float dq = amax / 127.0f;
-            X_d[(size_t)n * n_blocks + b] = dq;
-            if (dq > 0.0f) {
-                float id = 1.0f / dq;
-                for (int j = 0; j < 32; j++) {
-                    int v = (int)roundf(xp[j] * id);
-                    X_q[(size_t)n * d + b*32 + j] = (int8_t)(v < -128 ? -128 : (v > 127 ? 127 : v));
-                }
-            } else {
-                memset(X_q + (size_t)n * d + b*32, 0, 32);
-            }
-        }
+        tq_quantize_row_q8(x + (size_t)n * d,
+                           X_q + (size_t)n * d,
+                           X_d + (size_t)n * n_blocks, d);
     }
 
     /* Parallel across rows. */
