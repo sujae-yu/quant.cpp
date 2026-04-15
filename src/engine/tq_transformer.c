@@ -2281,7 +2281,7 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
      * on Apple Silicon. Restored at function exit. */
     int _phi3_force_cpu = c->has_fused_qkv;
     if (_phi3_force_cpu) {
-        extern _Thread_local int tq_matmul_force_cpu;
+        extern int tq_matmul_force_cpu;
         tq_matmul_force_cpu = 1;
     }
 
@@ -3008,7 +3008,7 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
 
     /* Restore Metal dispatch for non-Phi3 models */
     if (_phi3_force_cpu) {
-        extern _Thread_local int tq_matmul_force_cpu;
+        extern int tq_matmul_force_cpu;
         tq_matmul_force_cpu = 0;
     }
     return s->logits;

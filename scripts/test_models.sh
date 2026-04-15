@@ -93,6 +93,16 @@ run_test "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"   "Hello" ""  COHERENT "TQ_NO_METAL
 run_test "Qwen3.5-4B-Q4_K_M.gguf"              "Hi" "Hello" STRICT "TQ_NO_METAL=1" "--chat"
 
 echo ""
+echo "--- Metal-ON tier (default build must also produce coherent output) ---"
+# Regression guard (f0091fc follow-up, 2026-04-15): tq_matmul_gguf_cpu used
+# to hard-reset tq_matmul_force_cpu=0, breaking the Phi-3 force-CPU invariant
+# mid-forward. Metal dispatches for wo/w_down then produced garbage.
+# These tests run WITHOUT TQ_NO_METAL so the default build path is exercised.
+run_test "Phi-3.5-mini-instruct-Q4_K_M.gguf"   "Once upon a time" ""  COHERENT ""
+run_test "Qwen3.5-4B-Q4_K_M.gguf"              "Once upon a time" ""  COHERENT ""
+run_test "Llama-3.2-3B-Instruct-Q8_0.gguf"     "Hello" ""  COHERENT ""
+
+echo ""
 echo "--- Summary ---"
 echo "  PASS: $PASS"
 echo "  FAIL: $FAIL"

@@ -2364,7 +2364,11 @@ void tq_matmul_gguf_cpu(float* out, const float* x,
  * before calling tq_matmul_gguf to skip Metal dispatch. Used for
  * Phi-3 fused QKV/FFN matmuls where Metal has a buffer sizing bug
  * with the unusually large output dimensions. */
-_Thread_local int tq_matmul_force_cpu = 0;
+/* Global flag (NOT thread-local) — worker threads in the matmul thread pool
+ * must see the same value set by the main thread. Prior _Thread_local version
+ * silently allowed Metal dispatch from worker threads despite the main thread
+ * setting the flag to 1 (observed as Phi-3.5 Q4_K_M garbage output under Metal). */
+int tq_matmul_force_cpu = 0;
 
 void tq_matmul_gguf(float* out, const float* x,
                     const void* weight, tq_ggml_dtype weight_type,
@@ -2663,9 +2667,14 @@ void tq_matmul_gguf_cpu(float* out, const float* x,
                          const void* weight, tq_ggml_dtype weight_type,
                          int out_dim, int in_dim)
 {
+    /* Save-and-restore, not hard-reset. A caller (e.g., tq_forward for
+     * Phi-3) may have already set the flag to 1 as an invariant for the
+     * entire forward pass; hard-resetting to 0 here would let subsequent
+     * matmuls in the same forward dispatch to Metal and produce garbage. */
+    int prev = tq_matmul_force_cpu;
     tq_matmul_force_cpu = 1;
     tq_matmul_gguf(out, x, weight, weight_type, out_dim, in_dim);
-    tq_matmul_force_cpu = 0;
+    tq_matmul_force_cpu = prev;
 }
 
 /* ============================================================
