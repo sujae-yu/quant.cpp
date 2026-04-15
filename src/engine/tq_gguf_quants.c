@@ -2331,24 +2331,70 @@ typedef struct {
 
 void* q8_int_dot_worker(void* arg) {
     q8_int_task_t* t = (q8_int_task_t*)arg;
-    for (int d = t->start_row; d < t->end_row; d++) {
-        const block_q8_0* wblk = (const block_q8_0*)((const uint8_t*)t->weight + (size_t)d * t->row_bytes);
-        if (d + 1 < t->end_row) {
-            const uint8_t* next = (const uint8_t*)t->weight + (size_t)(d + 1) * t->row_bytes;
-            /* Q8_0 row is n_blocks * 34 bytes — for hidden=3072, ~3.4 KB.
-             * Prefetch first 4 cache lines; HW prefetcher takes the rest. */
+    int d = t->start_row;
+    /* 2-row inner loop: pair rows share x_qs / x_ds. ILP hides weight load
+     * latency. Same trick as the q4k_int worker. */
+    for (; d + 1 < t->end_row; d += 2) {
+        const block_q8_0* wblk0 = (const block_q8_0*)((const uint8_t*)t->weight + (size_t)d * t->row_bytes);
+        const block_q8_0* wblk1 = (const block_q8_0*)((const uint8_t*)t->weight + (size_t)(d + 1) * t->row_bytes);
+        if (d + 2 < t->end_row) {
+            const uint8_t* next = (const uint8_t*)t->weight + (size_t)(d + 2) * t->row_bytes;
             __builtin_prefetch(next +   0, 0, 0);
             __builtin_prefetch(next +  64, 0, 0);
             __builtin_prefetch(next + 128, 0, 0);
             __builtin_prefetch(next + 192, 0, 0);
         }
+        float row_sum0 = 0.0f, row_sum1 = 0.0f;
+        for (int b = 0; b < t->n_blocks; b++) {
+            const float wd0 = fp16_to_fp32(wblk0[b].d);
+            const float wd1 = fp16_to_fp32(wblk1[b].d);
+            const int8_t* wqs0 = wblk0[b].qs;
+            const int8_t* wqs1 = wblk1[b].qs;
+            const int8_t* xqs = t->x_qs + b * 32;
+            int8x16_t xq0 = vld1q_s8(xqs +  0);
+            int8x16_t xq1 = vld1q_s8(xqs + 16);
+#ifdef __ARM_FEATURE_DOTPROD
+            int32x4_t vd0 = vdupq_n_s32(0);
+            int32x4_t vd1 = vdupq_n_s32(0);
+            vd0 = vdotq_s32(vd0, vld1q_s8(wqs0 +  0), xq0);
+            vd0 = vdotq_s32(vd0, vld1q_s8(wqs0 + 16), xq1);
+            vd1 = vdotq_s32(vd1, vld1q_s8(wqs1 +  0), xq0);
+            vd1 = vdotq_s32(vd1, vld1q_s8(wqs1 + 16), xq1);
+            float xd = t->x_ds[b];
+            row_sum0 += wd0 * xd * (float)vaddvq_s32(vd0);
+            row_sum1 += wd1 * xd * (float)vaddvq_s32(vd1);
+#else
+            int32x4_t vd0a = vdupq_n_s32(0), vd0b = vdupq_n_s32(0);
+            int32x4_t vd1a = vdupq_n_s32(0), vd1b = vdupq_n_s32(0);
+            int8x16_t vw0a = vld1q_s8(wqs0);
+            int8x16_t vw0b = vld1q_s8(wqs0 + 16);
+            int8x16_t vw1a = vld1q_s8(wqs1);
+            int8x16_t vw1b = vld1q_s8(wqs1 + 16);
+            vd0a = vpadalq_s16(vd0a, vmull_s8(vget_low_s8(vw0a), vget_low_s8(xq0)));
+            vd0a = vpadalq_s16(vd0a, vmull_s8(vget_high_s8(vw0a), vget_high_s8(xq0)));
+            vd0b = vpadalq_s16(vd0b, vmull_s8(vget_low_s8(vw0b), vget_low_s8(xq1)));
+            vd0b = vpadalq_s16(vd0b, vmull_s8(vget_high_s8(vw0b), vget_high_s8(xq1)));
+            vd1a = vpadalq_s16(vd1a, vmull_s8(vget_low_s8(vw1a), vget_low_s8(xq0)));
+            vd1a = vpadalq_s16(vd1a, vmull_s8(vget_high_s8(vw1a), vget_high_s8(xq0)));
+            vd1b = vpadalq_s16(vd1b, vmull_s8(vget_low_s8(vw1b), vget_low_s8(xq1)));
+            vd1b = vpadalq_s16(vd1b, vmull_s8(vget_high_s8(vw1b), vget_high_s8(xq1)));
+            float xd = t->x_ds[b];
+            row_sum0 += wd0 * xd * (float)vaddvq_s32(vaddq_s32(vd0a, vd0b));
+            row_sum1 += wd1 * xd * (float)vaddvq_s32(vaddq_s32(vd1a, vd1b));
+#endif
+        }
+        t->out[d] = row_sum0;
+        t->out[d + 1] = row_sum1;
+    }
+    /* Tail: single row */
+    for (; d < t->end_row; d++) {
+        const block_q8_0* wblk = (const block_q8_0*)((const uint8_t*)t->weight + (size_t)d * t->row_bytes);
         float row_sum = 0.0f;
         for (int b = 0; b < t->n_blocks; b++) {
             const float wd = fp16_to_fp32(wblk[b].d);
             const int8_t* wqs = wblk[b].qs;
             const int8_t* xqs = t->x_qs + b * 32;
 #ifdef __ARM_FEATURE_DOTPROD
-            /* ARMv8.2 dotprod: 16 int8 MACs per instruction (M1+ have this). */
             int32x4_t vd = vdupq_n_s32(0);
             vd = vdotq_s32(vd, vld1q_s8(wqs +  0), vld1q_s8(xqs +  0));
             vd = vdotq_s32(vd, vld1q_s8(wqs + 16), vld1q_s8(xqs + 16));
