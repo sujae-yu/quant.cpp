@@ -2516,21 +2516,161 @@ void* q5k_int_dot_worker(void* arg) {
     return NULL;
 }
 
+/* 2-row inner loop helper for q4k_int worker — processes 2 output rows
+ * in parallel for instruction-level parallelism. The two rows share the
+ * same x_qs / x_ds / x_isums (read-only activation), but have different
+ * weight rows. Parallelism hides load latency on the weight reads. */
+static inline void q4k_int_dot_two_rows(
+    const block_q4_K* blk0, const block_q4_K* blk1,
+    const int8_t* x_qs, const float* x_ds, const int32_t* x_isums,
+    int nb_super, float* out0, float* out1)
+{
+    const uint8x16_t mask_lo = vdupq_n_u8(0x0F);
+    float sum0 = 0.0f, sum1 = 0.0f;
+    for (int sb = 0; sb < nb_super; sb++) {
+        const block_q4_K* b0 = blk0 + sb;
+        const block_q4_K* b1 = blk1 + sb;
+        const float dW0    = fp16_to_fp32(b0->d);
+        const float dminW0 = fp16_to_fp32(b0->dmin);
+        const float dW1    = fp16_to_fp32(b1->d);
+        const float dminW1 = fp16_to_fp32(b1->dmin);
+
+        uint8_t sc0[8], mn0[8], sc1[8], mn1[8];
+        #define UNPACK(SC, MN, BLK)                                              \
+            do {                                                                  \
+                SC[0] = BLK->scales[0] & 63;                                      \
+                SC[1] = BLK->scales[1] & 63;                                      \
+                SC[2] = BLK->scales[2] & 63;                                      \
+                SC[3] = BLK->scales[3] & 63;                                      \
+                MN[0] = BLK->scales[4] & 63;                                      \
+                MN[1] = BLK->scales[5] & 63;                                      \
+                MN[2] = BLK->scales[6] & 63;                                      \
+                MN[3] = BLK->scales[7] & 63;                                      \
+                SC[4] = (BLK->scales[8]  & 0x0F) | ((BLK->scales[0] >> 6) << 4);  \
+                SC[5] = (BLK->scales[9]  & 0x0F) | ((BLK->scales[1] >> 6) << 4);  \
+                SC[6] = (BLK->scales[10] & 0x0F) | ((BLK->scales[2] >> 6) << 4);  \
+                SC[7] = (BLK->scales[11] & 0x0F) | ((BLK->scales[3] >> 6) << 4);  \
+                MN[4] = (BLK->scales[8]  >> 4) | ((BLK->scales[4] >> 6) << 4);    \
+                MN[5] = (BLK->scales[9]  >> 4) | ((BLK->scales[5] >> 6) << 4);    \
+                MN[6] = (BLK->scales[10] >> 4) | ((BLK->scales[6] >> 6) << 4);    \
+                MN[7] = (BLK->scales[11] >> 4) | ((BLK->scales[7] >> 6) << 4);    \
+            } while (0)
+        UNPACK(sc0, mn0, b0);
+        UNPACK(sc1, mn1, b1);
+        #undef UNPACK
+
+        const uint8_t* q0 = b0->qs;
+        const uint8_t* q1 = b1->qs;
+        int sub_base = sb * 8;
+        int is = 0;
+
+        for (int j = 0; j < 256; j += 64) {
+            int sub_idx_a = sub_base + is;
+            int sub_idx_b = sub_base + is + 1;
+
+            /* Load both rows' nibbles in parallel */
+            uint8x16_t qa0 = vld1q_u8(q0);
+            uint8x16_t qb0 = vld1q_u8(q0 + 16);
+            uint8x16_t qa1 = vld1q_u8(q1);
+            uint8x16_t qb1 = vld1q_u8(q1 + 16);
+            int8x16_t wa_lo0 = vreinterpretq_s8_u8(vandq_u8(qa0, mask_lo));
+            int8x16_t wa_hi0 = vreinterpretq_s8_u8(vandq_u8(qb0, mask_lo));
+            int8x16_t wb_lo0 = vreinterpretq_s8_u8(vshrq_n_u8(qa0, 4));
+            int8x16_t wb_hi0 = vreinterpretq_s8_u8(vshrq_n_u8(qb0, 4));
+            int8x16_t wa_lo1 = vreinterpretq_s8_u8(vandq_u8(qa1, mask_lo));
+            int8x16_t wa_hi1 = vreinterpretq_s8_u8(vandq_u8(qb1, mask_lo));
+            int8x16_t wb_lo1 = vreinterpretq_s8_u8(vshrq_n_u8(qa1, 4));
+            int8x16_t wb_hi1 = vreinterpretq_s8_u8(vshrq_n_u8(qb1, 4));
+
+            const int8_t* xa = x_qs + (size_t)sub_idx_a * 32;
+            int8x16_t xa_lo = vld1q_s8(xa);
+            int8x16_t xa_hi = vld1q_s8(xa + 16);
+            const int8_t* xb = x_qs + (size_t)sub_idx_b * 32;
+            int8x16_t xb_lo = vld1q_s8(xb);
+            int8x16_t xb_hi = vld1q_s8(xb + 16);
+
+#ifdef __ARM_FEATURE_DOTPROD
+            int32x4_t accA0 = vdotq_s32(vdupq_n_s32(0), wa_lo0, xa_lo);
+            accA0 = vdotq_s32(accA0, wa_hi0, xa_hi);
+            int32x4_t accA1 = vdotq_s32(vdupq_n_s32(0), wa_lo1, xa_lo);
+            accA1 = vdotq_s32(accA1, wa_hi1, xa_hi);
+            int32x4_t accB0 = vdotq_s32(vdupq_n_s32(0), wb_lo0, xb_lo);
+            accB0 = vdotq_s32(accB0, wb_hi0, xb_hi);
+            int32x4_t accB1 = vdotq_s32(vdupq_n_s32(0), wb_lo1, xb_lo);
+            accB1 = vdotq_s32(accB1, wb_hi1, xb_hi);
+            int32_t isumA0 = vaddvq_s32(accA0);
+            int32_t isumA1 = vaddvq_s32(accA1);
+            int32_t isumB0 = vaddvq_s32(accB0);
+            int32_t isumB1 = vaddvq_s32(accB1);
+#else
+            /* Fallback: same as single-row but doubled; relies on compiler
+             * to find ILP. Already a win on M1 if vmull/vpadalq saturate. */
+            int32x4_t accA0 = vpadalq_s16(vdupq_n_s32(0), vmull_s8(vget_low_s8(wa_lo0), vget_low_s8(xa_lo)));
+            accA0 = vpadalq_s16(accA0, vmull_s8(vget_high_s8(wa_lo0), vget_high_s8(xa_lo)));
+            accA0 = vpadalq_s16(accA0, vmull_s8(vget_low_s8(wa_hi0),  vget_low_s8(xa_hi)));
+            accA0 = vpadalq_s16(accA0, vmull_s8(vget_high_s8(wa_hi0), vget_high_s8(xa_hi)));
+            int32x4_t accA1 = vpadalq_s16(vdupq_n_s32(0), vmull_s8(vget_low_s8(wa_lo1), vget_low_s8(xa_lo)));
+            accA1 = vpadalq_s16(accA1, vmull_s8(vget_high_s8(wa_lo1), vget_high_s8(xa_lo)));
+            accA1 = vpadalq_s16(accA1, vmull_s8(vget_low_s8(wa_hi1),  vget_low_s8(xa_hi)));
+            accA1 = vpadalq_s16(accA1, vmull_s8(vget_high_s8(wa_hi1), vget_high_s8(xa_hi)));
+            int32x4_t accB0 = vpadalq_s16(vdupq_n_s32(0), vmull_s8(vget_low_s8(wb_lo0), vget_low_s8(xb_lo)));
+            accB0 = vpadalq_s16(accB0, vmull_s8(vget_high_s8(wb_lo0), vget_high_s8(xb_lo)));
+            accB0 = vpadalq_s16(accB0, vmull_s8(vget_low_s8(wb_hi0),  vget_low_s8(xb_hi)));
+            accB0 = vpadalq_s16(accB0, vmull_s8(vget_high_s8(wb_hi0), vget_high_s8(xb_hi)));
+            int32x4_t accB1 = vpadalq_s16(vdupq_n_s32(0), vmull_s8(vget_low_s8(wb_lo1), vget_low_s8(xb_lo)));
+            accB1 = vpadalq_s16(accB1, vmull_s8(vget_high_s8(wb_lo1), vget_high_s8(xb_lo)));
+            accB1 = vpadalq_s16(accB1, vmull_s8(vget_low_s8(wb_hi1),  vget_low_s8(xb_hi)));
+            accB1 = vpadalq_s16(accB1, vmull_s8(vget_high_s8(wb_hi1), vget_high_s8(xb_hi)));
+            int32_t isumA0 = vaddvq_s32(accA0);
+            int32_t isumA1 = vaddvq_s32(accA1);
+            int32_t isumB0 = vaddvq_s32(accB0);
+            int32_t isumB1 = vaddvq_s32(accB1);
+#endif
+
+            float xdA = x_ds[sub_idx_a];
+            float xdB = x_ds[sub_idx_b];
+            int32_t xisA = x_isums[sub_idx_a];
+            int32_t xisB = x_isums[sub_idx_b];
+
+            sum0 += (dW0 * sc0[is + 0] * xdA) * (float)isumA0
+                  - (dminW0 * mn0[is + 0] * xdA) * (float)xisA;
+            sum0 += (dW0 * sc0[is + 1] * xdB) * (float)isumB0
+                  - (dminW0 * mn0[is + 1] * xdB) * (float)xisB;
+            sum1 += (dW1 * sc1[is + 0] * xdA) * (float)isumA1
+                  - (dminW1 * mn1[is + 0] * xdA) * (float)xisA;
+            sum1 += (dW1 * sc1[is + 1] * xdB) * (float)isumB1
+                  - (dminW1 * mn1[is + 1] * xdB) * (float)xisB;
+
+            q0 += 32;
+            q1 += 32;
+            is += 2;
+        }
+    }
+    *out0 = sum0;
+    *out1 = sum1;
+}
+
 void* q4k_int_dot_worker(void* arg) {
     q4k_int_task_t* t = (q4k_int_task_t*)arg;
     const uint8x16_t mask_lo = vdupq_n_u8(0x0F);
-    for (int d = t->start_row; d < t->end_row; d++) {
-        const block_q4_K* wblk = (const block_q4_K*)((const uint8_t*)t->weight + (size_t)d * t->row_bytes);
-        /* Prefetch the next row's weights while we're processing this one.
-         * Each row is nb_super * 144 bytes; for typical Phi-3.5 (in_dim=3072,
-         * 12 super-blocks) that's 1728 bytes. Prefetch 4 cache lines ahead. */
-        if (d + 1 < t->end_row) {
-            const uint8_t* next = (const uint8_t*)t->weight + (size_t)(d + 1) * t->row_bytes;
+    int d = t->start_row;
+    /* 2-row inner loop while we have pairs */
+    for (; d + 1 < t->end_row; d += 2) {
+        const block_q4_K* wblk0 = (const block_q4_K*)((const uint8_t*)t->weight + (size_t)d * t->row_bytes);
+        const block_q4_K* wblk1 = (const block_q4_K*)((const uint8_t*)t->weight + (size_t)(d + 1) * t->row_bytes);
+        if (d + 2 < t->end_row) {
+            const uint8_t* next = (const uint8_t*)t->weight + (size_t)(d + 2) * t->row_bytes;
             __builtin_prefetch(next +   0, 0, 0);
             __builtin_prefetch(next +  64, 0, 0);
             __builtin_prefetch(next + 128, 0, 0);
             __builtin_prefetch(next + 192, 0, 0);
         }
+        q4k_int_dot_two_rows(wblk0, wblk1, t->x_qs, t->x_ds, t->x_isums,
+                             t->nb_super, &t->out[d], &t->out[d + 1]);
+    }
+    /* Tail: single row */
+    for (; d < t->end_row; d++) {
+        const block_q4_K* wblk = (const block_q4_K*)((const uint8_t*)t->weight + (size_t)d * t->row_bytes);
         float row_sum = 0.0f;
         for (int sb = 0; sb < t->nb_super; sb++) {
             const block_q4_K* blk = wblk + sb;
