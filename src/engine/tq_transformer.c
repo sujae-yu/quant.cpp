@@ -2830,9 +2830,9 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
 
     layer_postprocess:
         if (l <= 3 && pos <= 1 && getenv("TQ_DEBUG_PREFILL")) {
-            fprintf(stderr, "[fwd]   L%d pos=%d final x [0:8] = ", l, pos);
-            for (int i = 0; i < 8; i++) fprintf(stderr, "%.4f ", s->x[i]);
-            fprintf(stderr, "\n");
+            double _s=0, _sa=0;
+            for (int i = 0; i < dim; i++) { _s += s->x[i]; _sa += (s->x[i]<0?-s->x[i]:s->x[i]); }
+            fprintf(stderr, "[fwd]   L%d pos=%d final x sum=%.9f sumabs=%.9f\n", l, pos, _s, _sa);
         }
         /* Post-layer processing: PLE, layer_output_scale.
          * GPU graph path jumps here after full-layer GPU forward. */
@@ -3486,9 +3486,11 @@ int tq_forward_batch(tq_model_t* model, tq_state_t* s,
 
         if ((l <= 3) && dbg) {
             for (int tn = 0; tn < N && tn < 2; tn++) {
-                fprintf(stderr, "[batch] L%d final Xres tok%d [0:8] = ", l, tn);
-                for (int i = 0; i < 8; i++) fprintf(stderr, "%.4f ", Xres[(size_t)tn * dim + i]);
-                fprintf(stderr, "\n");
+                float* row = Xres + (size_t)tn * dim;
+                double s=0, sabs=0;
+                for (int i = 0; i < dim; i++) { s += row[i]; sabs += (row[i]<0?-row[i]:row[i]); }
+                fprintf(stderr, "[batch] L%d final Xres tok%d sum=%.9f sumabs=%.9f\n",
+                    l, tn, s, sabs);
             }
         }
     }
