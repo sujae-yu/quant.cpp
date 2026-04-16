@@ -2557,6 +2557,11 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
          * dimensions (hidden=3072, inter=8192) — root cause TBD. CPU NEON
          * path works correctly and is fast enough on Apple Silicon. */
         int skip_metal_batch = (layer->gguf_w_qkv != NULL);
+        /* Also skip Metal batch for force-CPU models (Phi-3, Gemma 4) —
+         * Metal batch begin/end scope has no effect when all matmuls use CPU,
+         * but the batch infrastructure still allocates/manages Metal buffers
+         * unnecessarily and can cause subtle issues. */
+        if (_phi3_force_cpu || _gemma4_force_cpu) skip_metal_batch = 1;
         if (layer_has_gguf && !skip_metal_batch) tq_metal_batch_begin_if_available();
 
         if (layer->delta_a_log) {
