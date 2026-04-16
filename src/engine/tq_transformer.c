@@ -1036,6 +1036,14 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
             tq_matmul_q8(s->q, s->xb, layer->wq_q8, layer->wq_q8s, n_heads * head_dim, dim);
         } else if (has_gguf) {
             tq_matmul_gguf(s->q, s->xb, layer->gguf_wq, layer->gguf_wq_type, n_heads * head_dim, dim);
+            if (l == 0 && pos == 0 && getenv("TQ_DEBUG_WQ")) {
+                double xbs=0, qs=0; int qd = n_heads*head_dim;
+                for (int i=0;i<dim;i++) xbs += s->xb[i]*s->xb[i];
+                for (int i=0;i<qd;i++) qs += s->q[i]*s->q[i];
+                fprintf(stderr, "[WQ-DBG] L0 xb_rms=%.4f q_rms=%.4f type=%d odim=%d idim=%d wq=%p\n",
+                    sqrtf((float)(xbs/dim)), sqrtf((float)(qs/qd)),
+                    (int)layer->gguf_wq_type, qd, dim, (void*)layer->gguf_wq);
+            }
         } else {
             tq_matmul(s->q, s->xb, layer->wq, n_heads * head_dim, dim);
         }
@@ -1108,6 +1116,12 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
      * This gives 2x V memory savings while preserving key precision. */
     int save_pre_norm_keys = 0; /* disabled — see above */
 
+    if (l == 0 && pos == 0 && getenv("TQ_DEBUG_WQ")) {
+        double ks=0, vs=0;
+        for (int i=0;i<kv_dim;i++) { ks += s->k[i]*s->k[i]; vs += s->v[i]*s->v[i]; }
+        fprintf(stderr, "[WQ-DBG] L0 k_rms=%.4f v_rms=%.4f kv_dim=%d has_v=%d is_kv_shared=%d\n",
+            sqrtf((float)(ks/kv_dim)), sqrtf((float)(vs/kv_dim)), kv_dim, has_v_weights, is_kv_shared);
+    }
     /* Apply QK-norm if present (per-head RMSNorm).
      * For KV-shared layers: only Q-norm is applied (no K/V to normalize). */
     if (layer->q_norm) {
@@ -2232,6 +2246,15 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
 #endif
     }
 
+    /* Debug: check xb (attention output) before wo */
+    if (l == 0 && pos == 0 && getenv("TQ_DEBUG_WQ")) {
+        double xbs=0;
+        int q_dim_dbg = n_heads * head_dim;
+        for (int i=0;i<q_dim_dbg;i++) xbs += s->xb[i]*s->xb[i];
+        fprintf(stderr, "[WQ-DBG] L0 pre_wo xb_rms=%.4f (q_dim=%d)\n",
+            sqrtf((float)(xbs/q_dim_dbg)), q_dim_dbg);
+    }
+
     /* Output projection */
     TQ_PROF_START(_tp);
     if (layer->wo_q2)
@@ -2240,9 +2263,15 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
         tq_matmul_q4(s->xb2, s->xb, layer->wo_q4, layer->wo_q4s, dim, n_heads * head_dim);
     else if (layer->wo_q8)
         tq_matmul_q8(s->xb2, s->xb, layer->wo_q8, layer->wo_q8s, dim, n_heads * head_dim);
-    else if (layer->gguf_wo)
+    else if (layer->gguf_wo) {
         tq_matmul_gguf(s->xb2, s->xb, layer->gguf_wo, layer->gguf_wo_type, dim, n_heads * head_dim);
-    else
+        if (l == 0 && pos == 0 && getenv("TQ_DEBUG_WQ")) {
+            double xb2s=0;
+            for (int i=0;i<dim;i++) xb2s += s->xb2[i]*s->xb2[i];
+            fprintf(stderr, "[WQ-DBG] L0 post_wo xb2_rms=%.4f wo_type=%d odim=%d idim=%d\n",
+                sqrtf((float)(xb2s/dim)), (int)layer->gguf_wo_type, dim, n_heads*head_dim);
+        }
+    } else
         tq_matmul(s->xb2, s->xb, layer->wo, dim, n_heads * head_dim);
     /* Flush wo GPU dispatch before CPU reads xb2 for residual add */
     if (has_gguf) tq_metal_batch_flush_if_available();
