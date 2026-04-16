@@ -3069,7 +3069,8 @@ int tq_forward_batch(tq_model_t* model, tq_state_t* s,
     if (c->n_kv_shared_layers > 0)             { if (dbg) fprintf(stderr, "[batch] bail: kv_shared\n"); return -1; }
     if (s->delta_kv_enabled)                   { if (dbg) fprintf(stderr, "[batch] bail: delta_kv\n"); return -1; }
     /* k_highres_window supported — circular FP32 buffer for recent keys. */
-    if (s->value_quant_bits != 0)              { if (dbg) fprintf(stderr, "[batch] bail: quant_V\n"); return -1; }
+    /* Quantized V is now supported (Q4 and Q2). Writes quantized cache per-token;
+     * batched attention reads via fused Q4/Q2 nibble accumulation. */
     /* DeltaNet hybrid (Qwen3.5): self-attention layers run batched (fast);
      * DeltaNet layers loop per-token internally with full Q4+Q2 progressive
      * FFN. The per-layer code below detects layer->delta_a_log and routes. */
@@ -3439,10 +3440,45 @@ int tq_forward_batch(tq_model_t* model, tq_state_t* s,
                 uint16_t* dst = s->value_cache_fp16
                               + (size_t)l * kv_layer_stride + (size_t)pos * kv_dim;
                 f32_to_fp16_vec(VB + (size_t)n * kv_dim, dst, kv_dim);
+            } else if (s->value_quant_bits == 4 && s->value_cache_qs) {
+                /* Q4 V cache: quantize each kv_head's row into the per-pos slot. */
+                int max_seq_l = c->max_seq_len;
+                size_t layer_off_qs = (size_t)l * max_seq_l * s->value_stride_qs;
+                size_t layer_off_sc = (size_t)l * max_seq_l * s->value_stride_scales;
+                uint8_t* vqs = s->value_cache_qs + layer_off_qs
+                             + (size_t)pos * s->value_stride_qs;
+                float*   vsc = s->value_cache_scales + layer_off_sc
+                             + (size_t)pos * s->value_stride_scales;
+                tq_quantize_row_q4(VB + (size_t)n * kv_dim, vqs, vsc, kv_dim);
+                /* highres FP16 window for recent V (optional) */
+                if (s->v_highres_window > 0 && s->value_highres_fp16) {
+                    int win_idx = pos % s->v_highres_window;
+                    size_t hr_layer_stride = (size_t)s->v_highres_window * kv_dim;
+                    uint16_t* hr_dst = s->value_highres_fp16
+                        + (size_t)l * hr_layer_stride + (size_t)win_idx * kv_dim;
+                    f32_to_fp16_vec(VB + (size_t)n * kv_dim, hr_dst, kv_dim);
+                }
+            } else if (s->value_quant_bits == 2 && s->value_cache_qs) {
+                /* Q2 V cache. */
+                int max_seq_l = c->max_seq_len;
+                size_t layer_off_qs = (size_t)l * max_seq_l * s->value_stride_qs;
+                size_t layer_off_sc = (size_t)l * max_seq_l * s->value_stride_scales;
+                uint8_t* vqs = s->value_cache_qs + layer_off_qs
+                             + (size_t)pos * s->value_stride_qs;
+                float*   vsc = s->value_cache_scales + layer_off_sc
+                             + (size_t)pos * s->value_stride_scales;
+                tq_quantize_row_q2(VB + (size_t)n * kv_dim, vqs, vsc, kv_dim);
+                if (s->v_highres_window > 0 && s->value_highres_fp16) {
+                    int win_idx = pos % s->v_highres_window;
+                    size_t hr_layer_stride = (size_t)s->v_highres_window * kv_dim;
+                    uint16_t* hr_dst = s->value_highres_fp16
+                        + (size_t)l * hr_layer_stride + (size_t)win_idx * kv_dim;
+                    f32_to_fp16_vec(VB + (size_t)n * kv_dim, hr_dst, kv_dim);
+                }
             } else {
-                if (dbg) fprintf(stderr, "[batch] bail: no FP32/FP16 V cache\n");
+                if (dbg) fprintf(stderr, "[batch] bail: no FP32/FP16/quant V cache\n");
                 free(X); free(Xres); free(XBN); free(QB); free(KB); free(VB);
-                free(OB); free(GB); free(UB);
+                free(OB); free(GB); free(UB); free(QGB); free(GATEB);
                 return -1;
             }
         }
@@ -3494,7 +3530,7 @@ int tq_forward_batch(tq_model_t* model, tq_state_t* s,
                         float w = att[t];
                         for (int i = 0; i < head_dim; i++) oh[i] += w * vh[i];
                     }
-                } else {
+                } else if (V_layer_fp16) {
                     /* FP16 V cache: use NEON vcvt_f32_f16 to exactly match the
                      * per-token attention path. */
                     for (int t = 0; t <= pos; t++) {
@@ -3522,6 +3558,58 @@ int tq_forward_batch(tq_model_t* model, tq_state_t* s,
                             oh[i] += w * (float)hf;
                         }
 #endif
+                    }
+                } else if (s->value_quant_bits == 4 && s->value_cache_qs) {
+                    /* Q4 V fused domain accumulation — mirror per-token path
+                     * (lines 2047-2119). out[d] += a * scale * (nibble - 8) */
+                    int max_seq_l = c->max_seq_len;
+                    size_t layer_off_qs = (size_t)l * max_seq_l * s->value_stride_qs;
+                    size_t layer_off_sc = (size_t)l * max_seq_l * s->value_stride_scales;
+                    int n_blocks_per_head = (head_dim + 31) / 32;
+                    size_t packed_per_block = 16;
+                    size_t head_qs_off = (size_t)kvh * n_blocks_per_head * packed_per_block;
+                    size_t head_sc_off = (size_t)kvh * n_blocks_per_head;
+                    for (int t = 0; t <= pos; t++) {
+                        float a = att[t];
+                        if (a == 0.0f) continue;
+                        const uint8_t* vqs = s->value_cache_qs + layer_off_qs
+                                           + (size_t)t * s->value_stride_qs + head_qs_off;
+                        const float* vsc = s->value_cache_scales + layer_off_sc
+                                         + (size_t)t * s->value_stride_scales + head_sc_off;
+                        for (int b = 0; b < n_blocks_per_head; b++) {
+                            float combined = a * vsc[b];
+                            const uint8_t* bqs = vqs + (size_t)b * 16;
+                            for (int j = 0; j < 16; j++) {
+                                int idx0 = b * 32 + 2 * j;
+                                int idx1 = idx0 + 1;
+                                if (idx0 >= head_dim) break;
+                                int q0 = bqs[j] & 0xF;
+                                int q1 = bqs[j] >> 4;
+                                oh[idx0] += combined * (float)(q0 - 8);
+                                if (idx1 < head_dim)
+                                    oh[idx1] += combined * (float)(q1 - 8);
+                            }
+                        }
+                    }
+                } else if (s->value_quant_bits == 2 && s->value_cache_qs) {
+                    /* Q2 V: per-token dequantize then accumulate. */
+                    int max_seq_l = c->max_seq_len;
+                    size_t layer_off_qs = (size_t)l * max_seq_l * s->value_stride_qs;
+                    size_t layer_off_sc = (size_t)l * max_seq_l * s->value_stride_scales;
+                    int n_blocks_per_head = (head_dim + 31) / 32;
+                    size_t packed_per_block = 8;  /* Q2: 8 bytes per 32 elems */
+                    size_t head_qs_off = (size_t)kvh * n_blocks_per_head * packed_per_block;
+                    size_t head_sc_off = (size_t)kvh * n_blocks_per_head;
+                    float v_tmp[512]; /* head_dim <= 512 (Gemma 4 full) */
+                    for (int t = 0; t <= pos; t++) {
+                        float a = att[t];
+                        if (a == 0.0f) continue;
+                        const uint8_t* vqs = s->value_cache_qs + layer_off_qs
+                                           + (size_t)t * s->value_stride_qs + head_qs_off;
+                        const float* vsc = s->value_cache_scales + layer_off_sc
+                                         + (size_t)t * s->value_stride_scales + head_sc_off;
+                        tq_dequantize_row_q2(vqs, vsc, v_tmp, head_dim);
+                        for (int i = 0; i < head_dim; i++) oh[i] += a * v_tmp[i];
                     }
                 }
             }
