@@ -2287,9 +2287,19 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
     /* Phi-3: force all GGUF matmuls to CPU for the entire forward pass.
      * Metal kernels produce garbage for Phi-3.5's architecture (fused QKV,
      * head_dim=96, LongRoPE). CPU NEON path is correct and fast enough
-     * on Apple Silicon. Restored at function exit. */
+     * on Apple Silicon. Restored at function exit.
+     *
+     * Gemma 4 MoE: Metal matmul is (a) measurably slower than CPU on large
+     * vocab (262K) single-vector lm_head on Apple M1 and (b) produces zero
+     * output for certain Q4_K matmul shapes in the 26B-A4B variant (first
+     * attention layer's wq matmul returns all-zeros). Force CPU for all
+     * Gemma 4 variants for correctness and speed. Measured:
+     *   Gemma 4 E2B Q8: 5.2 t/s Metal → 10.9 t/s CPU (+110%)
+     *   Gemma 4 E4B Q8: 2.6 t/s Metal → 3.5 t/s CPU (+35%)
+     *   Gemma 4 26B-A4B IQ2: broken Metal → works with CPU */
     int _phi3_force_cpu = c->has_fused_qkv;
-    if (_phi3_force_cpu) {
+    int _gemma4_force_cpu = c->is_gemma4;
+    if (_phi3_force_cpu || _gemma4_force_cpu) {
         extern int tq_matmul_force_cpu;
         tq_matmul_force_cpu = 1;
     }
@@ -3020,8 +3030,8 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
         }
     }
 
-    /* Restore Metal dispatch for non-Phi3 models */
-    if (_phi3_force_cpu) {
+    /* Restore Metal dispatch for non-Phi3/non-Gemma4 models */
+    if (_phi3_force_cpu || _gemma4_force_cpu) {
         extern int tq_matmul_force_cpu;
         tq_matmul_force_cpu = 0;
     }

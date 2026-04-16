@@ -918,6 +918,7 @@ void tq_matmul_q4(float* out, const float* x, const uint8_t* w_qs, const float* 
     {
         extern int tq_metal_batch_active(void);
         extern int tq_metal_matmul_q4(float*, const float*, const uint8_t*, const float*, int, int);
+        extern int tq_matmul_force_cpu;
         /* GPU: batch mode (batched independent matmuls), or immediate for
          * very large matmuls where GPU throughput overcomes per-dispatch
          * overhead (~0.15ms). For batch-1 inference on Apple Silicon unified
@@ -929,8 +930,11 @@ void tq_matmul_q4(float* out, const float* x, const uint8_t* w_qs, const float* 
          * FFN matmuls (gate/up/down ≈ 8-9K) are faster on CPU NEON due to
          * per-dispatch overhead. lm_head with vocab=128-248K is the one
          * matmul where Metal GPU consistently wins — it amortizes the ~0.15ms
-         * dispatch cost over hundreds of MFLOPs. */
-        if (n >= 32768) {
+         * dispatch cost over hundreds of MFLOPs.
+         *
+         * Honor tq_matmul_force_cpu (set by tq_forward for Phi-3 / Gemma 4
+         * where Metal kernels are either slower or produce incorrect output). */
+        if (n >= 32768 && !tq_matmul_force_cpu) {
             int rc = tq_metal_matmul_q4(out, x, w_qs, w_scales, n, d);
             if (rc == 0) return;
         }
