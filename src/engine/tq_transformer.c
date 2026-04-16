@@ -3070,22 +3070,18 @@ int tq_forward_batch(tq_model_t* model, tq_state_t* s,
     if (s->delta_kv_enabled)                   { if (dbg) fprintf(stderr, "[batch] bail: delta_kv\n"); return -1; }
     /* k_highres_window supported — circular FP32 buffer for recent keys. */
     if (s->value_quant_bits != 0)              { if (dbg) fprintf(stderr, "[batch] bail: quant_V\n"); return -1; }
-    /* DeltaNet: hybrid batched is WIP. Default bail to per-token; opt-in
-     * via TQ_DELTANET_BATCH=1 for development. Known issue: FFN handling
-     * for DeltaNet layers in Qwen3.5 still produces empty output. */
-    if (!getenv("TQ_DELTANET_BATCH")) {
-        for (int l = 0; l < c->n_layers; l++) {
-            if (model->layers[l].delta_a_log) {
-                if (dbg) fprintf(stderr, "[batch] bail: deltanet l=%d\n", l);
-                return -1;
-            }
-        }
-    }
+    /* DeltaNet hybrid (Qwen3.5): self-attention layers run batched (fast);
+     * DeltaNet layers loop per-token internally with full Q4+Q2 progressive
+     * FFN. The per-layer code below detects layer->delta_a_log and routes. */
 
     int dim = c->hidden_dim;
     int q_dim = c->n_heads * c->head_dim;
     int kv_dim = c->n_kv_heads * c->head_dim;
     int inter = c->intermediate_dim;
+
+    /* Qwen3.5: wq emits 2× dim — interleaved [Q_h | gate_h | Q_h+1 | gate_h+1 | ...]
+     * The gate is applied (sigmoid) to attention output before wo. */
+    int has_attn_gate = c->attn_output_gate;
 
     /* Allocate batch scratch (N×{dim, q_dim, kv_dim, inter} FP32).
      * For Phi-3.5 N=32: 7 buffers × 32 × 8192 × 4 = 7 MB. Trivial. */
@@ -3100,12 +3096,20 @@ int tq_forward_batch(tq_model_t* model, tq_state_t* s,
     float* QB    = (float*)malloc(bytes_q);
     float* KB    = (float*)malloc(bytes_kv);
     float* VB    = (float*)malloc(bytes_kv);
-    float* OB    = (float*)malloc(bytes_x);
+    /* OB holds attention output BEFORE wo matmul. Width is n_heads*head_dim
+     * (=q_dim), NOT hidden_dim. For models like Qwen3.5 these differ
+     * (dim=2560, q_dim=4096). Sized at N*q_dim. */
+    float* OB    = (float*)malloc(bytes_q);
     float* GB    = (float*)malloc(bytes_h);
     float* UB    = (float*)malloc(bytes_h);
-    if (!X || !Xres || !XBN || !QB || !KB || !VB || !OB || !GB || !UB) {
+    /* attn_output_gate: extra interleaved Q+gate matmul output and a per-token
+     * gate buffer. Allocated only if needed (Qwen3.5). */
+    float* QGB   = has_attn_gate ? (float*)malloc((size_t)N * 2 * q_dim * sizeof(float)) : NULL;
+    float* GATEB = has_attn_gate ? (float*)malloc(bytes_q) : NULL;
+    if (!X || !Xres || !XBN || !QB || !KB || !VB || !OB || !GB || !UB ||
+        (has_attn_gate && (!QGB || !GATEB))) {
         free(X); free(Xres); free(XBN); free(QB); free(KB); free(VB);
-        free(OB); free(GB); free(UB);
+        free(OB); free(GB); free(UB); free(QGB); free(GATEB);
         return -1;
     }
 
@@ -3151,42 +3155,70 @@ int tq_forward_batch(tq_model_t* model, tq_state_t* s,
          * per-token because deltanet_forward writes residual into s->x and
          * we continue from there. */
         if (layer->delta_a_log) {
-            /* DeltaNet: SSM recurrent state can't be batched. Process each
-             * token in order so state advances correctly; no final
-             * tq_forward runs after this function (logits computed below). */
-            extern void deltanet_forward(tq_model_t* model, tq_state_t* s, int l);
+            /* DeltaNet: SSM recurrent state can't be batched across the
+             * sequence dim, so we process tokens one at a time, but mirror
+             * tq_forward's exact per-layer path (attn-norm → deltanet_forward
+             * → ffn-norm → Q4+Q2 gate/up → silu*up → Q4+Q2 down → residual).
+             * deltanet_forward updates s->delta_state and s->conv_state in
+             * sequence order. */
+            int inter_l = c->intermediate_dim;
             for (int n = 0; n < N; n++) {
                 memcpy(s->x, Xres + (size_t)n * dim, (size_t)dim * sizeof(float));
+
+                /* attn norm → s->xb (deltanet_forward expects normed input) */
                 tq_rmsnorm(s->xb, s->x, layer->attn_norm, dim, c->rms_norm_eps);
                 deltanet_forward(model, s, l);
-                /* deltanet_forward adds residual into s->x. Copy back. */
-                memcpy(Xres + (size_t)n * dim, s->x, (size_t)dim * sizeof(float));
+                /* deltanet_forward already added residual into s->x */
 
-                /* FFN for this token — use the existing tq_forward's logic
-                 * inline. Most Qwen3.5 layers have FFN norm → gate+up → silu
-                 * → down → residual. */
-                if (layer->w_gate_q4 && layer->w_up_q4 && layer->w_down_q4) {
+                /* Dense FFN — mirror tq_forward exactly. Qwen3.5: SwiGLU,
+                 * Q4 main + optional Q2 progressive residual. */
+                if (layer->w_gate_q4 || layer->w_gate_q8 || layer->w_gate) {
                     tq_rmsnorm(s->xb, s->x, layer->ffn_norm, dim, c->rms_norm_eps);
-                    /* Use tq_matmul_q4 via per-token path */
-                    int inter_l = c->intermediate_dim;
-                    float* tmp_g = (float*)malloc((size_t)inter_l * sizeof(float));
-                    float* tmp_u = (float*)malloc((size_t)inter_l * sizeof(float));
-                    float* tmp_d = (float*)malloc((size_t)dim * sizeof(float));
-                    if (tmp_g && tmp_u && tmp_d) {
+                    if (layer->w_gate_q4 && layer->w_gate_q2) {
+                        /* Q4+Q2 progressive */
                         tq_quantize_row_q8(s->xb, s->xb_q8, s->xb_q8s, dim);
-                        tq_matmul_q4_preq(tmp_g, layer->w_gate_q4, layer->w_gate_q4s, s->xb_q8, s->xb_q8s, inter_l, dim);
-                        tq_matmul_q4_preq(tmp_u, layer->w_up_q4, layer->w_up_q4s, s->xb_q8, s->xb_q8s, inter_l, dim);
-                        for (int i = 0; i < inter_l; i++) {
-                            float g = tmp_g[i];
-                            tmp_g[i] = (g / (1.0f + expf(-g))) * tmp_u[i];
-                        }
-                        tq_quantize_row_q8(tmp_g, s->xb_q8, s->xb_q8s, inter_l);
-                        tq_matmul_q4_preq(tmp_d, layer->w_down_q4, layer->w_down_q4s, s->xb_q8, s->xb_q8s, dim, inter_l);
-                        for (int i = 0; i < dim; i++) s->x[i] += tmp_d[i];
-                        memcpy(Xres + (size_t)n * dim, s->x, (size_t)dim * sizeof(float));
+                        tq_matmul_q4_preq(s->hb,  layer->w_gate_q4, layer->w_gate_q4s,
+                                           s->xb_q8, s->xb_q8s, inter_l, dim);
+                        tq_matmul_q4_preq(s->hb2, layer->w_up_q4, layer->w_up_q4s,
+                                           s->xb_q8, s->xb_q8s, inter_l, dim);
+                        tq_matmul_q2_preq(s->xb2, layer->w_gate_q2, layer->w_gate_q2s,
+                                           s->xb_q8, s->xb_q8s, inter_l, dim);
+                        for (int i = 0; i < inter_l; i++) s->hb[i] += s->xb2[i];
+                        tq_matmul_q2_preq(s->xb2, layer->w_up_q2, layer->w_up_q2s,
+                                           s->xb_q8, s->xb_q8s, inter_l, dim);
+                        for (int i = 0; i < inter_l; i++) s->hb2[i] += s->xb2[i];
+                    } else if (layer->w_gate_q4) {
+                        tq_quantize_row_q8(s->xb, s->xb_q8, s->xb_q8s, dim);
+                        tq_matmul_q4_preq(s->hb,  layer->w_gate_q4, layer->w_gate_q4s,
+                                           s->xb_q8, s->xb_q8s, inter_l, dim);
+                        tq_matmul_q4_preq(s->hb2, layer->w_up_q4, layer->w_up_q4s,
+                                           s->xb_q8, s->xb_q8s, inter_l, dim);
+                    } else if (layer->w_gate_q8) {
+                        tq_matmul_q8(s->hb,  s->xb, layer->w_gate_q8, layer->w_gate_q8s, inter_l, dim);
+                        tq_matmul_q8(s->hb2, s->xb, layer->w_up_q8,   layer->w_up_q8s,   inter_l, dim);
+                    } else {
+                        tq_matmul(s->hb,  s->xb, layer->w_gate, inter_l, dim);
+                        tq_matmul(s->hb2, s->xb, layer->w_up,   inter_l, dim);
                     }
-                    free(tmp_g); free(tmp_u); free(tmp_d);
+                    tq_silu(s->hb, inter_l);
+                    tq_mul(s->hb, s->hb, s->hb2, inter_l);
+                    /* Mirror tq_forward exactly: when w_down_q2 is set, use
+                     * Q2-only (NOT Q4+Q2). See tq_transformer.c:2796-2810. */
+                    if (layer->w_down_q2) {
+                        TQ_MATMUL_Q2_OR_1BIT_FP32(s->xb2, s->hb, layer->w_down_q2, layer->w_down_q2s,
+                                                   dim, inter_l, model->use_1bit_weights);
+                    } else if (layer->w_down_q4) {
+                        tq_matmul_q4(s->xb2, s->hb, layer->w_down_q4, layer->w_down_q4s, dim, inter_l);
+                    } else if (layer->w_down_q8) {
+                        tq_matmul_q8(s->xb2, s->hb, layer->w_down_q8, layer->w_down_q8s, dim, inter_l);
+                    } else {
+                        tq_matmul(s->xb2, s->hb, layer->w_down, dim, inter_l);
+                    }
+                    tq_add(s->x, s->x, s->xb2, dim);
                 }
+
+                /* Write hidden back to per-position residual stream. */
+                memcpy(Xres + (size_t)n * dim, s->x, (size_t)dim * sizeof(float));
             }
             continue;  /* skip the self-attention layer code below */
         }
@@ -3208,8 +3240,15 @@ int tq_forward_batch(tq_model_t* model, tq_state_t* s,
                        layer->attn_norm, dim, c->rms_norm_eps);
         }
 
-        /* 2. Q, K, V batched matmul (Q4 main weights) */
-        tq_batched_matmul_q4(QB, layer->wq_q4, layer->wq_q4s, XBN, q_dim,  dim, N, NULL);
+        /* 2. Q, K, V batched matmul (Q4 main weights).
+         * For attn_output_gate (Qwen3.5): Q matmul output is 2× q_dim,
+         * interleaved [Q_h | gate_h] per head. Deinterleave into QB, GATEB. */
+        if (has_attn_gate) {
+            int qg_dim = 2 * q_dim;
+            tq_batched_matmul_q4(QGB, layer->wq_q4, layer->wq_q4s, XBN, qg_dim, dim, N, NULL);
+        } else {
+            tq_batched_matmul_q4(QB, layer->wq_q4, layer->wq_q4s, XBN, q_dim, dim, N, NULL);
+        }
         tq_batched_matmul_q4(KB, layer->wk_q4, layer->wk_q4s, XBN, kv_dim, dim, N, NULL);
         tq_batched_matmul_q4(VB, layer->wv_q4, layer->wv_q4s, XBN, kv_dim, dim, N, NULL);
 
@@ -3224,18 +3263,22 @@ int tq_forward_batch(tq_model_t* model, tq_state_t* s,
          * the existing primitive — Q2 is small (2 bits) so the per-token cost is
          * a fraction of the Q4 batched savings. */
         if (layer->wq_q2 || layer->wk_q2 || layer->wv_q2) {
-            int n_blocks_d = dim / 32;
+            int q_out_dim = has_attn_gate ? 2 * q_dim : q_dim;
             int8_t* xq = s->xb_q8;     /* reuse state's per-token Q8 buffer */
             float*  xs = s->xb_q8s;
-            float* tmp_q = (float*)malloc((size_t)q_dim  * sizeof(float));
+            float* tmp_q = (float*)malloc((size_t)q_out_dim * sizeof(float));
             float* tmp_k = (float*)malloc((size_t)kv_dim * sizeof(float));
             float* tmp_v = (float*)malloc((size_t)kv_dim * sizeof(float));
             for (int n = 0; n < N; n++) {
                 /* Quantize this row's XBN to Q8 once. */
                 tq_quantize_row_q8(XBN + (size_t)n * dim, xq, xs, dim);
                 if (layer->wq_q2) {
-                    tq_matmul_q2_preq(tmp_q, layer->wq_q2, layer->wq_q2s, xq, xs, q_dim, dim);
-                    for (int i = 0; i < q_dim; i++) QB[(size_t)n * q_dim + i] += tmp_q[i];
+                    tq_matmul_q2_preq(tmp_q, layer->wq_q2, layer->wq_q2s, xq, xs, q_out_dim, dim);
+                    if (has_attn_gate) {
+                        for (int i = 0; i < q_out_dim; i++) QGB[(size_t)n * q_out_dim + i] += tmp_q[i];
+                    } else {
+                        for (int i = 0; i < q_dim; i++) QB[(size_t)n * q_dim + i] += tmp_q[i];
+                    }
                 }
                 if (layer->wk_q2) {
                     tq_matmul_q2_preq(tmp_k, layer->wk_q2, layer->wk_q2s, xq, xs, kv_dim, dim);
@@ -3247,10 +3290,31 @@ int tq_forward_batch(tq_model_t* model, tq_state_t* s,
                 }
             }
             free(tmp_q); free(tmp_k); free(tmp_v);
-            (void)n_blocks_d;
         }
 
-        /* 2a. Apply Q/K/V biases (Qwen2/2.5/3 — NULL for Llama). */
+        /* 2c. Deinterleave Q+gate per-head into QB and GATEB FIRST.
+         * Layout in QGB: per-token interleaved [Q_h0 | gate_h0 | Q_h1 | gate_h1 | ...]
+         * head_dim contiguous each. Must run before Q-bias (which is q_dim long). */
+        if (has_attn_gate) {
+            int head_dim = c->head_dim;
+            int n_heads = c->n_heads;
+            for (int n = 0; n < N; n++) {
+                float* src = QGB + (size_t)n * 2 * q_dim;
+                float* qdst = QB + (size_t)n * q_dim;
+                float* gdst = GATEB + (size_t)n * q_dim;
+                for (int h = 0; h < n_heads; h++) {
+                    memcpy(qdst + h * head_dim,
+                           src  + h * 2 * head_dim,
+                           (size_t)head_dim * sizeof(float));
+                    memcpy(gdst + h * head_dim,
+                           src  + h * 2 * head_dim + head_dim,
+                           (size_t)head_dim * sizeof(float));
+                }
+            }
+        }
+
+        /* 2a. Apply Q/K/V biases (Qwen2/2.5/3 — NULL for Llama).
+         * q_bias is q_dim long (NOT 2*q_dim) — only applies to Q, not gate. */
         if (layer->q_bias) {
             for (int n = 0; n < N; n++)
                 for (int i = 0; i < q_dim; i++) QB[(size_t)n * q_dim + i] += layer->q_bias[i];
@@ -3396,7 +3460,8 @@ int tq_forward_batch(tq_model_t* model, tq_state_t* s,
         for (int n = 0; n < N; n++) {
             int pos = pos_start + n;
             float* qn = QB + (size_t)n * q_dim;
-            float* on = OB + (size_t)n * dim;
+            /* OB stride is q_dim (n_heads*head_dim), not hidden_dim. */
+            float* on = OB + (size_t)n * q_dim;
             for (int h = 0; h < n_heads; h++) {
                 int kvh = h / kv_mul;
                 float* qh = qn + h * head_dim;
@@ -3465,13 +3530,23 @@ int tq_forward_batch(tq_model_t* model, tq_state_t* s,
         if (l == 3 && dbg) {
             /* Compute hash over OB to detect drift anywhere in the vector */
             for (int tn = 0; tn < N && tn < 2; tn++) {
-                float* obr = OB + (size_t)tn * dim;
+                float* obr = OB + (size_t)tn * q_dim;
                 double s=0, sabs=0;
-                for (int i = 0; i < dim; i++) { s += obr[i]; sabs += (obr[i]<0?-obr[i]:obr[i]); }
+                for (int i = 0; i < q_dim; i++) { s += obr[i]; sabs += (obr[i]<0?-obr[i]:obr[i]); }
                 fprintf(stderr, "[batch] L3 OB tok%d sum=%.6f sumabs=%.6f [0:4]=%.6f,%.6f,%.6f,%.6f [dim/2]=%.6f\n",
                     tn, s, sabs, obr[0], obr[1], obr[2], obr[3], obr[dim/2]);
             }
         }
+        /* 4b. Apply attention output gate (Qwen3.5): OB *= sigmoid(GATEB)
+         * elementwise per (head, head_dim). */
+        if (has_attn_gate) {
+            for (size_t i = 0; i < (size_t)N * q_dim; i++) {
+                float g = GATEB[i];
+                float sig = 1.0f / (1.0f + expf(-g));
+                OB[i] *= sig;
+            }
+        }
+
         /* 5. O matmul batched + Q2 residual */
         tq_batched_matmul_q4(X, layer->wo_q4, layer->wo_q4s, OB, dim, q_dim, N, NULL);
         if (layer->wo_q2) {
@@ -3588,5 +3663,6 @@ int tq_forward_batch(tq_model_t* model, tq_state_t* s,
 
     free(X); free(XBN); free(QB); free(KB); free(VB); free(OB); free(GB); free(UB);
     free(Xres);
+    free(QGB); free(GATEB);
     return pos_start + N;
 }
