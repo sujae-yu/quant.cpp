@@ -82,9 +82,43 @@ one day. Output bit-identical to per-token baseline.
 Remaining 8-10× gap sources:
 - Llama.cpp uses int8 quantized matmul directly on AMX. Our batched
   code still dequants Q4→FP32 internally in `tq_batched_matmul_q4`.
-- Architecture specializations (Phi-3 fused QKV, DeltaNet) still
-  per-token; extending batched is engineering work tracked in
+- Architecture specializations (Phi-3 fused QKV) still per-token;
+  extending batched is engineering work tracked in
   `docs/dev/batched_prefill_handoff.md`.
+
+### Update 2026-04-16 (later): Qwen3.5 DeltaNet hybrid now batched
+
+Qwen3.5 has 8 self_attn + 24 DeltaNet layers AND uses `attn_output_gate`
+(wq emits 2× n_heads*head_dim, gate sigmoid applied post-attention).
+
+Two bugs were blocking batched on this architecture:
+
+1. **OB stride bug** (latent for any model where `q_dim != hidden_dim`):
+   attention output buffer was sized `N*hidden_dim` but written with
+   stride `q_dim`. Llama happens to have these equal so never caught;
+   Qwen3.5-4B (dim=2560, q_dim=4096) overflowed. Fix: size at `N*q_dim`.
+
+2. **DeltaNet hybrid path missing**: bailed entirely. Now self_attn
+   layers run batched; DeltaNet layers loop per-token within the same
+   tq_forward_batch, mirroring tq_forward's exact FFN sequence.
+
+Plus: full attn_output_gate handling in batched (deinterleave Q and gate,
+apply sigmoid to OB before wo).
+
+Measured (Qwen3.5-4B Q4_K_M, 600-token prompt):
+
+| Model | Baseline (per-token) | Batched (new default) | Speedup |
+|---|---:|---:|---:|
+| Qwen3.5-4B Q4_K_M | 37.6 s, garbled | **10.6 s, coherent** | **3.5×** |
+
+Quality also IMPROVED — batched stores FP32 K cache for prefill positions
+in addition to quant K cache, reducing attention precision loss during
+the prefill window.
+
+vs llama.cpp Qwen3.5-4B Q4_K_M pp256 on M1 Pro:
+- llama.cpp Metal:    416 tok/s
+- llama.cpp CPU+BLAS:  88 tok/s
+- quant.cpp batched: ~113 tok/s (CPU only, beats llama.cpp CPU)
 
 ## Session improvements (2026-04-15)
 
