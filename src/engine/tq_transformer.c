@@ -1124,8 +1124,14 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
     }
 
     /* Gemma 4: V normalization (RMS norm without learned weights).
-     * Reference: refs/llama.cpp/src/models/gemma4-iswa.cpp line 82 */
-    if (c->is_gemma4 && has_v_weights && !is_kv_shared) {
+     * Reference: refs/llama.cpp/src/models/gemma4-iswa.cpp line 92
+     *   Vcur = ggml_rms_norm(ctx0, Vcur, hparams.f_norm_rms_eps);
+     * This runs UNCONDITIONALLY in llama.cpp whenever this layer has KV
+     * (regardless of whether wv is present — when wv is absent, V = Kcur
+     * pre-norm, and then this plain RMS norm is applied to V separately
+     * from K's weighted norm). Fixes Gemma 4 26B-A4B FULL attention layers
+     * (layers 5, 11, 17, 23, 29) which lack attn_v weights. */
+    if (c->is_gemma4 && !is_kv_shared) {
         for (int h = 0; h < n_kv_heads; h++) {
             float* vh = s->v + h * head_dim;
             float ss = 0.0f;
