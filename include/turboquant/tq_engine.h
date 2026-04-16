@@ -389,6 +389,11 @@ typedef struct {
      * k_highres_window=32 achieves uniform_4b quality at ~2.1 effective bpe. */
     int k_highres_window;    /* number of recent tokens stored as FP32 keys (0 = disabled) */
     float* key_highres_fp32; /* FP32 key cache for recent tokens [n_layers, window, kv_dim] */
+
+    /* Speculative decoding: when non-NULL, tq_forward_batch writes the argmax
+     * token at each of N positions to this buffer (must have ≥ N ints).
+     * Reset to NULL after use by the caller. */
+    int* batch_argmax_out;
 } tq_state_t;
 
 /* ============================================================
@@ -543,6 +548,20 @@ float* tq_forward(tq_model_t* model, tq_state_t* state, int token, int pos);
  * Requires: model->use_q4_weights (load-time Q4 conversion). */
 int tq_forward_batch(tq_model_t* model, tq_state_t* state,
                      const int* tokens, int N, int pos_start);
+
+/* Speculative-decoding variant: after the batched forward, additionally
+ * compute argmax logits for ALL N positions and write them to argmax_out[N].
+ * This enables speculative verification where each position's argmax is
+ * compared to a draft model's prediction.
+ *
+ * argmax_out: must point to an array of at least N ints. The i-th entry
+ * receives argmax(logits at position pos_start+i).
+ *
+ * Returns pos_start + N on success (same as tq_forward_batch), -1 on
+ * unsupported model config (falls back caller should per-token). */
+int tq_forward_batch_spec(tq_model_t* model, tq_state_t* state,
+                          const int* tokens, int N, int pos_start,
+                          int* argmax_out);
 
 /* Generation */
 int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,

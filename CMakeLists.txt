@@ -267,6 +267,10 @@ endif()
 add_executable(quant tools/quant.c)
 target_link_libraries(quant turboquant)
 
+# Speculative decoding benchmark — draft + target dual-model test harness.
+add_executable(speculative_decode bench/speculative_decode.c)
+target_link_libraries(speculative_decode turboquant)
+
 # Debug comparison tool
 add_executable(debug_compare tools/debug_compare.c)
 target_link_libraries(debug_compare turboquant)

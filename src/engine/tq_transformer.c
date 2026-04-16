@@ -3730,8 +3730,37 @@ int tq_forward_batch(tq_model_t* model, tq_state_t* s,
     /* Compute logits for the LAST token in the batch so the caller can
      * skip running tq_forward again. For non-DeltaNet models this is just
      * a convenience; for DeltaNet it's required to avoid double-advancing
-     * the recurrent state. */
-    {
+     * the recurrent state.
+     *
+     * For speculative decoding (s->batch_argmax_out != NULL): compute
+     * argmax logits for ALL N positions, not just the last. */
+    if (s->batch_argmax_out) {
+        int vocab = c->vocab_size;
+        /* Norm each of N positions, then compute per-position argmax.
+         * Reuse s->x as per-position scratch to avoid a big alloc. */
+        for (int n = 0; n < N; n++) {
+            memcpy(s->x, Xres + (size_t)n * dim, (size_t)dim * sizeof(float));
+            tq_rmsnorm(s->x, s->x, model->output_norm, dim, c->rms_norm_eps);
+            if (model->output_gguf) {
+                tq_matmul_gguf(s->logits, s->x, model->output_gguf,
+                                model->output_gguf_type, vocab, dim);
+            } else if (model->output_qs) {
+                tq_matmul_q4(s->logits, s->x, model->output_qs, model->output_scales,
+                              vocab, dim);
+            } else if (model->output_weight_bf16) {
+                tq_matmul_bf16(s->logits, s->x, model->output_weight_bf16, vocab, dim);
+            } else if (model->output_weight) {
+                tq_matmul(s->logits, s->x, model->output_weight, vocab, dim);
+            }
+            /* Argmax */
+            int amax = 0; float vmax = s->logits[0];
+            for (int i = 1; i < vocab; i++) {
+                if (s->logits[i] > vmax) { vmax = s->logits[i]; amax = i; }
+            }
+            s->batch_argmax_out[n] = amax;
+        }
+        /* s->logits now holds the LAST position's logits (same as non-spec path). */
+    } else {
         int last = N - 1;
         float* x_last = Xres + (size_t)last * dim;
         memcpy(s->x, x_last, (size_t)dim * sizeof(float));
@@ -3753,4 +3782,16 @@ int tq_forward_batch(tq_model_t* model, tq_state_t* s,
     free(Xres);
     free(QGB); free(GATEB);
     return pos_start + N;
+}
+
+/* Speculative-decoding wrapper: set s->batch_argmax_out, call tq_forward_batch,
+ * then clear the field. See tq_engine.h for the API contract. */
+int tq_forward_batch_spec(tq_model_t* model, tq_state_t* s,
+                          const int* tokens, int N, int pos_start,
+                          int* argmax_out) {
+    if (!argmax_out) return -1;
+    s->batch_argmax_out = argmax_out;
+    int rc = tq_forward_batch(model, s, tokens, N, pos_start);
+    s->batch_argmax_out = NULL;
+    return rc;
 }
