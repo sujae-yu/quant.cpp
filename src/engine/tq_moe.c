@@ -968,19 +968,43 @@ moe_cpu_fallback: ;
                          exp->down_q4_qs, exp->down_q4_scales,
                          hidden_dim, expert_dim);
         } else {
-            /* On-the-fly GGUF dequant path (IQ2_XXS/IQ2_S).
-             * Metal batch DISABLED for MoE experts: GPU IQ2 dequant
-             * overhead exceeds CPU NEON fused dot speed for small 512×2048 matmuls. */
-
-            /* gate = input @ w_gate^T   -> [expert_dim] */
-            tq_matmul_gguf(state->expert_hb, input,
-                           exp->w_gate, exp->gate_type,
-                           expert_dim, hidden_dim);
-
-            /* up = input @ w_up^T   -> [expert_dim] */
-            tq_matmul_gguf(state->expert_hb2, input,
-                           exp->w_up, exp->up_type,
-                           expert_dim, hidden_dim);
+            /* On-the-fly GGUF dequant path (IQ2_XXS/IQ2_S/IQ4_NL etc).
+             * For fused gate_up_exps (Gemma 4), gate and up weights are
+             * CONTIGUOUS: w_gate points to first expert_dim rows, w_up to
+             * the next. One matmul with 2×expert_dim rows saves a dispatch. */
+            if (exp->gate_type == exp->up_type &&
+                (const uint8_t*)exp->w_up == (const uint8_t*)exp->w_gate +
+                    tq_ggml_type_size(exp->gate_type) *
+                    ((size_t)expert_dim * hidden_dim / tq_ggml_type_blck(exp->gate_type))) {
+                /* Fused gate+up: single matmul, output is [gate | up].
+                 * Stack buffer for the 2× output (max 16K floats = 64KB). */
+                float fused_out[16384];
+                if (2 * expert_dim <= 16384) {
+                    tq_matmul_gguf(fused_out, input,
+                                   exp->w_gate, exp->gate_type,
+                                   2 * expert_dim, hidden_dim);
+                    memcpy(state->expert_hb,  fused_out,
+                           (size_t)expert_dim * sizeof(float));
+                    memcpy(state->expert_hb2, fused_out + expert_dim,
+                           (size_t)expert_dim * sizeof(float));
+                } else {
+                    /* Fallback: too large for stack */
+                    tq_matmul_gguf(state->expert_hb, input,
+                                   exp->w_gate, exp->gate_type,
+                                   expert_dim, hidden_dim);
+                    tq_matmul_gguf(state->expert_hb2, input,
+                                   exp->w_up, exp->up_type,
+                                   expert_dim, hidden_dim);
+                }
+            } else {
+                /* Separate gate and up matmuls */
+                tq_matmul_gguf(state->expert_hb, input,
+                               exp->w_gate, exp->gate_type,
+                               expert_dim, hidden_dim);
+                tq_matmul_gguf(state->expert_hb2, input,
+                               exp->w_up, exp->up_type,
+                               expert_dim, hidden_dim);
+            }
 
             /* Gated activation: GeGLU (Gemma4) or SwiGLU (Qwen) */
             activation_fn(state->expert_hb, state->expert_hb2, expert_dim);
