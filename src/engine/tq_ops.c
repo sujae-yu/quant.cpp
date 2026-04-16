@@ -925,8 +925,12 @@ void tq_matmul_q4(float* out, const float* x, const uint8_t* w_qs, const float* 
          * output dimension is very large (e.g., classifier/logits). Smaller
          * matmuls (attention, FFN) are faster on CPU via NEON Q4xQ8 path. */
         /* Only check Metal for very large output dims (vocab projection).
-         * Batch mode is only active for GGUF layers, not Q4-converted. */
-        if (n >= 8192 && tq_metal_batch_active()) {
+         * Threshold raised to 32768 so only lm_head triggers Metal: smaller
+         * FFN matmuls (gate/up/down ≈ 8-9K) are faster on CPU NEON due to
+         * per-dispatch overhead. lm_head with vocab=128-248K is the one
+         * matmul where Metal GPU consistently wins — it amortizes the ~0.15ms
+         * dispatch cost over hundreds of MFLOPs. */
+        if (n >= 32768) {
             int rc = tq_metal_matmul_q4(out, x, w_qs, w_scales, n, d);
             if (rc == 0) return;
         }
