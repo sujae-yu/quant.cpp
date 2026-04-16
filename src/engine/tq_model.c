@@ -3906,7 +3906,12 @@ tq_model_t* tq_load_gguf(const char* path) {
             goto skip_q4_conversion;
         }
         int has_gguf_weights = 0;
-        int phi3_split = (getenv("TQ_PHI3_SPLIT") != NULL);
+        /* Phi-3 fused QKV/FFN split: default ON for decode speedup.
+         * Earlier quality regression was specific to older split implementation;
+         * current path produces coherent output (verified 500-token T=0).
+         * Escape hatch: TQ_PHI3_SPLIT=0 to disable if a future model regresses. */
+        const char* phi3_env = getenv("TQ_PHI3_SPLIT");
+        int phi3_split = (phi3_env == NULL) ? 1 : (atoi(phi3_env) != 0);
         for (int l = 0; l < c->n_layers && !has_gguf_weights; l++) {
             tq_layer_weights_t* ly = &model->layers[l];
             int fused_convertible = 0;
@@ -4025,7 +4030,7 @@ tq_model_t* tq_load_gguf(const char* path) {
                  * path is preserved below but gated behind TQ_PHI3_SPLIT=1
                  * for future work on a better-quality path (e.g., Q4+Q2 with
                  * larger residual tables, or keeping Q5_K for critical rows). */
-                if (layer->gguf_w_qkv && getenv("TQ_PHI3_SPLIT")
+                if (layer->gguf_w_qkv && phi3_split
                     && (layer->gguf_w_qkv_type == TQ_GGML_TYPE_Q4_K
                      || layer->gguf_w_qkv_type == TQ_GGML_TYPE_Q4_0
                      || layer->gguf_w_qkv_type == TQ_GGML_TYPE_Q5_K)) {
@@ -4057,7 +4062,7 @@ tq_model_t* tq_load_gguf(const char* path) {
                     }
                 }
                 /* Same quality caveat as fused QKV. Gated behind TQ_PHI3_SPLIT. */
-                if (layer->gguf_w_up_gate && getenv("TQ_PHI3_SPLIT")
+                if (layer->gguf_w_up_gate && phi3_split
                     && (layer->gguf_w_up_gate_type == TQ_GGML_TYPE_Q4_K
                      || layer->gguf_w_up_gate_type == TQ_GGML_TYPE_Q4_0
                      || layer->gguf_w_up_gate_type == TQ_GGML_TYPE_Q5_K)) {
