@@ -2536,6 +2536,11 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
         if (gpu_layer_done) goto layer_postprocess;
 
         /* Pre-attention/DeltaNet RMSNorm */
+        if (l == 0 && pos == 0 && getenv("TQ_DEBUG_WQ")) {
+            double xs = 0;
+            for (int _i = 0; _i < dim; _i++) xs += s->x[_i] * s->x[_i];
+            fprintf(stderr, "[WQ-DBG] L0 PRE-NORM s->x rms=%.4f dim=%d\n", sqrtf((float)(xs/dim)), dim);
+        }
         tq_rmsnorm(s->xb, s->x, layer->attn_norm, dim, c->rms_norm_eps);
 
         /* Begin layer-level GPU batch scope: all GGUF matmuls in this layer
