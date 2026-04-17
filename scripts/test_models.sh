@@ -91,6 +91,10 @@ run_test "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"   "Hello" ""  COHERENT "TQ_NO_METAL
 # Fixed in f0091fc (2026-04-15); before that CLI produced whitespace garbage.
 # Uses --chat so the ChatML template wrapping is tested end-to-end.
 run_test "Qwen3.5-4B-Q4_K_M.gguf"              "Hi" "Hello" STRICT "TQ_NO_METAL=1" "--chat"
+# Qwen3.6-A3B: MoE(256)+DeltaNet hybrid. Thinking-mode prefix required.
+# Regression guard: without <think>\n\n</think>\n\n close, model emits
+# immediate <|im_end|> (0 tokens). 2026-04-17.
+run_test "Qwen3.6-35B-A3B-UD-IQ2_XXS.gguf"     "Hi" "" COHERENT "TQ_NO_METAL=1" "--chat"
 
 echo ""
 echo "--- Metal-ON tier (default build must also produce coherent output) ---"

@@ -1321,6 +1321,17 @@ int main(int argc, char** argv) {
             snprintf(chat_prompt, sizeof(chat_prompt),
                 "<|start_header_id|>user<|end_header_id|>\n\n%s<|eot_id|>"
                 "<|start_header_id|>assistant<|end_header_id|>\n\n", prompt);
+        } else if (mc->is_moe && mc->delta_n_heads > 0) {
+            /* Qwen3.6-A3B (qwen35moe): MoE + DeltaNet hybrid. Template requires
+             * a <think>...</think> block after assistant tag; default is
+             * thinking-on. We close it immediately (thinking off) for CLI
+             * responsiveness. TQ_ENABLE_THINKING=1 opens it. */
+            const char* think_prefix =
+                getenv("TQ_ENABLE_THINKING") ? "<think>\n"
+                                             : "<think>\n\n</think>\n\n";
+            snprintf(chat_prompt, sizeof(chat_prompt),
+                "<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n%s",
+                prompt, think_prefix);
         } else {
             /* Default ChatML (Qwen/Qwen3/Qwen3.5) */
             snprintf(chat_prompt, sizeof(chat_prompt),
