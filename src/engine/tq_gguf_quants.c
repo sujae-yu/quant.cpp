@@ -3089,6 +3089,7 @@ void tq_matmul_gguf(float* out, const float* x,
 
         /* Always use thread pool — pass preq data via task struct (TLS doesn't propagate) */
         int n_threads = tq_get_threads();
+        if (tq_tls_force_serial_matmul) n_threads = 1;
         if (n_threads > TQ_TP_MAX) n_threads = TQ_TP_MAX;
         if (n_threads > out_dim) n_threads = out_dim;
         if (n_threads < 1) n_threads = 1;
@@ -3155,6 +3156,7 @@ void tq_matmul_gguf(float* out, const float* x,
 
             /* Step 2: Integer dot for each output row */
             int n_threads = tq_get_threads();
+            if (tq_tls_force_serial_matmul) n_threads = 1;
             /* For large matmuls, use thread pool; for small ones, single thread */
             if (n_threads <= 1 || out_dim <= n_threads) {
                 for (int d = 0; d < out_dim; d++) {
@@ -3250,6 +3252,7 @@ void tq_matmul_gguf(float* out, const float* x,
 
         const int nb_super = in_dim / 256; /* number of 256-elem super-blocks */
         int n_threads = tq_get_threads();
+        if (tq_tls_force_serial_matmul) n_threads = 1;
         if (n_threads > TQ_TP_MAX) n_threads = TQ_TP_MAX;
         if (n_threads > out_dim) n_threads = out_dim;
         if (n_threads < 1) n_threads = 1;
