@@ -4273,8 +4273,17 @@ skip_q4_conversion: ;
                     /* MoE: lock model data in physical RAM to prevent page-out.
                      * Without mlock, expert weights get evicted by OS memory pressure,
                      * causing 100x+ slowdown from SSD page faults.
-                     * mlock may fail if ulimit is too low — fall back to MADV_WILLNEED. */
-                    if (mlock(gctx->mmap_data, gctx->mmap_size) == 0) {
+                     * mlock may fail if ulimit is too low — fall back to MADV_WILLNEED.
+                     *
+                     * TQ_NO_MLOCK=1 skips mlock — useful on memory-constrained
+                     * systems (e.g., Qwen3.6 on 16GB Mac where 10GB mlock leaves
+                     * only 4GB for OS + apps). Trade-off: slower if any expert
+                     * pages get evicted, but better cooperation with the system. */
+                    if (getenv("TQ_NO_MLOCK")) {
+                        madvise(gctx->mmap_data, gctx->mmap_size, MADV_WILLNEED);
+                        fprintf(stderr, "tq_load_gguf: TQ_NO_MLOCK set — skipping mlock, using MADV_WILLNEED for %.1f GB\n",
+                                (double)gctx->mmap_size / (1024.0 * 1024.0 * 1024.0));
+                    } else if (mlock(gctx->mmap_data, gctx->mmap_size) == 0) {
                         fprintf(stderr, "tq_load_gguf: mlock(%.1f GB) — expert weights pinned in RAM\n",
                                 (double)gctx->mmap_size / (1024.0 * 1024.0 * 1024.0));
                     } else {
