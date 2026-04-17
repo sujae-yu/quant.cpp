@@ -69,6 +69,10 @@ typedef struct {
     double conv1d_ns;
     double attn_ns;       /* softmax + weighted-sum in self_attn */
     double total_fwd_ns;  /* total forward pass wall time */
+    /* Sub-categories (subset of matmul_ns, for optimization targeting) */
+    double lmhead_ns;     /* final vocab projection */
+    double attn_qkv_ns;   /* self_attn Q/K/V/O projections */
+    double delta_qkv_ns;  /* DeltaNet in_proj_qkv + in_proj_z + out_proj */
     int    n_tokens;
 } tq_profile_t;
 
@@ -617,6 +621,7 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
 
     /* Step 1: Project input through QKV and Z */
     TQ_PROF_START(_tp);
+    double _tp_dqkv = _tp;
     if (layer->delta_in_proj_qkv_q2)
         TQ_MATMUL_Q2_OR_1BIT(s->delta_qkv, s->xb, layer->delta_in_proj_qkv_q2, layer->delta_in_proj_qkv_q2s, s->xb_q8, s->xb_q8s, qkv_dim, dim, model->use_1bit_weights);
     else if (layer->delta_in_proj_qkv_q4)
@@ -668,6 +673,7 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
     }
 
     TQ_PROF_STOP(_tp, matmul_ns);
+    if (g_tq_profile_enabled) g_profile.delta_qkv_ns += tq_now_ns() - _tp_dqkv;
 
     /* Step 3: Compute gate (decay) per head
      * gate = softplus(alpha + dt_bias) * (-exp(A_log))
@@ -911,6 +917,7 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
 
     /* Output projection: [dim, z_dim] @ delta_out[z_dim] -> xb2[dim] */
     TQ_PROF_START(_tp);
+    double _tp_dout = _tp;
     if (layer->delta_out_proj_q2)
         TQ_MATMUL_Q2_OR_1BIT_FP32(s->xb2, s->delta_out, layer->delta_out_proj_q2, layer->delta_out_proj_q2s, dim, z_dim, model->use_1bit_weights);
     else if (layer->delta_out_proj_q4)
@@ -923,6 +930,7 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
         tq_matmul(s->xb2, s->delta_out, layer->delta_out_proj, dim, z_dim);
 
     TQ_PROF_STOP(_tp, matmul_ns);
+    if (g_tq_profile_enabled) g_profile.delta_qkv_ns += tq_now_ns() - _tp_dout;
 
     /* Residual connection */
     tq_add(s->x, s->x, s->xb2, dim);
@@ -1000,6 +1008,7 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
 
     /* QKV projections (timed as matmul) */
     TQ_PROF_START(_tp);
+    double _tp_aqkv = _tp;
 
     /* Cross-QKV parallel path (Gemma 4 MoE, non-gate): 3 tasks × serial
      * inner matmul. Saves ~2 thread-pool barriers per layer. */
@@ -1161,6 +1170,7 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
     if (has_gguf) tq_metal_batch_flush_if_available();
     /* (int8 preq cleared — path disabled on Apple Silicon, see note above) */
     TQ_PROF_STOP(_tp, matmul_ns);
+    if (g_tq_profile_enabled) g_profile.attn_qkv_ns += tq_now_ns() - _tp_aqkv;
 
     /* Gemma 4: save pre-QK-norm keys for quantized cache (better distribution).
      * QK-norm compresses keys to unit sphere (rms≈0.06), destroying quantization quality.
@@ -2314,6 +2324,7 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
 
     /* Output projection */
     TQ_PROF_START(_tp);
+    double _tp_wo = _tp;
     if (layer->wo_q2)
         TQ_MATMUL_Q2_OR_1BIT_FP32(s->xb2, s->xb, layer->wo_q2, layer->wo_q2s, dim, n_heads * head_dim, model->use_1bit_weights);
     else if (layer->wo_q4)
@@ -2333,6 +2344,7 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
     /* Flush wo GPU dispatch before CPU reads xb2 for residual add */
     if (has_gguf) tq_metal_batch_flush_if_available();
     TQ_PROF_STOP(_tp, matmul_ns);
+    if (g_tq_profile_enabled) g_profile.attn_qkv_ns += tq_now_ns() - _tp_wo;
 
     if (l == 3 && pos <= 1 && getenv("TQ_DEBUG_PREFILL")) {
         double _sum=0, _sabs=0;
@@ -3044,6 +3056,7 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
 
     /* Step 4: Output projection to vocab logits */
     TQ_PROF_START(_tp);
+    double _tp_lm = _tp;
     if (model->output_gguf) {
         /* GGUF fused dot output projection — 3.5x less memory bandwidth than FP32 */
         tq_matmul_gguf(s->logits, s->x, model->output_gguf,
@@ -3057,6 +3070,7 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
         tq_matmul(s->logits, s->x, model->output_weight, c->vocab_size, dim);
     }
     TQ_PROF_STOP(_tp, matmul_ns);
+    if (g_tq_profile_enabled) g_profile.lmhead_ns += tq_now_ns() - _tp_lm;
 
     if (pos <= 1 && getenv("TQ_DEBUG")) {
         /* Print top-5 logits for debugging */
@@ -3132,6 +3146,18 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
                     conv / g_profile.n_tokens / 1e6,
                     attn / g_profile.n_tokens / 1e6,
                     other / g_profile.n_tokens / 1e6);
+                if (getenv("TQ_PROFILE_SUB")) {
+                    double lmh = g_profile.lmhead_ns;
+                    double aqkv = g_profile.attn_qkv_ns;
+                    double dqkv = g_profile.delta_qkv_ns;
+                    double rest = mat - lmh - aqkv - dqkv;
+                    if (rest < 0) rest = 0;
+                    fprintf(stderr, "  matmul sub: lm_head=%.1fms attn_QKVO=%.1fms delta_QKVO=%.1fms rest=%.1fms\n",
+                        lmh / g_profile.n_tokens / 1e6,
+                        aqkv / g_profile.n_tokens / 1e6,
+                        dqkv / g_profile.n_tokens / 1e6,
+                        rest / g_profile.n_tokens / 1e6);
+                }
             }
         }
     }

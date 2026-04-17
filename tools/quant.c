@@ -245,6 +245,19 @@ int main(int argc, char** argv) {
             tokenizer_path = argv[++i];
         } else if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
             prompt = argv[++i];
+        } else if (strcmp(argv[i], "-f") == 0 && i + 1 < argc) {
+            /* Read prompt from file (for long-context tests). */
+            FILE* pf = fopen(argv[++i], "rb");
+            if (!pf) { fprintf(stderr, "cannot open prompt file %s\n", argv[i]); return 1; }
+            fseek(pf, 0, SEEK_END);
+            long sz = ftell(pf);
+            fseek(pf, 0, SEEK_SET);
+            char* buf = (char*)malloc((size_t)sz + 1);
+            if (!buf) { fclose(pf); return 1; }
+            if (fread(buf, 1, (size_t)sz, pf) != (size_t)sz) { free(buf); fclose(pf); return 1; }
+            buf[sz] = '\0';
+            fclose(pf);
+            prompt = buf;  /* leaked until process exits; fine for CLI */
         } else if (strcmp(argv[i], "-n") == 0 && i + 1 < argc) {
             max_tokens = atoi(argv[++i]);
         } else if (strcmp(argv[i], "-T") == 0 && i + 1 < argc) {
