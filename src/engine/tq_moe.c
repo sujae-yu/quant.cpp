@@ -578,6 +578,11 @@ tq_moe_state_t* tq_moe_create_state(const tq_moe_config_t* config, int hidden_di
     s->expert_hb  = (float*)malloc((size_t)inter * sizeof(float));
     s->expert_hb2 = (float*)malloc((size_t)inter * sizeof(float));
 
+    /* Cross-expert parallel scratch pool: per-active-expert slot of
+     * (2*expert_dim + hidden_dim) floats. Up to num_active concurrent. */
+    size_t per_slot = (size_t)(2 * config->expert_intermediate_dim + hidden_dim);
+    s->expert_scratch_pool = malloc((size_t)config->num_active * per_slot * sizeof(float));
+
     return s;
 }
 
@@ -590,6 +595,7 @@ void tq_moe_free_state(tq_moe_state_t* state)
     free(state->expert_out);
     free(state->expert_hb);
     free(state->expert_hb2);
+    free(state->expert_scratch_pool);
     free(state);
 }
 
@@ -679,6 +685,75 @@ void tq_moe_route(const float* hidden, const float* router_weight,
 
     free(used);
     free(logits);
+}
+
+/* ============================================================
+ * Cross-expert parallel worker: one thread handles one expert entirely
+ * (gate_up matmul → activation → down matmul). Inner matmuls run
+ * single-threaded via tq_tls_force_serial_matmul to avoid nested pool.
+ * ============================================================ */
+typedef struct {
+    tq_moe_state_t* state;
+    const tq_moe_layer_t* layer;
+    const tq_moe_config_t* config;
+    const float* input;
+    int k;
+    int expert_dim;
+    int hidden_dim;
+    void (*activation_fn)(float* restrict, const float* restrict, int);
+    float* scratch_hb;
+    float* scratch_hb2;
+    float* scratch_out;
+} expert_parallel_task_t;
+
+extern __thread int tq_tls_force_serial_matmul;
+
+void* expert_parallel_worker(void* arg) {
+    expert_parallel_task_t* t = (expert_parallel_task_t*)arg;
+    int eid = t->state->top_experts[t->k];
+    if (eid < 0 || eid >= t->config->num_experts) {
+        memset(t->scratch_out, 0, (size_t)t->hidden_dim * sizeof(float));
+        return NULL;
+    }
+    const tq_expert_weights_t* exp = &t->layer->experts[eid];
+
+    /* Force inner matmuls to run single-threaded */
+    int prev_flag = tq_tls_force_serial_matmul;
+    tq_tls_force_serial_matmul = 1;
+
+    /* Gate+up fused if contiguous, else separate */
+    if (exp->gate_type == exp->up_type &&
+        (const uint8_t*)exp->w_up == (const uint8_t*)exp->w_gate +
+            tq_ggml_type_size(exp->gate_type) *
+            ((size_t)t->expert_dim * t->hidden_dim / tq_ggml_type_blck(exp->gate_type))) {
+        float fused_out[16384];
+        if (2 * t->expert_dim <= 16384) {
+            tq_matmul_gguf(fused_out, t->input, exp->w_gate, exp->gate_type,
+                           2 * t->expert_dim, t->hidden_dim);
+            memcpy(t->scratch_hb,  fused_out,                 (size_t)t->expert_dim * sizeof(float));
+            memcpy(t->scratch_hb2, fused_out + t->expert_dim, (size_t)t->expert_dim * sizeof(float));
+        } else {
+            tq_matmul_gguf(t->scratch_hb,  t->input, exp->w_gate, exp->gate_type,
+                           t->expert_dim, t->hidden_dim);
+            tq_matmul_gguf(t->scratch_hb2, t->input, exp->w_up, exp->up_type,
+                           t->expert_dim, t->hidden_dim);
+        }
+    } else {
+        tq_matmul_gguf(t->scratch_hb,  t->input, exp->w_gate, exp->gate_type,
+                       t->expert_dim, t->hidden_dim);
+        tq_matmul_gguf(t->scratch_hb2, t->input, exp->w_up, exp->up_type,
+                       t->expert_dim, t->hidden_dim);
+    }
+
+    /* Activation: GeGLU or SwiGLU */
+    t->activation_fn(t->scratch_hb, t->scratch_hb2, t->expert_dim);
+
+    /* Down projection */
+    tq_matmul_gguf(t->scratch_out, t->scratch_hb, exp->w_down, exp->down_type,
+                   t->hidden_dim, t->expert_dim);
+
+    tq_tls_force_serial_matmul = prev_flag;
+    return NULL;
 }
 
 /* ============================================================
@@ -859,6 +934,79 @@ void tq_moe_forward(const tq_moe_layer_t* layer,
 #ifdef TQ_HAS_METAL
 moe_cpu_fallback: ;
 #endif
+    /* ============================================================
+     * Cross-expert parallelism: run all N active experts in parallel.
+     *
+     * Before: outer serial loop over experts, inner tq_matmul_gguf
+     *   uses thread pool (8 threads) per matmul. Each expert = ~16 thread
+     *   dispatches × ~181 μs overhead = 2.9 ms per expert × 8 experts = 23 ms
+     *   of pure overhead per layer × 30 layers = 690 ms per token.
+     *
+     * After: outer parallel loop (N experts → N threads, each with its own
+     *   single-threaded matmul via tq_tls_force_serial_matmul). One barrier
+     *   per layer instead of 16 per expert.
+     *
+     * Requires: GGUF dequant path (not Q4-converted). Each expert is
+     *   memory-bound individually, but 8 experts * ~742 KB = 5.9 MB fits
+     *   in M1 Pro's shared L2 (12 MB) allowing parallel execution without
+     *   thrashing.
+     * ============================================================ */
+    extern void tq_tp_run(void* (*fn)(void*), void** args, int n_tasks);
+    int n_threads = tq_get_threads();
+    int parallel_experts = (num_active >= 2 && num_active <= n_threads &&
+                             num_active <= TQ_TP_MAX);
+    /* Only do cross-expert parallel for GGUF experts (IQ2_XXS etc).
+     * Q4-converted fast path has its own parallelism. */
+    {
+        int first_eid = state->top_experts[0];
+        if (first_eid >= 0 && first_eid < config->num_experts &&
+            layer->experts[first_eid].q4_converted) {
+            parallel_experts = 0;
+        }
+    }
+
+    if (parallel_experts && state->expert_scratch_pool) {
+        /* Parallel path: N threads × 1 expert each */
+        #ifndef TQ_TP_MAX
+        #define TQ_TP_MAX 16
+        #endif
+        expert_parallel_task_t tasks[TQ_TP_MAX];
+        void* task_ptrs[TQ_TP_MAX];
+        float* pool = (float*)state->expert_scratch_pool;
+        /* Pool layout per task: [hb | hb2 | out] = 2*expert_dim + hidden_dim floats */
+        size_t stride = (size_t)(2 * expert_dim + hidden_dim);
+        for (int k = 0; k < num_active; k++) {
+            tasks[k].state = state;
+            tasks[k].layer = layer;
+            tasks[k].config = config;
+            tasks[k].input = input;
+            tasks[k].k = k;
+            tasks[k].expert_dim = expert_dim;
+            tasks[k].hidden_dim = hidden_dim;
+            tasks[k].activation_fn = activation_fn;
+            tasks[k].scratch_hb  = pool + k * stride;
+            tasks[k].scratch_hb2 = pool + k * stride + expert_dim;
+            tasks[k].scratch_out = pool + k * stride + 2 * expert_dim;
+            task_ptrs[k] = &tasks[k];
+        }
+
+        tq_tp_run(expert_parallel_worker, task_ptrs, num_active);
+
+        /* Accumulate results (serial — small hidden_dim, negligible) */
+        for (int k = 0; k < num_active; k++) {
+            int eid = state->top_experts[k];
+            if (eid < 0 || eid >= config->num_experts) continue;
+            float w = state->expert_weights[k];
+            float exp_scale = (layer->expert_scale) ? layer->expert_scale[eid] : 1.0f;
+            float ws = w * exp_scale;
+            float* eout = tasks[k].scratch_out;
+            for (int i = 0; i < hidden_dim; i++)
+                output[i] += ws * eout[i];
+        }
+        goto moe_shared_expert;
+    }
+
+    /* Serial fallback (original code path) */
     /* Step 3: For each selected expert, compute GeGLU/SwiGLU FFN and accumulate.
      * Prefetch next expert's weights to hide memory latency for mmap'd IQ3_XXS/IQ4_NL. */
     for (int k = 0; k < num_active; k++) {

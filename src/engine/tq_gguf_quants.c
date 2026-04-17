@@ -3019,6 +3019,7 @@ void tq_matmul_gguf_cpu(float* out, const float* x,
  * silently allowed Metal dispatch from worker threads despite the main thread
  * setting the flag to 1 (observed as Phi-3.5 Q4_K_M garbage output under Metal). */
 int tq_matmul_force_cpu = 0;
+__thread int tq_tls_force_serial_matmul = 0;
 
 void tq_matmul_gguf(float* out, const float* x,
                     const void* weight, tq_ggml_dtype weight_type,
@@ -3335,6 +3336,12 @@ void tq_matmul_gguf(float* out, const float* x,
 
     /* ---- Multi-threaded dispatch ---- */
     int n_threads = tq_get_threads();
+
+    /* Per-thread override: when caller is already inside a parallel region
+     * (e.g. cross-expert MoE parallelism), force single-threaded matmul
+     * to avoid nested thread-pool contention. */
+    extern __thread int tq_tls_force_serial_matmul;
+    if (tq_tls_force_serial_matmul) n_threads = 1;
 
     /* Note: single-thread for small matmuls was tested and was SLOWER
      * (538ms vs 251ms MoE). Multi-threading benefits IQ2_XXS fused dot

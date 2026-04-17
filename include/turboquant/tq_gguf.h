@@ -265,6 +265,8 @@ typedef struct {
     float* expert_hb;        /* [expert_intermediate_dim] workspace */
     float* expert_hb2;       /* [expert_intermediate_dim] workspace */
     int    routing_precomputed; /* 1 = top_experts/expert_weights already set externally */
+    void*  expert_scratch_pool; /* [num_active × (2*expert_dim + hidden_dim)] floats for
+                                 * cross-expert parallel MoE */
 } tq_moe_state_t;
 
 /* MoE API */
