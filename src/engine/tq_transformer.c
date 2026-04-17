@@ -2391,7 +2391,11 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
      *   Gemma 4 26B-A4B IQ2: broken Metal → works with CPU */
     int _phi3_force_cpu = c->has_fused_qkv;
     int _gemma4_force_cpu = c->is_gemma4;
-    if (_phi3_force_cpu || _gemma4_force_cpu) {
+    /* Qwen3.6-A3B (qwen35moe): Metal matmul path hangs on this arch's 256-expert
+     * MoE IQ2_XXS dispatch, same failure mode as Gemma 4 26B-A4B. Auto-CPU until
+     * the root cause is isolated. Signature: MoE + DeltaNet hybrid. */
+    int _qwen35moe_force_cpu = (c->is_moe && c->delta_n_heads > 0);
+    if (_phi3_force_cpu || _gemma4_force_cpu || _qwen35moe_force_cpu) {
         extern int tq_matmul_force_cpu;
         tq_matmul_force_cpu = 1;
     }
