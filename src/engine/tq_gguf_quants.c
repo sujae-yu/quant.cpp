@@ -1618,6 +1618,119 @@ static float fused_dot_iq2_xxs_neon(const void* row, const float* x, int n) {
     }
     return vaddvq_f32(vtotal0);
 }
+
+/* ============================================================
+ * IQ2_XXS × int8 fused dot (NEON vdotq_s32 path)
+ *
+ * Takes pre-quantized activation (int8) instead of float to enable
+ * vdotq_s32 (16 int8 ops/cycle on M1 Pro vs vfmaq_f32's 4 float ops).
+ *
+ * Caller pre-quantizes x to int8[n] with per-32-element scales x_ds[n/32].
+ * Result: 0.25 * sum_blocks ( d_block * sum_subblocks( sub_scale *
+ *         x_ds[sb] * sum_int8( signed_grid × x_int8 ) ) )
+ *
+ * Matches llama.cpp's ggml_vec_dot_iq2_xxs_q8_K structure but uses
+ * Q8_0-compatible per-32 activation scales (smaller memory traffic).
+ * ============================================================ */
+static float fused_dot_iq2_xxs_int8(const void* row, const int8_t* x_qs,
+                                     const float* x_ds, int n)
+{
+    const int nb = n / 256;
+    const uint8_t* base = (const uint8_t*)row;
+    const uint8x8_t vbit_masks = vld1_u8(iq2_sign_bit_masks);
+    const int8x8_t vone = vdup_n_s8(1);
+
+    float sumf = 0.0f;
+
+    for (int b = 0; b < nb; b++) {
+        const uint8_t* blk = base + b * 66;
+        if (b + 1 < nb) {
+            __builtin_prefetch(blk + 66, 0, 3);
+            __builtin_prefetch(blk + 66 + 32, 0, 3);
+        }
+
+        uint16_t d_raw;
+        memcpy(&d_raw, blk, 2);
+        const float d = fp16_to_fp32(d_raw);
+        const uint8_t* qs_bytes = blk + 2;
+
+        const int8_t* x_sub = x_qs + b * 256;
+        const float*  xd_sub = x_ds + b * 8;
+
+        float sub_sum = 0.0f;
+
+        for (int ib32 = 0; ib32 < 8; ib32++) {
+            uint32_t aux32[2];
+            memcpy(aux32, qs_bytes + 8 * ib32, 8);
+            const uint8_t* aux8 = (const uint8_t*)aux32;
+
+            /* Build 4 groups × 8 int8 = 32 signed int8 weights.
+             * Each group: grid[aux8[g]] × sign(aux32[1] bits). */
+            #define BUILD_GROUP(g, shift) ({ \
+                uint8x8_t vg = vld1_u8((const uint8_t*)(iq2xxs_grid + aux8[g])); \
+                uint8_t signs = ksigns_iq2xs[(aux32[1] >> (shift)) & 127]; \
+                uint8x8_t vsbits = vtst_u8(vdup_n_u8(signs), vbit_masks); \
+                int8x8_t  vs = vreinterpret_s8_u8(vsbits); \
+                int8x8_t  vw = vreinterpret_s8_u8(vg); \
+                vsub_s8(veor_s8(vw, vs), vs); \
+            })
+
+            int8x8_t vs0 = BUILD_GROUP(0,  0);
+            int8x8_t vs1 = BUILD_GROUP(1,  7);
+            int8x8_t vs2 = BUILD_GROUP(2, 14);
+            int8x8_t vs3 = BUILD_GROUP(3, 21);
+            #undef BUILD_GROUP
+
+            int8x16_t vw_lo = vcombine_s8(vs0, vs1);
+            int8x16_t vw_hi = vcombine_s8(vs2, vs3);
+
+            /* Load 32 int8 activation values for this sub-block */
+            int8x16_t vx_lo = vld1q_s8(x_sub + ib32 * 32);
+            int8x16_t vx_hi = vld1q_s8(x_sub + ib32 * 32 + 16);
+
+#ifdef __ARM_FEATURE_DOTPROD
+            int32x4_t vacc = vdotq_s32(vdupq_n_s32(0), vw_lo, vx_lo);
+            vacc = vdotq_s32(vacc, vw_hi, vx_hi);
+            int32_t isum = vaddvq_s32(vacc);
+#else
+            int16x8_t vp_lo_lo = vmull_s8(vs0, vget_low_s8(vx_lo));
+            int16x8_t vp_lo_hi = vmull_s8(vs1, vget_high_s8(vx_lo));
+            int16x8_t vp_hi_lo = vmull_s8(vs2, vget_low_s8(vx_hi));
+            int16x8_t vp_hi_hi = vmull_s8(vs3, vget_high_s8(vx_hi));
+            int32x4_t vacc = vpaddlq_s16(vp_lo_lo);
+            vacc = vpadalq_s16(vacc, vp_lo_hi);
+            vacc = vpadalq_s16(vacc, vp_hi_lo);
+            vacc = vpadalq_s16(vacc, vp_hi_hi);
+            int32_t isum = vaddvq_s32(vacc);
+            (void)vone;
+#endif
+
+            float sub_scale = 0.5f + (float)(aux32[1] >> 28);
+            sub_sum += (float)isum * sub_scale * xd_sub[ib32];
+        }
+
+        sumf += d * sub_sum;
+    }
+
+    return 0.25f * sumf;
+}
+
+/* Row-sliced thread worker for IQ2_XXS × int8 matmul. */
+typedef struct {
+    float* out; const void* weight; const int8_t* x_qs;
+    const float* x_ds; size_t row_bytes; int in_dim;
+    int start_row; int end_row;
+} iq2_int_task_t;
+
+void* iq2_xxs_int_dot_worker(void* arg) {
+    iq2_int_task_t* task = (iq2_int_task_t*)arg;
+    for (int d = task->start_row; d < task->end_row; d++) {
+        const void* row = (const uint8_t*)task->weight + (size_t)d * task->row_bytes;
+        task->out[d] = fused_dot_iq2_xxs_int8(row, task->x_qs, task->x_ds, task->in_dim);
+    }
+    return NULL;
+}
+
 #endif /* TQ_HAS_NEON */
 
 /* Fused IQ2_S dot product */
@@ -3111,6 +3224,82 @@ void tq_matmul_gguf(float* out, const float* x,
         } else {
             extern void tq_tp_run(void* (*fn)(void*), void** args, int n);
             tq_tp_run(q8_int_dot_worker, ptrs, n_threads);
+        }
+        return;
+    }
+#endif
+
+    /* ---- IQ2_XXS × int8 task definition (shared by serial and parallel paths) ---- */
+#if TQ_HAS_NEON
+    /* forward-declare worker: defined at file scope below */
+    extern void* iq2_xxs_int_dot_worker(void* arg);
+#endif
+
+    /* ---- IQ2_XXS × int8 fast path (auto-quantize activation, vdotq_s32) ----
+     * llama.cpp-style: pre-quantize x to Q8_0-compatible int8 blocks, then
+     * feed into vdotq_s32 alongside sign-expanded grid values. Closes the
+     * 35% generation-speed gap measured against llama.cpp on Qwen3.6-A3B.
+     *
+     * Theory: vdotq_s32 issues 16 int8×int8 ops/cycle on M1 Pro; vfmaq_f32
+     * only 4 float ops/cycle. For 3B-active MoE models with 40 layers ×
+     * 256 experts, this dominates decode-time throughput.
+     *
+     * TQ_IQ2_XXS_NOINT=1 reverts to float fused-dot (for A/B comparison). */
+#if TQ_HAS_NEON
+    if (weight_type == TQ_GGML_TYPE_IQ2_XXS && in_dim >= 256 && in_dim <= 16384
+        && (in_dim % 256 == 0) && !getenv("TQ_IQ2_XXS_NOINT"))
+    {
+        /* Quantize x per 32-element block (Q8_0 scale layout).
+         * in_dim is multiple of 256, so also multiple of 32. */
+        int n_blocks32 = in_dim / 32;
+        int8_t x_qs_buf[16384];
+        float  x_ds_buf[512];
+        for (int b = 0; b < n_blocks32; b++) {
+            const float* xp = x + b * 32;
+            float amax = 0.0f;
+            for (int j = 0; j < 32; j++) {
+                float a = xp[j] < 0 ? -xp[j] : xp[j];
+                if (a > amax) amax = a;
+            }
+            float d = amax / 127.0f;
+            x_ds_buf[b] = d;
+            if (d > 0.0f) {
+                float id = 1.0f / d;
+                for (int j = 0; j < 32; j++) {
+                    int v = (int)roundf(xp[j] * id);
+                    x_qs_buf[b * 32 + j] = (int8_t)(v < -128 ? -128 : (v > 127 ? 127 : v));
+                }
+            } else {
+                memset(x_qs_buf + b * 32, 0, 32);
+            }
+        }
+
+        /* Dispatch one row per output dim. Row size: 66 bytes per 256 weights. */
+        size_t row_bytes = (size_t)in_dim / 256 * 66;
+        int n_threads = tq_get_threads();
+        if (tq_tls_force_serial_matmul) n_threads = 1;
+
+        if (n_threads <= 1 || out_dim <= n_threads) {
+            for (int d = 0; d < out_dim; d++) {
+                const void* row = (const uint8_t*)weight + (size_t)d * row_bytes;
+                out[d] = fused_dot_iq2_xxs_int8(row, x_qs_buf, x_ds_buf, in_dim);
+            }
+        } else {
+            iq2_int_task_t tasks[TQ_TP_MAX];
+            void* ptrs[TQ_TP_MAX];
+            int rows_per = out_dim / n_threads;
+            for (int t = 0; t < n_threads; t++) {
+                tasks[t] = (iq2_int_task_t){
+                    .out = out, .weight = weight,
+                    .x_qs = x_qs_buf, .x_ds = x_ds_buf,
+                    .row_bytes = row_bytes, .in_dim = in_dim,
+                    .start_row = t * rows_per,
+                    .end_row = (t == n_threads - 1) ? out_dim : (t + 1) * rows_per
+                };
+                ptrs[t] = &tasks[t];
+            }
+            extern void tq_tp_run(void* (*fn)(void*), void** args, int n);
+            tq_tp_run(iq2_xxs_int_dot_worker, ptrs, n_threads);
         }
         return;
     }
