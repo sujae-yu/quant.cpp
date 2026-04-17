@@ -607,19 +607,46 @@ void tq_moe_route(const float* hidden, const float* router_weight,
                   int num_experts, int num_active, int hidden_dim,
                   int* out_expert_ids, float* out_expert_weights)
 {
-    /*
-     * We need scratch space for router logits. num_experts can be up to 256,
-     * so we heap-allocate to avoid large VLAs on the stack.
-     */
-    float* logits = (float*)malloc((size_t)num_experts * sizeof(float));
-    if (!logits) return;
+    /* Thread-local scratch — avoids malloc on hot path (called per layer per
+     * token). 256 experts × 4 bytes + 256 used flags = 1.25 KB per thread. */
+    static __thread float   tls_logits[512];   /* upper bound on num_experts */
+    static __thread uint8_t tls_used[512];
+    float*   logits = (num_experts <= 512) ? tls_logits
+                       : (float*)malloc((size_t)num_experts * sizeof(float));
+    uint8_t* used   = (num_experts <= 512) ? tls_used
+                       : (uint8_t*)calloc((size_t)num_experts, sizeof(uint8_t));
+    if (!logits || !used) {
+        if (logits && logits != tls_logits) free(logits);
+        if (used && used != tls_used) free(used);
+        return;
+    }
+    if (num_experts <= 512) memset(used, 0, (size_t)num_experts);
 
-    /* Step 1: Compute router logits — logits[e] = dot(hidden, router_weight[e]) */
+    /* Step 1: Compute router logits — logits[e] = dot(hidden, router_weight[e])
+     * NEON-vectorized: 4 FMA pipes × 4 lanes = 16 floats/cycle peak.
+     * Per-token cost on Qwen3.6 (256×2048): ~1ms scalar → ~0.1ms NEON. */
     for (int e = 0; e < num_experts; e++) {
         const float* row = router_weight + (size_t)e * hidden_dim;
+#if TQ_MOE_HAS_NEON
+        float32x4_t a0 = vdupq_n_f32(0.f);
+        float32x4_t a1 = vdupq_n_f32(0.f);
+        float32x4_t a2 = vdupq_n_f32(0.f);
+        float32x4_t a3 = vdupq_n_f32(0.f);
+        int j = 0;
+        for (; j + 15 < hidden_dim; j += 16) {
+            a0 = vfmaq_f32(a0, vld1q_f32(hidden + j),      vld1q_f32(row + j));
+            a1 = vfmaq_f32(a1, vld1q_f32(hidden + j + 4),  vld1q_f32(row + j + 4));
+            a2 = vfmaq_f32(a2, vld1q_f32(hidden + j + 8),  vld1q_f32(row + j + 8));
+            a3 = vfmaq_f32(a3, vld1q_f32(hidden + j + 12), vld1q_f32(row + j + 12));
+        }
+        float32x4_t s = vaddq_f32(vaddq_f32(a0, a1), vaddq_f32(a2, a3));
+        float sum = vaddvq_f32(s);
+        for (; j < hidden_dim; j++) sum += hidden[j] * row[j];
+#else
         float sum = 0.0f;
         for (int j = 0; j < hidden_dim; j++)
             sum += hidden[j] * row[j];
+#endif
         logits[e] = sum;
     }
 
@@ -629,8 +656,6 @@ void tq_moe_route(const float* hidden, const float* router_weight,
      * the first unused one always wins. Also guard against NaN logits (NaN
      * comparisons return false, so without >= the loop could leave best == -1).
      */
-    uint8_t* used = (uint8_t*)calloc((size_t)num_experts, sizeof(uint8_t));
-    if (!used) { free(logits); return; }
 
     int n_valid = 0;
     for (int k = 0; k < num_active; k++) {
@@ -657,8 +682,8 @@ void tq_moe_route(const float* hidden, const float* router_weight,
         for (int k = 0; k < num_active; k++) {
             out_expert_weights[k] = 0.0f;
         }
-        free(used);
-        free(logits);
+        if (used != tls_used) free(used);
+        if (logits != tls_logits) free(logits);
         return;
     }
 
@@ -683,8 +708,8 @@ void tq_moe_route(const float* hidden, const float* router_weight,
             out_expert_weights[k] *= inv_sum;
     }
 
-    free(used);
-    free(logits);
+    if (used != tls_used) free(used);
+    if (logits != tls_logits) free(logits);
 }
 
 /* ============================================================

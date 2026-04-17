@@ -1251,6 +1251,160 @@ static void dequant_iq3_s(const void* src, float* dst, int n) {
     }
 }
 
+/* ============================================================
+ * IQ3_S × int8 fused dot (NEON vdotq_s32 path)
+ *
+ * The float fused_dot_iq3_s below is pure scalar — sample on
+ * Qwen3.6-35B-A3B (UD-IQ2_XXS uses IQ3_S for some critical layers)
+ * shows it in the hot path. Same fix pattern as IQ2_XXS / Q6_K:
+ * pre-quantize x to int8, gather grid + signs into int8x16,
+ * vdotq_s32 against x_q8.
+ *
+ * Per 256-element block: 8 sub-blocks × 32 elements = 16 vdotq_s32 calls.
+ * ============================================================ */
+#if TQ_HAS_NEON
+/* Local copy — iq2_sign_bit_masks is defined later in this TU; we redeclare
+ * a private constant here to avoid forward-reference issues. Same values
+ * as the original (powers of two by bit position). */
+static const uint8_t iq3s_neon_bit_masks[8] = {1, 2, 4, 8, 16, 32, 64, 128};
+
+static inline int8x8_t iq3s_build8(uint32_t g1, uint32_t g2, uint8_t signs_byte,
+                                    const uint8x8_t vbit_masks)
+{
+    /* g1, g2: each 4-byte grid entry (uint8 values in [0..7])
+     * signs_byte: 8 bits — bits 0..3 sign of g1, bits 4..7 sign of g2 */
+    uint64_t combined = ((uint64_t)g2 << 32) | g1;
+    uint8x8_t grid_u = vreinterpret_u8_u64(vdup_n_u64(combined));
+    /* Build sign mask: 0xFF where bit set in signs_byte, 0x00 otherwise */
+    uint8x8_t sb = vtst_u8(vdup_n_u8(signs_byte), vbit_masks);
+    int8x8_t  sn = vreinterpret_s8_u8(sb);  /* -1 (all ones) or 0 */
+    int8x8_t  gi = vreinterpret_s8_u8(grid_u);
+    /* (gi xor sn) - sn  ==  sign-flip when sn is -1, identity when 0 */
+    return vsub_s8(veor_s8(gi, sn), sn);
+}
+
+static float fused_dot_iq3_s_int8(const void* row, const int8_t* x_qs,
+                                    const float* x_ds, int n)
+{
+    const int nb = n / 256;
+    const block_iq3_s_t* blk = (const block_iq3_s_t*)row;
+    const uint8x8_t vbit_masks = vld1_u8(iq3s_neon_bit_masks);
+
+    float sumf = 0.0f;
+
+    for (int b = 0; b < nb; b++) {
+        if (b + 1 < nb) {
+            __builtin_prefetch((const uint8_t*)&blk[b+1], 0, 3);
+            __builtin_prefetch((const uint8_t*)&blk[b+1] + 64, 0, 3);
+        }
+        const float d = fp16_to_fp32(blk[b].d);
+        const uint8_t* qs = blk[b].qs;
+        const uint8_t* qh = blk[b].qh;
+        const uint8_t* signs = blk[b].signs;
+        const int8_t* xb = x_qs + b * 256;
+        const float*  xd = x_ds + b * 8;
+
+        float sub_sum = 0.0f;
+
+        for (int ib32 = 0; ib32 < 8; ib32 += 2) {
+            const float db1 = d * (1 + 2 * (blk[b].scales[ib32 / 2] & 0xf));
+            const float db2 = d * (1 + 2 * (blk[b].scales[ib32 / 2] >> 4));
+
+            /* ---- First sub-block of 32 elements (uses qh[0]) ---- */
+            uint32_t g[8];  /* 8 grid entries × 4 bytes = 32 weights */
+            for (int l = 0; l < 4; l++) {
+                int idx1 = qs[2*l + 0] | ((qh[0] << (8 - 2*l)) & 256);
+                int idx2 = qs[2*l + 1] | ((qh[0] << (7 - 2*l)) & 256);
+                g[2*l + 0] = iq3s_grid[idx1];
+                g[2*l + 1] = iq3s_grid[idx2];
+            }
+            int8x8_t w0 = iq3s_build8(g[0], g[1], signs[0], vbit_masks);
+            int8x8_t w1 = iq3s_build8(g[2], g[3], signs[1], vbit_masks);
+            int8x8_t w2 = iq3s_build8(g[4], g[5], signs[2], vbit_masks);
+            int8x8_t w3 = iq3s_build8(g[6], g[7], signs[3], vbit_masks);
+            int8x16_t vw_lo = vcombine_s8(w0, w1);
+            int8x16_t vw_hi = vcombine_s8(w2, w3);
+
+            int8x16_t vx_lo = vld1q_s8(xb + 0);
+            int8x16_t vx_hi = vld1q_s8(xb + 16);
+
+#ifdef __ARM_FEATURE_DOTPROD
+            int32x4_t vacc = vdotq_s32(vdupq_n_s32(0), vw_lo, vx_lo);
+            vacc = vdotq_s32(vacc, vw_hi, vx_hi);
+            int32_t isum1 = vaddvq_s32(vacc);
+#else
+            int16x8_t pa = vmull_s8(vget_low_s8(vw_lo), vget_low_s8(vx_lo));
+            int16x8_t pb = vmull_s8(vget_high_s8(vw_lo), vget_high_s8(vx_lo));
+            int16x8_t pc = vmull_s8(vget_low_s8(vw_hi), vget_low_s8(vx_hi));
+            int16x8_t pd = vmull_s8(vget_high_s8(vw_hi), vget_high_s8(vx_hi));
+            int32x4_t vacc = vpaddlq_s16(vaddq_s16(vaddq_s16(pa, pb), vaddq_s16(pc, pd)));
+            int32_t isum1 = vaddvq_s32(vacc);
+#endif
+            sub_sum += (float)isum1 * db1 * xd[ib32];
+
+            qs += 8;
+            signs += 4;
+            xb += 32;
+
+            /* ---- Second sub-block of 32 elements (uses qh[1]) ---- */
+            for (int l = 0; l < 4; l++) {
+                int idx1 = qs[2*l + 0] | ((qh[1] << (8 - 2*l)) & 256);
+                int idx2 = qs[2*l + 1] | ((qh[1] << (7 - 2*l)) & 256);
+                g[2*l + 0] = iq3s_grid[idx1];
+                g[2*l + 1] = iq3s_grid[idx2];
+            }
+            int8x8_t w0b = iq3s_build8(g[0], g[1], signs[0], vbit_masks);
+            int8x8_t w1b = iq3s_build8(g[2], g[3], signs[1], vbit_masks);
+            int8x8_t w2b = iq3s_build8(g[4], g[5], signs[2], vbit_masks);
+            int8x8_t w3b = iq3s_build8(g[6], g[7], signs[3], vbit_masks);
+            int8x16_t vw_lo2 = vcombine_s8(w0b, w1b);
+            int8x16_t vw_hi2 = vcombine_s8(w2b, w3b);
+
+            int8x16_t vx_lo2 = vld1q_s8(xb + 0);
+            int8x16_t vx_hi2 = vld1q_s8(xb + 16);
+
+#ifdef __ARM_FEATURE_DOTPROD
+            int32x4_t vacc2 = vdotq_s32(vdupq_n_s32(0), vw_lo2, vx_lo2);
+            vacc2 = vdotq_s32(vacc2, vw_hi2, vx_hi2);
+            int32_t isum2 = vaddvq_s32(vacc2);
+#else
+            int16x8_t pa2 = vmull_s8(vget_low_s8(vw_lo2), vget_low_s8(vx_lo2));
+            int16x8_t pb2 = vmull_s8(vget_high_s8(vw_lo2), vget_high_s8(vx_lo2));
+            int16x8_t pc2 = vmull_s8(vget_low_s8(vw_hi2), vget_low_s8(vx_hi2));
+            int16x8_t pd2 = vmull_s8(vget_high_s8(vw_hi2), vget_high_s8(vx_hi2));
+            int32x4_t vacc2 = vpaddlq_s16(vaddq_s16(vaddq_s16(pa2, pb2), vaddq_s16(pc2, pd2)));
+            int32_t isum2 = vaddvq_s32(vacc2);
+#endif
+            sub_sum += (float)isum2 * db2 * xd[ib32 + 1];
+
+            qs += 8;
+            signs += 4;
+            qh += 2;
+            xb += 32;
+        }
+
+        sumf += sub_sum;
+    }
+
+    return sumf;
+}
+
+typedef struct {
+    float* out; const void* weight; const int8_t* x_qs;
+    const float* x_ds; size_t row_bytes; int in_dim;
+    int start_row; int end_row;
+} iq3s_int_task_t;
+
+static void* iq3_s_int_dot_worker(void* arg) {
+    iq3s_int_task_t* task = (iq3s_int_task_t*)arg;
+    for (int d = task->start_row; d < task->end_row; d++) {
+        const void* row = (const uint8_t*)task->weight + (size_t)d * task->row_bytes;
+        task->out[d] = fused_dot_iq3_s_int8(row, task->x_qs, task->x_ds, task->in_dim);
+    }
+    return NULL;
+}
+#endif /* TQ_HAS_NEON */
+
 /* Fused IQ3_S dot product for tq_matmul_gguf */
 static float fused_dot_iq3_s(const void* row, const float* x, int n) {
     const int nb = n / 256;
@@ -3492,6 +3646,69 @@ void tq_matmul_gguf(float* out, const float* x,
     /* forward-declare workers: defined at file scope below */
     extern void* iq2_xxs_int_dot_worker(void* arg);
     extern void* iq2_s_int_dot_worker(void* arg);
+#endif
+
+    /* ---- IQ3_S × int8 fast path (vdotq_s32) ----
+     * UD-IQ2_XXS quantizations embed IQ3_S for some layers (e.g., Qwen3.6
+     * routed-expert critical paths). The float fused-dot is scalar; sample
+     * caught it among the hot kernels alongside IQ2_XXS/IQ2_S. */
+#if TQ_HAS_NEON
+    if (weight_type == TQ_GGML_TYPE_IQ3_S
+        && in_dim >= 256 && in_dim <= 16384
+        && (in_dim % 256 == 0) && !getenv("TQ_IQ3S_NOINT"))
+    {
+        int n_blocks32 = in_dim / 32;
+        int8_t x_qs_buf[16384];
+        float  x_ds_buf[512];
+        for (int bb = 0; bb < n_blocks32; bb++) {
+            const float* xp = x + bb * 32;
+            float amax = 0.0f;
+            for (int j = 0; j < 32; j++) {
+                float a = xp[j] < 0 ? -xp[j] : xp[j];
+                if (a > amax) amax = a;
+            }
+            float dq = amax / 127.0f;
+            x_ds_buf[bb] = dq;
+            if (dq > 0.0f) {
+                float id = 1.0f / dq;
+                for (int j = 0; j < 32; j++) {
+                    int v = (int)roundf(xp[j] * id);
+                    x_qs_buf[bb * 32 + j] = (int8_t)(v < -128 ? -128 : (v > 127 ? 127 : v));
+                }
+            } else {
+                memset(x_qs_buf + bb * 32, 0, 32);
+            }
+        }
+
+        size_t row_bytes_iq3s = (size_t)in_dim / 256 * sizeof(block_iq3_s_t);
+
+        int n_threads = tq_get_threads();
+        if (tq_tls_force_serial_matmul) n_threads = 1;
+
+        if (n_threads <= 1 || out_dim <= n_threads) {
+            for (int d = 0; d < out_dim; d++) {
+                const void* row = (const uint8_t*)weight + (size_t)d * row_bytes_iq3s;
+                out[d] = fused_dot_iq3_s_int8(row, x_qs_buf, x_ds_buf, in_dim);
+            }
+        } else {
+            iq3s_int_task_t tasks[TQ_TP_MAX];
+            void* ptrs[TQ_TP_MAX];
+            int rows_per = out_dim / n_threads;
+            for (int t = 0; t < n_threads; t++) {
+                tasks[t] = (iq3s_int_task_t){
+                    .out = out, .weight = weight,
+                    .x_qs = x_qs_buf, .x_ds = x_ds_buf,
+                    .row_bytes = row_bytes_iq3s, .in_dim = in_dim,
+                    .start_row = t * rows_per,
+                    .end_row = (t == n_threads - 1) ? out_dim : (t + 1) * rows_per
+                };
+                ptrs[t] = &tasks[t];
+            }
+            extern void tq_tp_run(void* (*fn)(void*), void** args, int n);
+            tq_tp_run(iq3_s_int_dot_worker, ptrs, n_threads);
+        }
+        return;
+    }
 #endif
 
     /* ---- Q6_K × int8 fast path (vdotq_s32) ----
