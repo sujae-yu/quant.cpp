@@ -64,6 +64,7 @@ static inline int pthread_join(pthread_t t, void** r) {
 #define ACCELERATE_NEW_LAPACK
 #endif
 #include <Accelerate/Accelerate.h>
+#include <pthread/qos.h>
 #endif
 
 /* ============================================================
@@ -109,6 +110,13 @@ static int g_n_threads = 1;
 static void* tp_worker(void* arg) {
     int id = (int)(intptr_t)arg;
     int my_gen = 0;
+#ifdef __APPLE__
+    /* M1 Pro = 8 P-cores + 2 E-cores. Without QoS hint the macOS scheduler
+     * may place compute workers on E-cores (~3-4× lower bandwidth per core),
+     * leaving us at ~25% of llama.cpp's CPU throughput. USER_INTERACTIVE
+     * QoS biases the scheduler toward P-cores. */
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#endif
     for (;;) {
         pthread_mutex_lock(&g_tp.mtx);
         while (g_tp.generation == my_gen && g_tp.active)
@@ -191,6 +199,10 @@ void tq_set_threads(int n_threads) {
     if (n_threads < 1) n_threads = 1;
     if (n_threads > TP_MAX) n_threads = TP_MAX;
     g_n_threads = n_threads;
+#ifdef __APPLE__
+    /* Pin main thread to P-core class as well. */
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#endif
     if (n_threads > 1) tp_init(n_threads);
 }
 
@@ -734,8 +746,15 @@ static void matmul_q4_rows(float* out, const float* x,
         const float* si1 = w_scales + (size_t)(i + 1) * n_blocks;
 
 #ifdef __ARM_NEON
-        float32x4_t sumv0 = vdupq_n_f32(0.0f);
-        float32x4_t sumv1 = vdupq_n_f32(0.0f);
+        /* Dual accumulators per row break the FMA dependency chain.
+         * Without splitting, sumv0 forms a single chain N-blocks deep with
+         * 3-cycle FMA latency on M1 P-core → latency-bound at ~3 cyc/block.
+         * Splitting into 2 independent chains (block_even, block_odd) lets
+         * the FMA pipe issue throughput-bound at ~1 cyc/block. */
+        float32x4_t sumv0a = vdupq_n_f32(0.0f);
+        float32x4_t sumv0b = vdupq_n_f32(0.0f);
+        float32x4_t sumv1a = vdupq_n_f32(0.0f);
+        float32x4_t sumv1b = vdupq_n_f32(0.0f);
 
         /* Process 2 blocks per iteration for reduced loop overhead */
         int b = 0;
@@ -766,8 +785,8 @@ static void matmul_q4_rows(float* out, const float* x,
             a1_0 = vaddq_s32(a1_0, vpaddlq_s16(vmull_s8(vget_high_s8(hi1_0), vget_high_s8(xd0.val[1]))));
 #endif
             float s0 = x_scales[b];
-            sumv0 = vmlaq_n_f32(sumv0, vcvtq_f32_s32(a0_0), si0[b] * s0);
-            sumv1 = vmlaq_n_f32(sumv1, vcvtq_f32_s32(a1_0), si1[b] * s0);
+            sumv0a = vmlaq_n_f32(sumv0a, vcvtq_f32_s32(a0_0), si0[b] * s0);
+            sumv1a = vmlaq_n_f32(sumv1a, vcvtq_f32_s32(a1_0), si1[b] * s0);
 
             /* Block b+1 */
             uint8x16_t pk0_1 = vld1q_u8(wi0 + (b + 1) * 16);
@@ -795,9 +814,12 @@ static void matmul_q4_rows(float* out, const float* x,
             a1_1 = vaddq_s32(a1_1, vpaddlq_s16(vmull_s8(vget_high_s8(hi1_1), vget_high_s8(xd1.val[1]))));
 #endif
             float s1 = x_scales[b + 1];
-            sumv0 = vmlaq_n_f32(sumv0, vcvtq_f32_s32(a0_1), si0[b + 1] * s1);
-            sumv1 = vmlaq_n_f32(sumv1, vcvtq_f32_s32(a1_1), si1[b + 1] * s1);
+            sumv0b = vmlaq_n_f32(sumv0b, vcvtq_f32_s32(a0_1), si0[b + 1] * s1);
+            sumv1b = vmlaq_n_f32(sumv1b, vcvtq_f32_s32(a1_1), si1[b + 1] * s1);
         }
+        /* Reduce dual accumulators (block_even + block_odd) */
+        float32x4_t sumv0 = vaddq_f32(sumv0a, sumv0b);
+        float32x4_t sumv1 = vaddq_f32(sumv1a, sumv1b);
         /* Handle odd remaining block */
         for (; b < n_blocks; b++) {
             uint8x16_t pk0 = vld1q_u8(wi0 + b * 16);

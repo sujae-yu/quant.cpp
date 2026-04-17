@@ -2496,6 +2496,176 @@ static float fused_dot_q4_0(const void* row, const float* x, int n) {
     return sum;
 }
 
+/* ============================================================
+ * Q6_K × int8 fused dot (NEON vdotq_s32 path)
+ *
+ * The float-FMA fused_dot_q6_k below is pure scalar — the dominant
+ * decode-time function on Q4_K_M models (which embed Q6_K for the
+ * critical `attention.wo` and `ffn_down` projections). Sample on
+ * Qwen3.5-4B Q4_K_M shows fused_dot_q6_k = 17725 self-time vs
+ * matmul_q4_rows = 3040, leaving us at ~25% of llama.cpp CPU speed.
+ *
+ * Layout per 256-element block:
+ *   ql[128]: low 4 bits of 256 6-bit weights
+ *   qh[64]:  upper 2 bits of 256 6-bit weights
+ *   sc[16]:  int8 sub-block scales (one per 16 elements)
+ *   d:       fp16 super-block scale
+ *
+ * Per-element value = ((ql & 0xF) | ((qh & 3) << 4)) - 32, scaled.
+ *
+ * Strategy: pre-quantize x to int8 (Q8_0 layout, 32-elem blocks),
+ * for each 16-element sub-block do one vdotq_s32 between unpacked
+ * Q6_K weights (int8 [-32..31]) and x_q8.
+ * ============================================================ */
+#if TQ_HAS_NEON
+/* Q6_K unpack helpers — QH_SHIFT must be a compile-time literal (0/2/4/6).
+ * vshrq_n_u8 requires a literal shift; we open-code per shift to keep
+ * everything as constants the compiler can fold. */
+#define Q6K_LOW_S0(ql_v, qh_v) \
+    vsubq_s8(vreinterpretq_s8_u8(vorrq_u8( \
+        vandq_u8((ql_v), vdupq_n_u8(0x0F)), \
+        vshlq_n_u8(vandq_u8((qh_v), vdupq_n_u8(0x03)), 4))), \
+        vdupq_n_s8(32))
+#define Q6K_LOW_S2(ql_v, qh_v) \
+    vsubq_s8(vreinterpretq_s8_u8(vorrq_u8( \
+        vandq_u8((ql_v), vdupq_n_u8(0x0F)), \
+        vshlq_n_u8(vandq_u8(vshrq_n_u8((qh_v), 2), vdupq_n_u8(0x03)), 4))), \
+        vdupq_n_s8(32))
+#define Q6K_HIGH_S4(ql_v, qh_v) \
+    vsubq_s8(vreinterpretq_s8_u8(vorrq_u8( \
+        vshrq_n_u8((ql_v), 4), \
+        vshlq_n_u8(vandq_u8(vshrq_n_u8((qh_v), 4), vdupq_n_u8(0x03)), 4))), \
+        vdupq_n_s8(32))
+#define Q6K_HIGH_S6(ql_v, qh_v) \
+    vsubq_s8(vreinterpretq_s8_u8(vorrq_u8( \
+        vshrq_n_u8((ql_v), 4), \
+        vshlq_n_u8(vandq_u8(vshrq_n_u8((qh_v), 6), vdupq_n_u8(0x03)), 4))), \
+        vdupq_n_s8(32))
+
+static float fused_dot_q6_k_int8(const void* row, const int8_t* x_qs,
+                                   const float* x_ds, int n)
+{
+    const int nb = n / 256;
+    const block_q6_K* blk = (const block_q6_K*)row;
+
+    float sumf = 0.0f;
+
+    for (int b = 0; b < nb; b++) {
+        if (b + 1 < nb) {
+            __builtin_prefetch((const uint8_t*)&blk[b+1], 0, 3);
+            __builtin_prefetch((const uint8_t*)&blk[b+1] + 128, 0, 3);
+        }
+        const float d = fp16_to_fp32(blk[b].d);
+        const uint8_t* ql = blk[b].ql;
+        const uint8_t* qh = blk[b].qh;
+        const int8_t* sc = blk[b].scales;
+
+        const int8_t* xb = x_qs + b * 256;
+        const float*  xd = x_ds + b * 8;
+
+        float sub_sum = 0.0f;
+
+        /* Process two halves of 128 elements each */
+        for (int half = 0; half < 2; half++) {
+            /* Load ql (64 bytes) and qh (32 bytes) for this half */
+            uint8x16_t ql_a = vld1q_u8(ql + half*64 + 0);   /* ql[0..15] */
+            uint8x16_t ql_b = vld1q_u8(ql + half*64 + 16);  /* ql[16..31] */
+            uint8x16_t ql_c = vld1q_u8(ql + half*64 + 32);  /* ql[32..47] */
+            uint8x16_t ql_d = vld1q_u8(ql + half*64 + 48);  /* ql[48..63] */
+            uint8x16_t qh_a = vld1q_u8(qh + half*32 + 0);   /* qh[0..15] */
+            uint8x16_t qh_b = vld1q_u8(qh + half*32 + 16);  /* qh[16..31] */
+            const int8_t* schalf = sc + half*8;
+
+            /* Sub-blocks 0,1: x[0..31] within half ↔ qh shift 0 (low 2 bits)
+             * sc[0] for x[0..15], sc[1] for x[16..31]. Both use ql_a,ql_b. */
+            int8x16_t w0 = Q6K_LOW_S0(ql_a, qh_a);  /* ql[0..15] & 0xF */
+            int8x16_t w1 = Q6K_LOW_S0(ql_b, qh_b);  /* ql[16..31] & 0xF */
+            /* Sub-blocks 2,3: x[32..63] ↔ qh shift 2
+             * sc[2] for x[32..47], sc[3] for x[48..63]. ql_c,ql_d low. */
+            int8x16_t w2 = Q6K_LOW_S2(ql_c, qh_a);
+            int8x16_t w3 = Q6K_LOW_S2(ql_d, qh_b);
+            /* Sub-blocks 4,5: x[64..95] ↔ ql high nibble + qh shift 4
+             * sc[4] for x[64..79], sc[5] for x[80..95]. */
+            int8x16_t w4 = Q6K_HIGH_S4(ql_a, qh_a);
+            int8x16_t w5 = Q6K_HIGH_S4(ql_b, qh_b);
+            /* Sub-blocks 6,7: x[96..127] ↔ ql high + qh shift 6
+             * sc[6] for x[96..111], sc[7] for x[112..127]. */
+            int8x16_t w6 = Q6K_HIGH_S6(ql_c, qh_a);
+            int8x16_t w7 = Q6K_HIGH_S6(ql_d, qh_b);
+
+            /* For each sub-block: vdotq_s32 against corresponding x_q8 chunk.
+             * Note: each pair of 16-elem sub-blocks shares one x_scale because
+             * x is quantized in 32-elem blocks. Sub-blocks 0,1 share xd[half*4+0],
+             * etc. */
+            const int8_t* xh = xb + half * 128;
+
+            int8x16_t xv0 = vld1q_s8(xh + 0);
+            int8x16_t xv1 = vld1q_s8(xh + 16);
+            int8x16_t xv2 = vld1q_s8(xh + 32);
+            int8x16_t xv3 = vld1q_s8(xh + 48);
+            int8x16_t xv4 = vld1q_s8(xh + 64);
+            int8x16_t xv5 = vld1q_s8(xh + 80);
+            int8x16_t xv6 = vld1q_s8(xh + 96);
+            int8x16_t xv7 = vld1q_s8(xh + 112);
+
+#ifdef __ARM_FEATURE_DOTPROD
+            int32_t i0 = vaddvq_s32(vdotq_s32(vdupq_n_s32(0), w0, xv0));
+            int32_t i1 = vaddvq_s32(vdotq_s32(vdupq_n_s32(0), w1, xv1));
+            int32_t i2 = vaddvq_s32(vdotq_s32(vdupq_n_s32(0), w2, xv2));
+            int32_t i3 = vaddvq_s32(vdotq_s32(vdupq_n_s32(0), w3, xv3));
+            int32_t i4 = vaddvq_s32(vdotq_s32(vdupq_n_s32(0), w4, xv4));
+            int32_t i5 = vaddvq_s32(vdotq_s32(vdupq_n_s32(0), w5, xv5));
+            int32_t i6 = vaddvq_s32(vdotq_s32(vdupq_n_s32(0), w6, xv6));
+            int32_t i7 = vaddvq_s32(vdotq_s32(vdupq_n_s32(0), w7, xv7));
+#else
+            /* vmull_s8/vpadd fallback for non-DOTPROD CPUs */
+            #define DOT16(w, x) vaddvq_s32(vpaddlq_s16(vaddq_s16( \
+                vmull_s8(vget_low_s8(w), vget_low_s8(x)), \
+                vmull_s8(vget_high_s8(w), vget_high_s8(x)))))
+            int32_t i0 = DOT16(w0, xv0);
+            int32_t i1 = DOT16(w1, xv1);
+            int32_t i2 = DOT16(w2, xv2);
+            int32_t i3 = DOT16(w3, xv3);
+            int32_t i4 = DOT16(w4, xv4);
+            int32_t i5 = DOT16(w5, xv5);
+            int32_t i6 = DOT16(w6, xv6);
+            int32_t i7 = DOT16(w7, xv7);
+            #undef DOT16
+#endif
+            /* Combine with weight scales (int8) and x_scales (per 32-elem) */
+            float xd0 = xd[half*4 + 0];
+            float xd1 = xd[half*4 + 1];
+            float xd2 = xd[half*4 + 2];
+            float xd3 = xd[half*4 + 3];
+
+            sub_sum += xd0 * ((float)schalf[0] * (float)i0 + (float)schalf[1] * (float)i1);
+            sub_sum += xd1 * ((float)schalf[2] * (float)i2 + (float)schalf[3] * (float)i3);
+            sub_sum += xd2 * ((float)schalf[4] * (float)i4 + (float)schalf[5] * (float)i5);
+            sub_sum += xd3 * ((float)schalf[6] * (float)i6 + (float)schalf[7] * (float)i7);
+        }
+
+        sumf += d * sub_sum;
+    }
+
+    return sumf;
+}
+
+typedef struct {
+    float* out; const void* weight; const int8_t* x_qs;
+    const float* x_ds; size_t row_bytes; int in_dim;
+    int start_row; int end_row;
+} q6k_int_task_t;
+
+static void* q6_k_int_dot_worker(void* arg) {
+    q6k_int_task_t* task = (q6k_int_task_t*)arg;
+    for (int d = task->start_row; d < task->end_row; d++) {
+        const void* row = (const uint8_t*)task->weight + (size_t)d * task->row_bytes;
+        task->out[d] = fused_dot_q6_k_int8(row, task->x_qs, task->x_ds, task->in_dim);
+    }
+    return NULL;
+}
+#endif /* TQ_HAS_NEON */
+
 /* Fused Q6_K dot product: 210 bytes per 256 elements
  * Matches ggml dequantize_row_q6_K layout exactly:
  * Two 128-element halves, each with 32 iterations producing 4 elements. */
@@ -3322,6 +3492,69 @@ void tq_matmul_gguf(float* out, const float* x,
     /* forward-declare workers: defined at file scope below */
     extern void* iq2_xxs_int_dot_worker(void* arg);
     extern void* iq2_s_int_dot_worker(void* arg);
+#endif
+
+    /* ---- Q6_K × int8 fast path (vdotq_s32) ----
+     * Q4_K_M models embed Q6_K for o_proj/down_proj. The float fused-dot is
+     * scalar; sample on Qwen3.5-4B shows it dominates decode. Pre-quantize
+     * x once and use vdotq_s32 over 16-elem sub-blocks for ~5× speedup. */
+#if TQ_HAS_NEON
+    if (weight_type == TQ_GGML_TYPE_Q6_K
+        && in_dim >= 256 && in_dim <= 16384
+        && (in_dim % 256 == 0) && !getenv("TQ_Q6K_NOINT"))
+    {
+        int n_blocks32 = in_dim / 32;
+        int8_t x_qs_buf[16384];
+        float  x_ds_buf[512];
+        for (int bb = 0; bb < n_blocks32; bb++) {
+            const float* xp = x + bb * 32;
+            float amax = 0.0f;
+            for (int j = 0; j < 32; j++) {
+                float a = xp[j] < 0 ? -xp[j] : xp[j];
+                if (a > amax) amax = a;
+            }
+            float dq = amax / 127.0f;
+            x_ds_buf[bb] = dq;
+            if (dq > 0.0f) {
+                float id = 1.0f / dq;
+                for (int j = 0; j < 32; j++) {
+                    int v = (int)roundf(xp[j] * id);
+                    x_qs_buf[bb * 32 + j] = (int8_t)(v < -128 ? -128 : (v > 127 ? 127 : v));
+                }
+            } else {
+                memset(x_qs_buf + bb * 32, 0, 32);
+            }
+        }
+
+        size_t row_bytes_q6 = (size_t)in_dim / 256 * sizeof(block_q6_K);
+
+        int n_threads = tq_get_threads();
+        if (tq_tls_force_serial_matmul) n_threads = 1;
+
+        if (n_threads <= 1 || out_dim <= n_threads) {
+            for (int d = 0; d < out_dim; d++) {
+                const void* row = (const uint8_t*)weight + (size_t)d * row_bytes_q6;
+                out[d] = fused_dot_q6_k_int8(row, x_qs_buf, x_ds_buf, in_dim);
+            }
+        } else {
+            q6k_int_task_t tasks[TQ_TP_MAX];
+            void* ptrs[TQ_TP_MAX];
+            int rows_per = out_dim / n_threads;
+            for (int t = 0; t < n_threads; t++) {
+                tasks[t] = (q6k_int_task_t){
+                    .out = out, .weight = weight,
+                    .x_qs = x_qs_buf, .x_ds = x_ds_buf,
+                    .row_bytes = row_bytes_q6, .in_dim = in_dim,
+                    .start_row = t * rows_per,
+                    .end_row = (t == n_threads - 1) ? out_dim : (t + 1) * rows_per
+                };
+                ptrs[t] = &tasks[t];
+            }
+            extern void tq_tp_run(void* (*fn)(void*), void** args, int n);
+            tq_tp_run(q6_k_int_dot_worker, ptrs, n_threads);
+        }
+        return;
+    }
 #endif
 
     /* ---- IQ2_XXS × int8 fast path (auto-quantize activation, vdotq_s32) ----
