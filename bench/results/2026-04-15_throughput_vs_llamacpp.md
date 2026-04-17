@@ -173,3 +173,72 @@ scripts/test_long_seq.sh  — 6/6 PASS (500 tokens at T=0, 100% printable)
 scripts/check_sync.sh     — 8 sections PASS (catches future split-source drift)
 scripts/check_stale.sh    — binary mtime guard (catches stale-build confusion)
 ```
+
+---
+
+## Update 2026-04-17: Gemma 4 26B-A4B MoE support + cross-expert parallelism
+
+Applied **evolved methodology** (hypothesis-driven, predict-then-measure):
+
+### Step 1: Get it working
+Started with gemma-4-26B-A4B-it-IQ2_XXS producing broken output. Traced
+through Q/K/V values and found:
+1. Metal matmul kernel returns zeros for certain Q4_K shapes → auto-disable
+   Metal for Gemma 4 (fixed commit `1355899`).
+2. V-normalization was gated on `has_v_weights`, but Gemma 4 FULL attention
+   layers lack attn_v and use K=V fallback. V-norm needs to run anyway
+   (fixed `9262a37`, verified vs llama.cpp reference).
+3. Metal batch scope was still opening even with force-cpu → buffer
+   conflicts (fixed `032222d`).
+
+Result: 26B-A4B runs coherently, produces "The answer is **4**", "The
+capital of France is **Paris**", and full paragraph explanations.
+
+### Step 2: Measure and hypothesize
+Thread scaling: T=1 = 1.0 t/s, T=8 = 4.0 t/s → only 50% efficiency.
+Prediction: 8 experts × ~16 inner-matmul dispatches × barrier overhead
+was the bottleneck. 480 barriers per token × ~180 μs = ~86 ms overhead.
+
+### Step 3: Cross-expert parallelism (`c361ed4`)
+Flipped the dispatch model: each of N active experts runs on its own
+thread, doing gate_up+activation+down entirely in-thread. Inner matmuls
+run single-threaded via `tq_tls_force_serial_matmul` (thread-local
+override). One barrier per layer instead of 16 per expert.
+
+| Metric | Before | After | Δ |
+|---|---:|---:|---:|
+| MoE time / tok | 52 ms | 27 ms | -48% |
+| Per-token | 122 ms | 93 ms | -24% |
+| Decode (32 tok) | 3.9 t/s | 4.8 t/s | +23% |
+| **Decode (100+ tok)** | 5.6 t/s | **8.0 t/s** | **+43%** |
+| Thread efficiency | 50% | 60%+ | — |
+
+Prediction was -71% MoE; measured -48%. The 20% gap is L2 cache
+pressure (8 experts × 742 KB = 5.9 MB fits in 12 MB shared L2 but
+evicts each other's lines).
+
+### Step 4: Cross-QKV attempt (`d966a85`, `d6f16f0`)
+Tried same pattern for Q/K/V attention projections. Initially produced
+corrupt K output. Debugging revealed the Q4_K int8 auto-quantize path
+didn't honor the TLS force-serial flag → nested thread-pool races on
+`g_tp.fn` and `g_tp.args`. Fixed in `d6f16f0`.
+
+With correctness fixed, parallel QKV is still 2× slower than serial
+(3-way task parallelism uses fewer cores than 8-thread single-matmul
+parallelism). Kept the feature opt-in as `TQ_PARALLEL_QKV=1` for
+research; default unchanged.
+
+### Long generation sample (8.0 t/s, 107 tokens)
+> "Quantum computing uses subatomic particles called qubits to perform
+> calculations that can exist in multiple states at once, allowing them
+> to process vast amounts of data simultaneously rather than just as 0s
+> or 1s. This enables computers to solve complex problems far faster than
+> classical systems by exploring all possible solutions at the same time.
+> It leverages phenomena like superposition and entanglement to achieve
+> exponential processing power for advanced mathematics and science.
+> Ultimately, it transforms how we solve problems that were previously
+> impossible for traditional machines."
+
+Complete, accurate, well-structured — at 2-bit quantization on a
+26B/4B-active MoE model running on a 16 GB M1 Pro.
+
