@@ -77,6 +77,11 @@ echo ""
 echo "--- STRICT tier (must produce expected substring) ---"
 run_test "Phi-3.5-mini-instruct-Q8_0.gguf"     "2+2=" "4" STRICT "TQ_NO_METAL=1"
 run_test "Phi-3.5-mini-instruct-Q4_K_M.gguf"   "2+2=" "4" STRICT "TQ_NO_METAL=1"
+# Regression guard: chat-mode must answer factually (not hallucinate
+# unrelated math problems). 2026-04-17: TQ_PHI3_SPLIT=1 default exposed
+# a precision-loss regression that only surfaced under --chat. Default
+# is now SPLIT=0. This test ensures we don't silently re-enable it.
+run_test "Phi-3.5-mini-instruct-Q4_K_M.gguf"   "What is 2+2?" "answer" STRICT "TQ_NO_METAL=1" "--chat"
 run_test "gemma-4-e2b-it-Q8_0.gguf"            "2+2=" "4" STRICT "TQ_NO_METAL=1 TQ_NO_Q4=1"
 # Note: Llama 3.1 8B raw "2+2=" is borderline — FP32 KV gives "5: The Mathematics..."
 # and turbo_kv_4b with k128 highres matches FP32. Use COHERENT tier for this model.

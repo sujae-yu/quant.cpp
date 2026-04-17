@@ -3906,12 +3906,29 @@ tq_model_t* tq_load_gguf(const char* path) {
             goto skip_q4_conversion;
         }
         int has_gguf_weights = 0;
-        /* Phi-3 fused QKV/FFN split: default ON for decode speedup.
-         * Earlier quality regression was specific to older split implementation;
-         * current path produces coherent output (verified 500-token T=0).
-         * Escape hatch: TQ_PHI3_SPLIT=0 to disable if a future model regresses. */
+        /* Phi-3 fused QKV/FFN split: default OFF due to chat-mode quality
+         * regression.
+         *
+         * When SPLIT=1, the fused QKV tensor (Q4_K in GGUF) is dequantized to
+         * FP32, split row-wise into separate wq/wk/wv buffers, then
+         * re-quantized to our internal Q4 block layout (per-32-element
+         * scales). The FP32→Q4 recompression loses precision vs. the native
+         * Q4_K with its 6-bit sub-block scales.
+         *
+         * The loss is SILENT on raw prompt completion (e.g. "Once upon a
+         * time" → any coherent story passes test_models.sh COHERENT tier).
+         * It BREAKS --chat instruction-following: "What is 2+2?" → "The
+         * expression '5+x=y' represents…" (model hallucinates a different
+         * problem). Chat requires sharper logit margins than raw continuation.
+         *
+         * Confirmed 2026-04-17 on Phi-3.5-mini-Q4_K_M: SPLIT=0 answers
+         * "What is 2+2?" correctly; SPLIT=1 garbles it. Both produce
+         * printable English so test_models.sh misses the regression.
+         *
+         * Opt-in benchmarking via TQ_PHI3_SPLIT=1 when measuring the
+         * raw-completion decode speedup; default is safety/quality. */
         const char* phi3_env = getenv("TQ_PHI3_SPLIT");
-        int phi3_split = (phi3_env == NULL) ? 1 : (atoi(phi3_env) != 0);
+        int phi3_split = (phi3_env == NULL) ? 0 : (atoi(phi3_env) != 0);
         for (int l = 0; l < c->n_layers && !has_gguf_weights; l++) {
             tq_layer_weights_t* ly = &model->layers[l];
             int fused_convertible = 0;
