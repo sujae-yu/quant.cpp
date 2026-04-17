@@ -1731,6 +1731,94 @@ void* iq2_xxs_int_dot_worker(void* arg) {
     return NULL;
 }
 
+/* ============================================================
+ * IQ2_S × int8 fused dot (NEON vdotq_s32 path)
+ *
+ * Same structure as IQ2_XXS int8 kernel, but IQ2_S's 10-bit grid index
+ * and per-half-subblock sub-scales. Block = 82 bytes (vs 66 for XXS).
+ * ============================================================ */
+static float fused_dot_iq2_s_int8(const void* row, const int8_t* x_qs,
+                                   const float* x_ds, int n)
+{
+    const int nb = n / 256;
+    const uint8_t* base = (const uint8_t*)row;
+    const uint8x8_t vbit_masks = vld1_u8(iq2_sign_bit_masks);
+
+    float sumf = 0.0f;
+
+    for (int b = 0; b < nb; b++) {
+        const uint8_t* blk = base + b * 82;
+        if (b + 1 < nb) {
+            __builtin_prefetch(blk + 82, 0, 3);
+            __builtin_prefetch(blk + 82 + 32, 0, 3);
+        }
+
+        uint16_t d_raw; memcpy(&d_raw, blk, 2);
+        const float d = fp16_to_fp32(d_raw);
+        const uint8_t* qs_base = blk + 2;
+        const uint8_t* signs_base = blk + 34;
+        const uint8_t* qh = blk + 66;
+        const uint8_t* scales = blk + 74;
+
+        const int8_t* x_sub = x_qs + b * 256;
+        const float*  xd_sub = x_ds + b * 8;
+
+        float sub_sum = 0.0f;
+
+        for (int ib32 = 0; ib32 < 8; ib32++) {
+            const uint8_t* qs = qs_base + ib32 * 4;
+            const uint8_t* sn = signs_base + ib32 * 4;
+            float sub_scale_lo = 0.5f + (float)(scales[ib32] & 0xF);
+            float sub_scale_hi = 0.5f + (float)(scales[ib32] >> 4);
+
+            int8x8_t vg[4];
+            for (int l = 0; l < 4; l++) {
+                int grid_idx = qs[l] | ((qh[ib32] << (8 - 2*l)) & 0x300);
+                uint8x8_t raw = vld1_u8((const uint8_t*)(iq2s_grid + grid_idx));
+                uint8_t sign = sn[l];
+                uint8x8_t sbits = vtst_u8(vdup_n_u8(sign), vbit_masks);
+                int8x8_t vneg = vreinterpret_s8_u8(sbits);
+                int8x8_t vr = vreinterpret_s8_u8(raw);
+                vg[l] = vsub_s8(veor_s8(vr, vneg), vneg);
+            }
+
+            int8x16_t vw_lo = vcombine_s8(vg[0], vg[1]);  /* groups 0-1, sub_scale_lo */
+            int8x16_t vw_hi = vcombine_s8(vg[2], vg[3]);  /* groups 2-3, sub_scale_hi */
+
+            int8x16_t vx_lo = vld1q_s8(x_sub + ib32 * 32);
+            int8x16_t vx_hi = vld1q_s8(x_sub + ib32 * 32 + 16);
+
+#ifdef __ARM_FEATURE_DOTPROD
+            int32_t isum_lo = vaddvq_s32(vdotq_s32(vdupq_n_s32(0), vw_lo, vx_lo));
+            int32_t isum_hi = vaddvq_s32(vdotq_s32(vdupq_n_s32(0), vw_hi, vx_hi));
+#else
+            int16x8_t p0 = vmull_s8(vg[0], vget_low_s8(vx_lo));
+            int16x8_t p1 = vmull_s8(vg[1], vget_high_s8(vx_lo));
+            int16x8_t p2 = vmull_s8(vg[2], vget_low_s8(vx_hi));
+            int16x8_t p3 = vmull_s8(vg[3], vget_high_s8(vx_hi));
+            int32_t isum_lo = vaddvq_s32(vpaddlq_s16(p0)) + vaddvq_s32(vpaddlq_s16(p1));
+            int32_t isum_hi = vaddvq_s32(vpaddlq_s16(p2)) + vaddvq_s32(vpaddlq_s16(p3));
+#endif
+
+            sub_sum += xd_sub[ib32] *
+                       (sub_scale_lo * (float)isum_lo + sub_scale_hi * (float)isum_hi);
+        }
+
+        sumf += d * sub_sum;
+    }
+
+    return 0.25f * sumf;
+}
+
+void* iq2_s_int_dot_worker(void* arg) {
+    iq2_int_task_t* task = (iq2_int_task_t*)arg;
+    for (int d = task->start_row; d < task->end_row; d++) {
+        const void* row = (const uint8_t*)task->weight + (size_t)d * task->row_bytes;
+        task->out[d] = fused_dot_iq2_s_int8(row, task->x_qs, task->x_ds, task->in_dim);
+    }
+    return NULL;
+}
+
 #endif /* TQ_HAS_NEON */
 
 /* Fused IQ2_S dot product */
@@ -3231,8 +3319,9 @@ void tq_matmul_gguf(float* out, const float* x,
 
     /* ---- IQ2_XXS × int8 task definition (shared by serial and parallel paths) ---- */
 #if TQ_HAS_NEON
-    /* forward-declare worker: defined at file scope below */
+    /* forward-declare workers: defined at file scope below */
     extern void* iq2_xxs_int_dot_worker(void* arg);
+    extern void* iq2_s_int_dot_worker(void* arg);
 #endif
 
     /* ---- IQ2_XXS × int8 fast path (auto-quantize activation, vdotq_s32) ----
@@ -3246,7 +3335,8 @@ void tq_matmul_gguf(float* out, const float* x,
      *
      * TQ_IQ2_XXS_NOINT=1 reverts to float fused-dot (for A/B comparison). */
 #if TQ_HAS_NEON
-    if (weight_type == TQ_GGML_TYPE_IQ2_XXS && in_dim >= 256 && in_dim <= 16384
+    if ((weight_type == TQ_GGML_TYPE_IQ2_XXS || weight_type == TQ_GGML_TYPE_IQ2_S)
+        && in_dim >= 256 && in_dim <= 16384
         && (in_dim % 256 == 0) && !getenv("TQ_IQ2_XXS_NOINT"))
     {
         /* Quantize x per 32-element block (Q8_0 scale layout).
@@ -3274,15 +3364,21 @@ void tq_matmul_gguf(float* out, const float* x,
             }
         }
 
-        /* Dispatch one row per output dim. Row size: 66 bytes per 256 weights. */
-        size_t row_bytes = (size_t)in_dim / 256 * 66;
+        /* Dispatch one row per output dim. Row size: 66 bytes (IQ2_XXS) or 82 (IQ2_S) per 256 weights. */
+        int is_iq2s = (weight_type == TQ_GGML_TYPE_IQ2_S);
+        size_t block_bytes = is_iq2s ? 82 : 66;
+        size_t row_bytes = (size_t)in_dim / 256 * block_bytes;
+        float (*dot_fn)(const void*, const int8_t*, const float*, int) =
+            is_iq2s ? fused_dot_iq2_s_int8 : fused_dot_iq2_xxs_int8;
+        void* (*worker_fn)(void*) = is_iq2s ? iq2_s_int_dot_worker : iq2_xxs_int_dot_worker;
+
         int n_threads = tq_get_threads();
         if (tq_tls_force_serial_matmul) n_threads = 1;
 
         if (n_threads <= 1 || out_dim <= n_threads) {
             for (int d = 0; d < out_dim; d++) {
                 const void* row = (const uint8_t*)weight + (size_t)d * row_bytes;
-                out[d] = fused_dot_iq2_xxs_int8(row, x_qs_buf, x_ds_buf, in_dim);
+                out[d] = dot_fn(row, x_qs_buf, x_ds_buf, in_dim);
             }
         } else {
             iq2_int_task_t tasks[TQ_TP_MAX];
@@ -3299,7 +3395,7 @@ void tq_matmul_gguf(float* out, const float* x,
                 ptrs[t] = &tasks[t];
             }
             extern void tq_tp_run(void* (*fn)(void*), void** args, int n);
-            tq_tp_run(iq2_xxs_int_dot_worker, ptrs, n_threads);
+            tq_tp_run(worker_fn, ptrs, n_threads);
         }
         return;
     }
