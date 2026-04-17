@@ -929,6 +929,30 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
 }
 
 /* ============================================================
+ * Cross-QKV parallel worker: single matmul with serial inner pool.
+ * Each worker independently runs Q, K, or V projection in parallel.
+ * ============================================================ */
+extern __thread int tq_tls_force_serial_matmul;
+
+typedef struct {
+    float* out;
+    const float* in;
+    const void* w;
+    int w_type;
+    int out_dim;
+    int in_dim;
+} qkv_proj_task_t;
+
+static void* qkv_proj_worker(void* arg) {
+    qkv_proj_task_t* t = (qkv_proj_task_t*)arg;
+    int prev = tq_tls_force_serial_matmul;
+    tq_tls_force_serial_matmul = 1;
+    tq_matmul_gguf(t->out, t->in, t->w, (tq_ggml_dtype)t->w_type, t->out_dim, t->in_dim);
+    tq_tls_force_serial_matmul = prev;
+    return NULL;
+}
+
+/* ============================================================
  * Self-attention forward pass with QK-norm and partial RoPE
  * ============================================================ */
 static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) {
@@ -976,6 +1000,37 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
 
     /* QKV projections (timed as matmul) */
     TQ_PROF_START(_tp);
+
+    /* Cross-QKV parallel path (Gemma 4 MoE, non-gate): 3 tasks × serial
+     * inner matmul. Saves ~2 thread-pool barriers per layer. */
+    int _did_parallel_qkv = 0;
+    {
+        int has_v_pre = (layer->wv_q2 || layer->wv_q4 || layer->wv_q8 ||
+                         layer->gguf_wv || layer->wv);
+        int is_kv_shared_pre = (c->n_kv_shared_layers > 0 && model->kv_source_layer &&
+                                 l >= c->n_layers - c->n_kv_shared_layers);
+        int can_parallel = (layer->gguf_wq && !layer->gguf_w_qkv && !is_kv_shared_pre &&
+                            !c->attn_output_gate && has_v_pre &&
+                            layer->gguf_wk && layer->gguf_wv);
+        if (can_parallel && tq_get_threads() >= 3 && getenv("TQ_PARALLEL_QKV")) {
+            extern void tq_tp_run(void* (*fn)(void*), void** args, int n_tasks);
+            qkv_proj_task_t tasks[3];
+            void* task_ptrs[3];
+            tasks[0] = (qkv_proj_task_t){s->q, s->xb, layer->gguf_wq,
+                                          (int)layer->gguf_wq_type,
+                                          n_heads * head_dim, dim};
+            tasks[1] = (qkv_proj_task_t){s->k, s->xb, layer->gguf_wk,
+                                          (int)layer->gguf_wk_type, kv_dim, dim};
+            tasks[2] = (qkv_proj_task_t){s->v, s->xb, layer->gguf_wv,
+                                          (int)layer->gguf_wv_type, kv_dim, dim};
+            task_ptrs[0] = &tasks[0];
+            task_ptrs[1] = &tasks[1];
+            task_ptrs[2] = &tasks[2];
+            tq_tp_run(qkv_proj_worker, task_ptrs, 3);
+            _did_parallel_qkv = 1;
+        }
+    }
+
     /* When attn_output_gate is enabled, wq has shape [2*n_heads*head_dim, dim]
      * and outputs [Q, gate_q] concatenated. We project into xb2 as temp.
      *
@@ -983,7 +1038,9 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
      * layer-level batch scope in tq_forward(). */
 
     float* gate_q = NULL;
-    if (has_fused_qkv_layer) {
+    if (_did_parallel_qkv) {
+        /* Already computed in parallel */
+    } else if (has_fused_qkv_layer) {
         /* Phi-3 fused QKV: one matmul produces [Q | K | V].
          * Force CPU path — Metal has a buffer sizing bug with the large
          * output dim (total_out = 3*dim for Phi-3.5, much larger than
@@ -1062,7 +1119,7 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
     int is_kv_shared = (c->n_kv_shared_layers > 0 && model->kv_source_layer &&
                          l >= c->n_layers - c->n_kv_shared_layers);
 
-    if (!has_fused_qkv_layer && !is_kv_shared) {
+    if (!_did_parallel_qkv && !has_fused_qkv_layer && !is_kv_shared) {
         if (layer->wk_q2) {
             TQ_MATMUL_Q2_OR_1BIT(s->k, s->xb, layer->wk_q2, layer->wk_q2s, s->xb_q8, s->xb_q8s, kv_dim, dim, model->use_1bit_weights);
         } else if (layer->wk_q4) {
