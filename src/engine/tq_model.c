@@ -3905,6 +3905,27 @@ tq_model_t* tq_load_gguf(const char* path) {
             fprintf(stderr, "tq_load_gguf: Gemma4 MoE — skipping Q4 conversion (Q8_0 fused dot is faster)\n");
             goto skip_q4_conversion;
         }
+        /* MoE with Q8_0 attention (Qwen3.6-A3B family, UD quants): the non-expert
+         * path is stored as Q8_0 in the GGUF. Dequantizing Q8_0 → FP32 → re-quantizing
+         * to our internal per-32-scale Q4 loses precision sharply — roughly 2×
+         * scale-field collapse. Symptom: technical-Q&A outputs scramble to
+         * digit-attractor garbage ("what is deep learning?" → "Dee learning! is a
+         * new form..."). Keep Q8_0 native; GGUF int8 fast path is competitive. */
+        if (c->is_moe && model->layers) {
+            int q8_attn = 0;
+            for (int l = 0; l < c->n_layers && !q8_attn; l++) {
+                tq_layer_weights_t* ly = &model->layers[l];
+                if ((ly->gguf_w_qkv && ly->gguf_w_qkv_type == TQ_GGML_TYPE_Q8_0) ||
+                    (ly->gguf_wq    && ly->gguf_wq_type    == TQ_GGML_TYPE_Q8_0)) {
+                    q8_attn = 1;
+                }
+            }
+            if (q8_attn) {
+                fprintf(stderr, "tq_load_gguf: MoE with Q8_0 attn (Qwen3.6-style) — "
+                        "skipping Q4 conversion to preserve Q8_0 precision on non-expert path\n");
+                goto skip_q4_conversion;
+            }
+        }
         int has_gguf_weights = 0;
         /* Phi-3 fused QKV/FFN split: default OFF due to chat-mode quality
          * regression.
