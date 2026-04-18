@@ -47,37 +47,50 @@ static inline float fast_expf_moe(float x) {
     return v.f;
 }
 
+#if TQ_MOE_HAS_NEON
+/* Vectorized Schraudolph exp — 4 float lanes in one shot.
+ * For |x|>~16 result saturates (exponent field overflow); the SiLU /
+ * GELU callers pass negated values in a bounded range (x in [-16, 16]
+ * after the swiglu/geglu math) so we don't need the scalar branch here. */
+static inline float32x4_t fast_exp_neon(float32x4_t vx) {
+    /* Clamp to [-80, 80] so we never produce NaN from int32 overflow.
+     * sigmoid saturates at |x|~16 anyway. */
+    float32x4_t clamped = vminq_f32(vmaxq_f32(vx, vdupq_n_f32(-80.0f)),
+                                    vdupq_n_f32(80.0f));
+    float32x4_t scaled = vfmaq_f32(vdupq_n_f32(1065353216.0f),
+                                   clamped, vdupq_n_f32(12102203.0f));
+    int32x4_t ivals = vcvtq_s32_f32(scaled);
+    return vreinterpretq_f32_s32(ivals);
+}
+#endif
+
 /* Vectorized SwiGLU: hb[i] = silu(hb[i]) * hb2[i] */
 static void swiglu_fused(float* restrict hb, const float* restrict hb2, int n) {
 #if TQ_MOE_HAS_NEON
     int i = 0;
     float32x4_t vone = vdupq_n_f32(1.0f);
     for (; i + 7 < n; i += 8) {
-        /* Process 8 elements: 2x float32x4_t */
+        /* Process 8 elements: 2x float32x4_t.
+         * Fully vectorized — prior code round-tripped through scalar
+         * fast_expf_moe(), wasting the NEON SwiGLU pipeline. */
         float32x4_t vg0 = vld1q_f32(hb + i);
         float32x4_t vg1 = vld1q_f32(hb + i + 4);
         float32x4_t vu0 = vld1q_f32(hb2 + i);
         float32x4_t vu1 = vld1q_f32(hb2 + i + 4);
 
-        /* Fast sigmoid via Schraudolph: exp(-x) approx */
-        float neg0[4], neg1[4];
-        vst1q_f32(neg0, vnegq_f32(vg0));
-        vst1q_f32(neg1, vnegq_f32(vg1));
-        float32x4_t vexp0 = {fast_expf_moe(neg0[0]), fast_expf_moe(neg0[1]),
-                              fast_expf_moe(neg0[2]), fast_expf_moe(neg0[3])};
-        float32x4_t vexp1 = {fast_expf_moe(neg1[0]), fast_expf_moe(neg1[1]),
-                              fast_expf_moe(neg1[2]), fast_expf_moe(neg1[3])};
-        /* sigmoid = 1 / (1 + exp(-x)) */
-        float32x4_t vsig0 = vrecpeq_f32(vaddq_f32(vone, vexp0));
-        vsig0 = vmulq_f32(vsig0, vrecpsq_f32(vaddq_f32(vone, vexp0), vsig0));
-        float32x4_t vsig1 = vrecpeq_f32(vaddq_f32(vone, vexp1));
-        vsig1 = vmulq_f32(vsig1, vrecpsq_f32(vaddq_f32(vone, vexp1), vsig1));
-        /* silu = x * sigmoid(x) */
-        float32x4_t vsilu0 = vmulq_f32(vg0, vsig0);
-        float32x4_t vsilu1 = vmulq_f32(vg1, vsig1);
-        /* silu * up */
-        vst1q_f32(hb + i, vmulq_f32(vsilu0, vu0));
-        vst1q_f32(hb + i + 4, vmulq_f32(vsilu1, vu1));
+        float32x4_t vexp0 = fast_exp_neon(vnegq_f32(vg0));
+        float32x4_t vexp1 = fast_exp_neon(vnegq_f32(vg1));
+
+        /* sigmoid = 1 / (1 + exp(-x))  — Newton-refined reciprocal */
+        float32x4_t denom0 = vaddq_f32(vone, vexp0);
+        float32x4_t denom1 = vaddq_f32(vone, vexp1);
+        float32x4_t vsig0 = vrecpeq_f32(denom0);
+        vsig0 = vmulq_f32(vsig0, vrecpsq_f32(denom0, vsig0));
+        float32x4_t vsig1 = vrecpeq_f32(denom1);
+        vsig1 = vmulq_f32(vsig1, vrecpsq_f32(denom1, vsig1));
+        /* silu(x) * up = x * sigmoid(x) * up */
+        vst1q_f32(hb + i,     vmulq_f32(vmulq_f32(vg0, vsig0), vu0));
+        vst1q_f32(hb + i + 4, vmulq_f32(vmulq_f32(vg1, vsig1), vu1));
     }
     for (; i < n; i++) {
         float g = hb[i];
