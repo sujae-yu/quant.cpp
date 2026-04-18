@@ -311,9 +311,22 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
     int batch_ok = 0;
     int want_batched = (n_prompt >= 2) && !getenv("TQ_NO_BATCH_PREFILL");
     if (want_batched) {
-        int rc = tq_forward_batch(model, state, prompt_tokens, n_prompt, prefill_start);
+        /* Qwen3.6 (MoE + DeltaNet hybrid) needs the dedicated MoE-batched
+         * driver — standard tq_forward_batch bails on is_moe. Opt-in via
+         * TQ_MOE_BATCH=1 until stabilized. */
+        int use_moe_hybrid = model->config.is_moe &&
+                             !model->config.is_gemma4 &&
+                             model->layers[0].moe &&
+                             getenv("TQ_MOE_BATCH") != NULL;
+        int rc;
+        if (use_moe_hybrid) {
+            rc = tq_forward_batch_moe_hybrid(model, state, prompt_tokens, n_prompt, prefill_start);
+        } else {
+            rc = tq_forward_batch(model, state, prompt_tokens, n_prompt, prefill_start);
+        }
         if (getenv("TQ_DEBUG_PREFILL"))
-            fprintf(stderr, "[batch_prefill] rc=%d expected=%d (N=%d)\n",
+            fprintf(stderr, "[batch_prefill] driver=%s rc=%d expected=%d (N=%d)\n",
+                    use_moe_hybrid ? "moe_hybrid" : "standard",
                     rc, prefill_start + n_prompt, n_prompt);
         if (rc == prefill_start + n_prompt) {
             /* tq_forward_batch now produces logits for the last position
