@@ -1224,15 +1224,38 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
 
     /* Apply RoPE (partial or full) */
     if (c->partial_rotary_factor > 0.0f && c->partial_rotary_factor < 1.0f) {
-        /* Partial RoPE: only apply to first partial_rotary_factor * head_dim dims */
+        /* Partial RoPE: only apply to first partial_rotary_factor * head_dim dims.
+         *
+         * Sin/cos cache: for decode pos/base/rope_dim are identical across all
+         * heads AND all layers in the same forward pass. Prior code called
+         * powf + cosf + sinf per (layer, head, pair) = 10 × 18 × 32 = 5760
+         * transcendentals per token for Qwen3.6 (rope_dim=64 → 32 pairs).
+         * TLS-cached table keyed by (pos, base, rope_dim) → one compute per
+         * token across all layers → ~180× reduction on this path. */
         int rope_dim = (int)(c->partial_rotary_factor * head_dim);
-        for (int h = 0; h < n_heads; h++) {
-            float* qh = s->q + h * head_dim;
-            for (int i = 0; i < rope_dim / 2; i++) {
+        int rope_pairs = rope_dim / 2;
+        static __thread float tls_cos[256];
+        static __thread float tls_sin[256];
+        static __thread int tls_pos = -1;
+        static __thread float tls_base = 0.0f;
+        static __thread int tls_dim = 0;
+        if (rope_pairs <= 256 &&
+            (tls_pos != pos || tls_base != c->rope_freq_base || tls_dim != rope_dim)) {
+            for (int i = 0; i < rope_pairs; i++) {
                 float freq = 1.0f / powf(c->rope_freq_base, 2.0f * i / rope_dim);
                 float theta = pos * freq;
-                float cos_t = cosf(theta);
-                float sin_t = sinf(theta);
+                tls_cos[i] = cosf(theta);
+                tls_sin[i] = sinf(theta);
+            }
+            tls_pos = pos;
+            tls_base = c->rope_freq_base;
+            tls_dim = rope_dim;
+        }
+        for (int h = 0; h < n_heads; h++) {
+            float* qh = s->q + h * head_dim;
+            for (int i = 0; i < rope_pairs; i++) {
+                float cos_t = tls_cos[i];
+                float sin_t = tls_sin[i];
                 float q0 = qh[2 * i];
                 float q1 = qh[2 * i + 1];
                 qh[2 * i]     = q0 * cos_t - q1 * sin_t;
@@ -1241,11 +1264,9 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
         }
         for (int h = 0; h < n_kv_heads; h++) {
             float* kh = s->k + h * head_dim;
-            for (int i = 0; i < rope_dim / 2; i++) {
-                float freq = 1.0f / powf(c->rope_freq_base, 2.0f * i / rope_dim);
-                float theta = pos * freq;
-                float cos_t = cosf(theta);
-                float sin_t = sinf(theta);
+            for (int i = 0; i < rope_pairs; i++) {
+                float cos_t = tls_cos[i];
+                float sin_t = tls_sin[i];
                 float k0 = kh[2 * i];
                 float k1 = kh[2 * i + 1];
                 kh[2 * i]     = k0 * cos_t - k1 * sin_t;
