@@ -1189,6 +1189,171 @@ static void* bm_q4_worker(void* arg) {
     return NULL;
 }
 
+/* ============================================================
+ * Batched Q8_0 matmul — Mission A Step 1.
+ *
+ * Same shape as tq_batched_matmul_q4: out[N, n_rows] = X[N, d] @ W[n_rows, d]^T
+ * where W is stored as block_q8_0 (34 bytes per 32 elements: fp16 scale + int8[32]).
+ *
+ * Unlocks MoE batched prefill for models that keep attention/shared-expert
+ * tensors as Q8_0 (Qwen3.6 UD quants, which we intentionally do NOT
+ * recompress to internal Q4 — see commit ea01222 for why).
+ *
+ * Inner loop: load 32 int8 weight values + fp16 scale once per (row, block),
+ * then dot with all N pre-quantized activation chunks. Amortizes the
+ * weight read across the batch dim — same principle as the Q4 batched path.
+ * ============================================================ */
+typedef struct {
+    float*         out;          /* [N, n_rows] row-major */
+    const void*    w_blocks;     /* block_q8_0 array, n_rows × n_blocks × 34 bytes */
+    const int8_t*  X_q;          /* [N, d] int8 */
+    const float*   X_d;          /* [N, n_blocks] fp32 scales */
+    int n_rows;
+    int d;
+    int N;
+    int start_row;
+    int end_row;
+} bm_q8_task_t;
+
+static void* bm_q8_worker(void* arg) {
+    bm_q8_task_t* t = (bm_q8_task_t*)arg;
+    const int n_blocks = t->d / 32;
+    const int N = t->N;
+    const int n_rows = t->n_rows;
+    const size_t row_bytes = (size_t)n_blocks * 34;  /* block_q8_0 size */
+
+#ifdef __ARM_NEON
+    if (N > 64) return NULL;  /* safety: stack-alloc sumv cap */
+    float32x4_t sumv[64];
+#endif
+
+    for (int i = t->start_row; i < t->end_row; i++) {
+        const uint8_t* wrow = (const uint8_t*)t->w_blocks + (size_t)i * row_bytes;
+
+#ifdef __ARM_NEON
+        for (int n = 0; n < N; n++) sumv[n] = vdupq_n_f32(0.0f);
+
+        for (int b = 0; b < n_blocks; b++) {
+            const uint8_t* blk = wrow + (size_t)b * 34;
+            /* fp16 scale (bytes 0-1), int8[32] qs (bytes 2-33) */
+            uint16_t d_raw;
+            memcpy(&d_raw, blk, 2);
+            float wd;
+            {
+                uint32_t sign = (d_raw & 0x8000) << 16;
+                uint32_t expv = (d_raw >> 10) & 0x1F;
+                uint32_t mant = d_raw & 0x03FF;
+                uint32_t bits;
+                if (expv == 0) bits = sign;
+                else if (expv == 31) bits = sign | 0x7F800000 | (mant << 13);
+                else bits = sign | ((expv - 15 + 127) << 23) | (mant << 13);
+                memcpy(&wd, &bits, 4);
+            }
+            int8x16_t wq_lo = vld1q_s8((const int8_t*)(blk + 2));
+            int8x16_t wq_hi = vld1q_s8((const int8_t*)(blk + 2 + 16));
+
+            for (int n = 0; n < N; n++) {
+                const int8_t* xqs = t->X_q + (size_t)n * t->d + b * 32;
+                int8x16_t xq_lo = vld1q_s8(xqs +  0);
+                int8x16_t xq_hi = vld1q_s8(xqs + 16);
+                int32x4_t a = vdupq_n_s32(0);
+#ifdef __ARM_FEATURE_DOTPROD
+                a = vdotq_s32(a, wq_lo, xq_lo);
+                a = vdotq_s32(a, wq_hi, xq_hi);
+#else
+                a = vpadalq_s16(a, vmull_s8(vget_low_s8(wq_lo),  vget_low_s8(xq_lo)));
+                a = vpadalq_s16(a, vmull_s8(vget_high_s8(wq_lo), vget_high_s8(xq_lo)));
+                a = vpadalq_s16(a, vmull_s8(vget_low_s8(wq_hi),  vget_low_s8(xq_hi)));
+                a = vpadalq_s16(a, vmull_s8(vget_high_s8(wq_hi), vget_high_s8(xq_hi)));
+#endif
+                float xd_n = t->X_d[(size_t)n * n_blocks + b];
+                sumv[n] = vfmaq_n_f32(sumv[n], vcvtq_f32_s32(a), wd * xd_n);
+            }
+        }
+        for (int n = 0; n < N; n++) {
+            t->out[(size_t)n * n_rows + i] = vaddvq_f32(sumv[n]);
+        }
+#else
+        float acc[256];
+        if (N > 256) continue;
+        memset(acc, 0, sizeof(float) * N);
+        for (int b = 0; b < n_blocks; b++) {
+            const uint8_t* blk = wrow + (size_t)b * 34;
+            uint16_t d_raw;
+            memcpy(&d_raw, blk, 2);
+            /* Minimal fp16→fp32 */
+            float wd;
+            {
+                uint32_t sign = (d_raw & 0x8000) << 16;
+                uint32_t expv = (d_raw >> 10) & 0x1F;
+                uint32_t mant = d_raw & 0x03FF;
+                uint32_t bits;
+                if (expv == 0) bits = sign;
+                else if (expv == 31) bits = sign | 0x7F800000 | (mant << 13);
+                else bits = sign | ((expv - 15 + 127) << 23) | (mant << 13);
+                memcpy(&wd, &bits, 4);
+            }
+            const int8_t* wqs = (const int8_t*)(blk + 2);
+            for (int n = 0; n < N; n++) {
+                const int8_t* xqs = t->X_q + (size_t)n * t->d + b * 32;
+                int32_t s = 0;
+                for (int j = 0; j < 32; j++) s += wqs[j] * xqs[j];
+                float xd_n = t->X_d[(size_t)n * n_blocks + b];
+                acc[n] += wd * xd_n * (float)s;
+            }
+        }
+        for (int n = 0; n < N; n++) {
+            t->out[(size_t)n * n_rows + i] = acc[n];
+        }
+#endif
+    }
+    return NULL;
+}
+
+void tq_batched_matmul_q8_0(float* out, const void* w_blocks,
+                              const float* x, int n_rows, int d, int N)
+{
+    if (N <= 0 || n_rows <= 0 || d <= 0) return;
+
+    /* Pre-quantize all N input rows to int8 with per-32 scales, same scheme
+     * as tq_batched_matmul_q4 (so batched prefill matches per-token decode). */
+    int n_blocks = d / 32;
+    int8_t* X_q = (int8_t*)malloc((size_t)N * d * sizeof(int8_t));
+    float*  X_d = (float*)malloc((size_t)N * n_blocks * sizeof(float));
+    if (!X_q || !X_d) { free(X_q); free(X_d); return; }
+    for (int n = 0; n < N; n++) {
+        tq_quantize_row_q8(x + (size_t)n * d,
+                           X_q + (size_t)n * d,
+                           X_d + (size_t)n * n_blocks, d);
+    }
+
+    int n_threads = g_n_threads;
+    if (n_threads > n_rows) n_threads = n_rows;
+    if (n_threads > TP_MAX)  n_threads = TP_MAX;
+    if (n_threads < 1)       n_threads = 1;
+
+    bm_q8_task_t tasks[TP_MAX];
+    void* ptrs[TP_MAX];
+    int rows_per = n_rows / n_threads;
+    for (int t = 0; t < n_threads; t++) {
+        tasks[t].out = out;
+        tasks[t].w_blocks = w_blocks;
+        tasks[t].X_q = X_q;
+        tasks[t].X_d = X_d;
+        tasks[t].n_rows = n_rows;
+        tasks[t].d = d;
+        tasks[t].N = N;
+        tasks[t].start_row = t * rows_per;
+        tasks[t].end_row = (t == n_threads - 1) ? n_rows : (t + 1) * rows_per;
+        ptrs[t] = &tasks[t];
+    }
+    if (n_threads == 1) bm_q8_worker(ptrs[0]);
+    else                tq_tp_run(bm_q8_worker, ptrs, n_threads);
+
+    free(X_q);
+    free(X_d);
+}
+
 void tq_batched_matmul_q4(float* out, const uint8_t* w_qs, const float* w_scales,
                            const float* x, int n_rows, int d, int N, float* scratch)
 {
