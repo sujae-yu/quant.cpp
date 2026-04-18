@@ -6,6 +6,41 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v0.14.3] — 2026-04-18 night (Q3_K_S tier on Qwen3.6)
+
+### Highlights
+
+Unsloth's `UD-Q3_K_S` (3.5 bpw, 14.3 GB) variant measured end-to-end after the Q3_K int8 kernel landed earlier in the day. Outcome: **smallest RSS, best quality, same speed class**. **Recommended Qwen3.6 variant on 16 GB Macs as of this release.**
+
+Measurements on M1 Pro 16 GB, CPU 8t, `TQ_NO_METAL=1 TQ_NO_MLOCK=1`, warm 3-run peak:
+
+| Variant | bpw | Disk | RSS | Decode | llama.cpp CPU | Speedup |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|
+| UD-IQ2_XXS | 2.05 | 10.0 GB | 6.54 GB | 16.1 t/s | 5.07 | 3.2× |
+| UD-IQ3_XXS | 3.06 | 12.3 GB | 6.82 GB | 14.6 t/s | 5.23 | 2.8× |
+| **UD-Q3_K_S** | **3.5** | **14.3 GB** | **5.24 GB** | **14.3 t/s** | 5.11 | **2.8×** |
+
+Quality step: "William Shakespeare wrote Hamlet" answers correctly on UD-Q3_K_S where UD-IQ3_XXS drifts. Decode prose reaches "Jack loved to play with his guitar" vs IQ2's "Jack lived in the small village of the mountains".
+
+**Why RSS is smaller despite higher bpw**: Under `TQ_NO_MLOCK=1` the OS page cache holds only hot expert pages. Q3_K_S uses uniform 256-element Q3_K blocks; UD-IQ3_XXS mixes IQ3_XXS + IQ3_S + IQ4_XS + Q4_K + Q6_K block sizes. Uniform layout → fewer distinct pages touched per matmul → smaller page-cache working set.
+
+### Added
+- **RoPE TLS sin/cos cache extended to all remaining branches**: Phi-3 LongRoPE (commit `e00ff21`, key includes factors* pointer) and Gemma 4 NeoX (commit `5a8c093`, key includes rope_base for sliding/global distinction). The earlier Qwen 3.x partial-rotary cache (`b4d7807`) and Llama / Qwen 2.5 `tq_rope()` cache (`27c6707`) remain. Only remaining uncached variant: learned `rope_freqs[]` (Gemma 4 global-attention freq_factors) — deferred.
+- **`bench/results/2026-04-18_q3_k_s_tier.md`** — full Q3_K_S vs IQ3_XXS vs IQ2_XXS methodology + reproduce.
+
+### Regression
+`scripts/test_models.sh`: **12/12 PASS** — RoPE cache extensions verified; Q3_K kernel verified end-to-end on Q3_K_S as well.
+
+### Recommended
+```bash
+# Qwen3.6-35B-A3B on 16 GB Mac (best quality + lowest RSS)
+TQ_NO_METAL=1 TQ_NO_MLOCK=1 ./build/quant \
+  models/Qwen3.6-35B-A3B-UD-Q3_K_S.gguf \
+  --chat -p "..." -n 80 -T 0.7 -j 8
+```
+
+---
+
 ## [v0.14.2] — 2026-04-18 evening (RoPE + SwiGLU NEON cleanups)
 
 ### Highlights
