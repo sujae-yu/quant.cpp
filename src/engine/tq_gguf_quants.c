@@ -2738,6 +2738,9 @@ static void fused_dot_iq3_xxs_int8_batched(
                      * Equivalent: acc[n] += d_super * db * isum * xd_n */
                     acc[n] += d_db * xd_n * (float)isum;
                 }
+                /* Advance qs by 8 per ib32 iteration (single-query does qs += 8).
+                 * Without this the kernel re-reads qs[0..7] for every sub-block. */
+                qs += 8;
             }
         }
 
