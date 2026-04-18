@@ -2,7 +2,7 @@
 
 **Last updated**: 2026-04-19
 **Score**: 12/12 regression PASS, 0 build warnings (core)
-**Session HEAD**: `f9e5af1` (Step 3f: cross-expert parallel in batched + Q3_K batched)
+**Session HEAD**: `3a34cbf` (Step 3h: batched shared expert)
 
 ## What Works
 
@@ -53,14 +53,14 @@
 
 ## What Needs Work (Priority Order)
 
-### ✅ Mission A Step 3 COMPLETE (3d + 3e + 3f)
+### ✅ Mission A Step 3 COMPLETE (3d + 3e + 3f + 3h)
 
 **Final measurement** (Qwen3.6-UD-Q3_K_S, 450-word prompt, warm, j=8):
-| | baseline | TQ_MOE_BATCH=1 | Δ |
-|---|---:|---:|---:|
-| Wall time | 103.2s | 85.3s | **-17%** |
-| Prefill rate | 4.4 t/s | **5.4 t/s** | **+23%** |
-| CPU work (user) | 307s | 178s | **-42%** |
+| | baseline | 3f (prior round) | **3h (current)** | Δ total |
+|---|---:|---:|---:|---:|
+| Wall time | 103.2s | 85.3s | **81.6s (agent median)** | **-21%** |
+| Prefill rate | 4.4 t/s | 5.4 t/s | **5.5-6.1 t/s** | **+25-39%** |
+| CPU work | 307s | 178s | 185s | -40% |
 
 Agent reported at j=8 with 951-tok prompt: baseline 10.3 → batched 11.3 t/s (+9%).
 Longer prompts benefit more (larger M_e per expert = better amortization).
@@ -81,16 +81,25 @@ Sanity: `TQ_MOE_BATCH_SELFTEST=1` max_abs_diff 1.2e-7. First-20-token
 match with per-token reference under `TQ_MOE_BATCH_SANITY=1`.
 
 ### P0 Remaining (small incremental gains)
-**Step 3g: dynamic work queue for expert stragglers**
+**Step 3g: dynamic work queue for expert stragglers** (still pending)
 Current wave-based `tq_tp_run` has long tails when one expert gets
 600+ tokens and others 30. First-come-first-served atomic dispatch
 would flatten. ~100-200 LOC in `tq_ops.c` `tq_tp_run` or a new
 `tq_tp_dynamic`. Expected +5-10% additional.
 
-**Step 3h: shared expert batched**
-Qwen3.6 shared expert runs per-token (40 layers × N tokens). Making
-it batched would cut another slice. But it's Q4 or Q6_K (already has
-`tq_batched_matmul_q4`), so integration is lighter than Step 3f.
+**Step 3h: ✅ DONE (3a34cbf)**
+Batched shared expert dispatch. Extra +8% vs Step 3f measured
+(81.6s vs 88.4s median). Approach: `tq_batched_matmul_q4` × 3
+(gate/up/down) with stack scratch, replacing per-token loop.
+Limitation: GGUF-native shared expert still per-token fallback
+(dormant for Q4-converted Qwen3.6 UD quants, so no impact there).
+
+**Step 3i: make TQ_MOE_BATCH=1 default-on**
+Sanity now clean under N=1 + 2e-4 under N=7. Greedy decoding
+sensitivity issue (1e-5 noise flips top-1) needs either:
+(a) higher-precision FMA chains in batched kernels, or
+(b) accepting non-deterministic top-1 under temperature sampling.
+Not urgent; env opt-in remains safe.
 
 `tq_moe_forward_batch` is implemented + validated (1.2e-7 diff). Calling it with N>1 requires a new `tq_forward_batch_moe_hybrid` driver because existing `tq_forward_batch` is Llama-shaped and bails on `is_moe || has_fused_qkv || delta_kv_enabled`.
 
