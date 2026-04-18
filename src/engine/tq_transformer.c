@@ -1419,15 +1419,32 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
                 for (int i = 0; i < n_heads * head_dim; i++) s->q[i] *= scale;
             }
         } else if (c->is_gemma4) {
-            /* Gemma 4 uses NeoX-style RoPE: pairs are (q[i], q[i+half]) */
+            /* Gemma 4 NeoX-style RoPE: pairs (q[i], q[i+half]). rope_base
+             * differs between sliding and global layers (rope_local_base_freq),
+             * so cache key includes it. */
             int half = head_dim / 2;
-            for (int h = 0; h < n_heads; h++) {
-                float* qh = s->q + h * head_dim;
+            static __thread float gemma_cos[512];
+            static __thread float gemma_sin[512];
+            static __thread int   gemma_pos = -1;
+            static __thread float gemma_base = 0.0f;
+            static __thread int   gemma_dim = 0;
+            if (half <= 512 &&
+                (gemma_pos != pos || gemma_base != rope_base || gemma_dim != head_dim)) {
                 for (int i = 0; i < half; i++) {
                     float freq = 1.0f / powf(rope_base, 2.0f * i / (float)head_dim);
                     float theta = pos * freq;
-                    float cos_t = cosf(theta);
-                    float sin_t = sinf(theta);
+                    gemma_cos[i] = cosf(theta);
+                    gemma_sin[i] = sinf(theta);
+                }
+                gemma_pos = pos;
+                gemma_base = rope_base;
+                gemma_dim = head_dim;
+            }
+            for (int h = 0; h < n_heads; h++) {
+                float* qh = s->q + h * head_dim;
+                for (int i = 0; i < half; i++) {
+                    float cos_t = gemma_cos[i];
+                    float sin_t = gemma_sin[i];
                     float q0 = qh[i], q1 = qh[i + half];
                     qh[i]        = q0 * cos_t - q1 * sin_t;
                     qh[i + half] = q0 * sin_t + q1 * cos_t;
@@ -1437,10 +1454,8 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
                 for (int h = 0; h < n_kv_heads; h++) {
                     float* kh = s->k + h * head_dim;
                     for (int i = 0; i < half; i++) {
-                        float freq = 1.0f / powf(rope_base, 2.0f * i / (float)head_dim);
-                        float theta = pos * freq;
-                        float cos_t = cosf(theta);
-                        float sin_t = sinf(theta);
+                        float cos_t = gemma_cos[i];
+                        float sin_t = gemma_sin[i];
                         float k0 = kh[i], k1 = kh[i + half];
                         kh[i]        = k0 * cos_t - k1 * sin_t;
                         kh[i + half] = k0 * sin_t + k1 * cos_t;
