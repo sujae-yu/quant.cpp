@@ -1421,7 +1421,10 @@ void tq_moe_forward_batch(const tq_moe_layer_t* layer,
         config->use_gelu ? geglu_fused : swiglu_fused;
 
     int debug = (getenv("TQ_DEBUG_MOE_BATCH") != NULL);
-    int sanity = (getenv("TQ_MOE_BATCH_SANITY") != NULL);
+    /* Internal sanity check: save ref from per-token path, compare against
+     * batched output. Gated by TQ_MOE_BATCH_KERNEL_SANITY to avoid
+     * colliding with the outer hybrid driver's TQ_MOE_BATCH_SANITY. */
+    int sanity = (getenv("TQ_MOE_BATCH_KERNEL_SANITY") != NULL);
 
     /* Phase 1: Route all N tokens — N × tq_moe_route.
      * Allocate per-token arrays for top_experts and expert_weights. */

@@ -3981,6 +3981,306 @@ int tq_forward_batch(tq_model_t* model, tq_state_t* s,
     return pos_start + N;
 }
 
+/* ============================================================
+ * Batched prefill — MoE + DeltaNet hybrid (Qwen3.6-A3B).
+ *
+ * The existing tq_forward_batch path bails on (is_moe || has_fused_qkv ||
+ * delta_kv_enabled) which excludes Qwen3.6. This hybrid driver handles
+ * the batch win where it actually matters: the MoE FFN. Attention and
+ * DeltaNet carry per-token recurrent state (KV cache, conv state, delta
+ * SSM state) that cannot be batched across the sequence axis, so those
+ * still run per-token inside this driver. The savings come from
+ * collecting all N tokens' FFN inputs, routing once, and dispatching a
+ * batched per-expert matmul that amortizes expert weight reads.
+ *
+ * Contract matches tq_forward_batch: returns pos_start + N on success,
+ * -1 on bail. KV cache and DeltaNet state are advanced for
+ * [pos_start..pos_start+N). Logits for the last position are in
+ * s->logits (so caller doesn't need to re-run tq_forward).
+ *
+ * Strategy (layers outer, tokens inner):
+ *   1. Load embeddings for all N tokens into Xres[N, dim].
+ *   2. For each layer l:
+ *      a. For each token n: memcpy Xres[n] -> s->x, run per-token
+ *         attention/DeltaNet (mirrors tq_forward lines 2666-2735),
+ *         read resulting s->x back into Xres[n].
+ *      b. If layer->moe is set: collect ffn_norm(Xres[n]) into H_in[N,
+ *         dim], call tq_moe_forward_batch once, add H_out rows back to
+ *         Xres.
+ *      c. Else dense FFN path: per-token fallback.
+ *   3. Final norm + lm_head for token N-1 -> s->logits.
+ * ============================================================ */
+int tq_forward_batch_moe_hybrid(tq_model_t* model, tq_state_t* s,
+                                 const int* tokens, int N, int pos_start) {
+    if (N <= 0) return pos_start;
+    /* SANITY CHECK MODE: just call tq_forward N times. Lets us verify
+     * that the orchestration (embedding load, final norm+lm_head) is
+     * correct without relying on the batched MoE kernel being bug-free.
+     * Set TQ_MOE_BATCH_SANITY=1 to enable.
+     *
+     * Note: This ALSO short-circuits the inner tq_moe_forward_batch's
+     * sanity mode (which uses the same env). Use TQ_MOE_BATCH_SANITY to
+     * validate this driver's orchestration; the inner-kernel sanity is
+     * exercised independently via TQ_MOE_BATCH_SELFTEST=1 in decode. */
+    if (getenv("TQ_MOE_BATCH_SANITY")) {
+        for (int n = 0; n < N; n++) {
+            tq_forward(model, s, tokens[n], pos_start + n);
+        }
+        return pos_start + N;
+    }
+
+    tq_model_config_t* c = &model->config;
+    int dbg = (getenv("TQ_DEBUG_PREFILL") != NULL);
+
+    /* Architectural gating: only hybrid MoE (DeltaNet + self-attn + MoE).
+     * Must have MoE (is_moe + moe layer objects), must NOT be Gemma 4
+     * dual-FFN (has its own code path with pre/post per-branch norms).
+     * Fused QKV (Phi-3) not supported here. */
+    if (!c->is_moe)              { if (dbg) fprintf(stderr, "[moe_batch] bail: !is_moe\n"); return -1; }
+    if (c->is_gemma4)            { if (dbg) fprintf(stderr, "[moe_batch] bail: gemma4\n"); return -1; }
+    if (c->has_fused_qkv)        { if (dbg) fprintf(stderr, "[moe_batch] bail: fused_qkv\n"); return -1; }
+    if (c->n_kv_shared_layers > 0){ if (dbg) fprintf(stderr, "[moe_batch] bail: kv_shared\n"); return -1; }
+    if (!model->moe_config || !s->moe_state) {
+        if (dbg) fprintf(stderr, "[moe_batch] bail: no moe_config/state\n");
+        return -1;
+    }
+    /* At least the first layer must be MoE (sanity — Qwen3.6 all-layer MoE). */
+    if (!model->layers[0].moe) {
+        if (dbg) fprintf(stderr, "[moe_batch] bail: layer0 not MoE\n");
+        return -1;
+    }
+
+    int dim = c->hidden_dim;
+
+    /* Qwen3.6 (qwen35moe): force CPU matmul for the entire batched pass
+     * (same policy as the per-token tq_forward). Metal dispatch for this
+     * arch's 256-expert IQ2 MoE is broken on Apple Silicon. */
+    int qwen35moe_force = (c->is_moe && c->delta_n_heads > 0);
+    int prev_force_cpu = 0;
+    if (qwen35moe_force) {
+        extern int tq_matmul_force_cpu;
+        prev_force_cpu = tq_matmul_force_cpu;
+        tq_matmul_force_cpu = 1;
+    }
+
+    /* Allocate per-token residual stream. Keep it simple: one FP32 buffer
+     * of N×dim. At Qwen3.6 Q3_K_S (N≈500, dim=2048): 4 MB, trivial. */
+    float* Xres = (float*)malloc((size_t)N * dim * sizeof(float));
+    float* Hin  = (float*)malloc((size_t)N * dim * sizeof(float));  /* MoE input */
+    float* Hout = (float*)malloc((size_t)N * dim * sizeof(float));  /* MoE output */
+    if (!Xres || !Hin || !Hout) {
+        free(Xres); free(Hin); free(Hout);
+        if (qwen35moe_force) {
+            extern int tq_matmul_force_cpu;
+            tq_matmul_force_cpu = prev_force_cpu;
+        }
+        return -1;
+    }
+
+    /* --- Step 1: per-token embedding lookup (mirrors tq_forward:2471-2502). */
+    for (int n = 0; n < N; n++) {
+        int tok = tokens[n];
+        float* dst = Xres + (size_t)n * dim;
+        if (model->embed_bf16) {
+            const uint16_t* bf16_row = model->embed_bf16 + (size_t)tok * dim;
+            for (int i = 0; i < dim; i++) {
+                uint32_t bits = ((uint32_t)bf16_row[i]) << 16;
+                memcpy(&dst[i], &bits, 4);
+            }
+        } else if (model->embed_gguf && !model->token_embedding) {
+            int block_elems = tq_ggml_type_blck(model->embed_gguf_type);
+            int block_bytes = (int)tq_ggml_type_size(model->embed_gguf_type);
+            int n_blocks = dim / block_elems;
+            size_t row_bytes = (size_t)n_blocks * block_bytes;
+            const uint8_t* row_ptr = (const uint8_t*)model->embed_gguf + (size_t)tok * row_bytes;
+            tq_dequant_row_gguf(model->embed_gguf_type, row_ptr, dst, dim);
+        } else if (model->token_embedding) {
+            memcpy(dst, model->token_embedding + (size_t)tok * dim,
+                   (size_t)dim * sizeof(float));
+        } else {
+            if (dbg) fprintf(stderr, "[moe_batch] bail: no embed source\n");
+            free(Xres); free(Hin); free(Hout);
+            if (qwen35moe_force) {
+                extern int tq_matmul_force_cpu;
+                tq_matmul_force_cpu = prev_force_cpu;
+            }
+            return -1;
+        }
+    }
+
+    int is_gemma3 = (c->model_type == 1);
+
+    /* --- Step 2: per-layer loop. */
+    for (int l = 0; l < c->n_layers; l++) {
+        tq_layer_weights_t* layer = &model->layers[l];
+
+        /* Phase A: per-token attention / DeltaNet (mirrors tq_forward:2666-2734).
+         * The per-layer attn path reads s->x (residual in), calls either
+         * deltanet_forward (which internally adds residual) or
+         * self_attn_forward (which also internally adds residual), and
+         * writes the updated residual back into s->x. */
+        for (int n = 0; n < N; n++) {
+            int pos = pos_start + n;
+            memcpy(s->x, Xres + (size_t)n * dim, (size_t)dim * sizeof(float));
+
+            /* Pre-attention RMSNorm: tq_rmsnorm(s->xb, s->x, attn_norm) */
+            tq_rmsnorm(s->xb, s->x, layer->attn_norm, dim, c->rms_norm_eps);
+
+            /* Dispatch attention */
+            if (layer->delta_a_log) {
+                deltanet_forward(model, s, l);
+            } else if ((layer->wq || layer->wq_q8 || layer->wq_q4 || layer->gguf_wq || layer->wq_q2) &&
+                       (layer->wk || layer->wk_q8 || layer->wk_q4 || layer->gguf_wk || layer->wk_q2) &&
+                       (layer->wv || layer->wv_q8 || layer->wv_q4 || layer->gguf_wv || layer->wv_q2)) {
+                self_attn_forward(model, s, l, pos);
+
+                /* Gemma3 post_attention_layernorm (unlikely for Qwen3.6 but mirror
+                 * tq_forward for safety). */
+                if (is_gemma3 && layer->post_attn_norm) {
+                    for (int i = 0; i < dim; i++) s->x[i] -= s->xb2[i];
+                    tq_rmsnorm(s->xb2, s->xb2, layer->post_attn_norm, dim, c->rms_norm_eps);
+                    tq_add(s->x, s->x, s->xb2, dim);
+                }
+            }
+            /* else: no attention weights for this layer (shouldn't happen) */
+
+            memcpy(Xres + (size_t)n * dim, s->x, (size_t)dim * sizeof(float));
+        }
+
+        /* Phase B: FFN. Batched MoE if layer has MoE, else per-token dense. */
+        if (layer->moe && s->moe_state && model->moe_config) {
+            /* Pre-compute the MoE input: ffn_norm applied to post-attn residual.
+             * For Qwen3.6 the norm weight is layer->ffn_norm; Gemma3 MoE uses
+             * layer->pre_ffn_norm. */
+            float* moe_norm_w = layer->ffn_norm;
+            if (is_gemma3 && layer->pre_ffn_norm) moe_norm_w = layer->pre_ffn_norm;
+
+            for (int n = 0; n < N; n++) {
+                tq_rmsnorm(Hin + (size_t)n * dim,
+                           Xres + (size_t)n * dim,
+                           moe_norm_w, dim, c->rms_norm_eps);
+            }
+
+            /* Batched MoE forward. TQ_MOE_BATCH_PER_TOKEN_MOE=1 bypasses
+             * the batched MoE kernel and runs per-token MoE instead
+             * (useful for A/B correctness testing: same orchestration,
+             * only the MoE kernel changes). */
+            if (getenv("TQ_MOE_BATCH_PER_TOKEN_MOE")) {
+                tq_moe_state_t* moe_st = (tq_moe_state_t*)s->moe_state;
+                for (int n = 0; n < N; n++) {
+                    moe_st->routing_precomputed = 0;
+                    tq_moe_forward((const tq_moe_layer_t*)layer->moe,
+                                   (const tq_moe_config_t*)model->moe_config,
+                                   moe_st,
+                                   Hin + (size_t)n * dim,
+                                   Hout + (size_t)n * dim,
+                                   dim, l);
+                }
+            } else {
+                tq_moe_forward_batch((const tq_moe_layer_t*)layer->moe,
+                                     (const tq_moe_config_t*)model->moe_config,
+                                     (tq_moe_state_t*)s->moe_state,
+                                     Hin, Hout, N, dim, l);
+            }
+
+            /* Optional Gemma3 post-FFN norm on MoE output. */
+            if (is_gemma3) {
+                float* moe_post_norm = layer->post_ffn_norm_1 ? layer->post_ffn_norm_1 : layer->post_ffn_norm;
+                if (moe_post_norm) {
+                    for (int n = 0; n < N; n++) {
+                        tq_rmsnorm(Hout + (size_t)n * dim,
+                                   Hout + (size_t)n * dim,
+                                   moe_post_norm, dim, c->rms_norm_eps);
+                    }
+                }
+            }
+
+            /* Residual add: Xres[n] += Hout[n] */
+            for (int n = 0; n < N; n++) {
+                tq_add(Xres + (size_t)n * dim,
+                       Xres + (size_t)n * dim,
+                       Hout + (size_t)n * dim, dim);
+            }
+        } else {
+            /* Per-token dense FFN fallback. Load each token into s->x and
+             * run the per-token FFN by calling tq_forward's FFN block —
+             * simplest way is to just call tq_forward for tokens with
+             * state saved/restored. But that would redo attention.
+             * Instead, inline the dense FFN path here (mirrors
+             * tq_forward:2890-3006 for SwiGLU/Q4-Q2 path). For Qwen3.6
+             * every layer is MoE so this branch is dead; kept for safety. */
+            for (int n = 0; n < N; n++) {
+                memcpy(s->x, Xres + (size_t)n * dim, (size_t)dim * sizeof(float));
+                /* Dense FFN: norm -> gate+up -> silu*up -> down -> residual add */
+                if (layer->w_gate || layer->w_gate_q8 || layer->w_gate_q4) {
+                    int inter = c->per_layer_inter_dim ? c->per_layer_inter_dim[l] : c->intermediate_dim;
+                    tq_rmsnorm(s->xb, s->x, layer->ffn_norm, dim, c->rms_norm_eps);
+                    if (layer->w_gate_q4) {
+                        tq_quantize_row_q8(s->xb, s->xb_q8, s->xb_q8s, dim);
+                        tq_matmul_q4_preq(s->hb,  layer->w_gate_q4, layer->w_gate_q4s,
+                                           s->xb_q8, s->xb_q8s, inter, dim);
+                        tq_matmul_q4_preq(s->hb2, layer->w_up_q4, layer->w_up_q4s,
+                                           s->xb_q8, s->xb_q8s, inter, dim);
+                    } else if (layer->w_gate_q8) {
+                        tq_matmul_q8(s->hb,  s->xb, layer->w_gate_q8, layer->w_gate_q8s, inter, dim);
+                        tq_matmul_q8(s->hb2, s->xb, layer->w_up_q8,   layer->w_up_q8s,   inter, dim);
+                    } else {
+                        tq_matmul(s->hb,  s->xb, layer->w_gate, inter, dim);
+                        tq_matmul(s->hb2, s->xb, layer->w_up,   inter, dim);
+                    }
+                    tq_silu(s->hb, inter);
+                    tq_mul(s->hb, s->hb, s->hb2, inter);
+                    if (layer->w_down_q4) {
+                        tq_matmul_q4(s->xb2, s->hb, layer->w_down_q4, layer->w_down_q4s, dim, inter);
+                    } else if (layer->w_down_q8) {
+                        tq_matmul_q8(s->xb2, s->hb, layer->w_down_q8, layer->w_down_q8s, dim, inter);
+                    } else {
+                        tq_matmul(s->xb2, s->hb, layer->w_down, dim, inter);
+                    }
+                    tq_add(s->x, s->x, s->xb2, dim);
+                }
+                memcpy(Xres + (size_t)n * dim, s->x, (size_t)dim * sizeof(float));
+            }
+        }
+    }
+
+    /* --- Step 3: Final RMSNorm + lm_head for the LAST token.
+     * Prefill only needs the next-token logits (last position). */
+    {
+        int last = N - 1;
+        memcpy(s->x, Xres + (size_t)last * dim, (size_t)dim * sizeof(float));
+        tq_rmsnorm(s->x, s->x, model->output_norm, dim, c->rms_norm_eps);
+        if (model->output_gguf) {
+            tq_matmul_gguf(s->logits, s->x, model->output_gguf,
+                            model->output_gguf_type, c->vocab_size, dim);
+        } else if (model->output_qs) {
+            tq_matmul_q4(s->logits, s->x, model->output_qs, model->output_scales,
+                          c->vocab_size, dim);
+        } else if (model->output_weight_bf16) {
+            tq_matmul_bf16(s->logits, s->x, model->output_weight_bf16, c->vocab_size, dim);
+        } else {
+            tq_matmul(s->logits, s->x, model->output_weight, c->vocab_size, dim);
+        }
+        if (c->final_logit_softcap > 0.0f && !getenv("TQ_NO_SOFTCAP")) {
+            float cap = c->final_logit_softcap;
+            float inv_cap = 1.0f / cap;
+            for (int i = 0; i < c->vocab_size; i++) {
+                s->logits[i] = cap * tanhf(s->logits[i] * inv_cap);
+            }
+        }
+    }
+
+    free(Xres); free(Hin); free(Hout);
+
+    /* Restore matmul dispatch policy. */
+    if (qwen35moe_force) {
+        extern int tq_matmul_force_cpu;
+        tq_matmul_force_cpu = prev_force_cpu;
+    }
+
+    return pos_start + N;
+}
+
 /* Speculative-decoding wrapper: set s->batch_argmax_out, call tq_forward_batch,
  * then clear the field. See tq_engine.h for the API contract. */
 int tq_forward_batch_spec(tq_model_t* model, tq_state_t* s,

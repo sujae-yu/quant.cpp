@@ -563,6 +563,26 @@ int tq_forward_batch_spec(tq_model_t* model, tq_state_t* state,
                           const int* tokens, int N, int pos_start,
                           int* argmax_out);
 
+/* Batched prefill variant for MoE + DeltaNet hybrid models (Qwen3.6-A3B).
+ *
+ * The existing tq_forward_batch bails on (is_moe || has_fused_qkv ||
+ * delta_kv_enabled) which excludes Qwen3.6. This driver runs per-token
+ * attention/DeltaNet (those have per-token recurrent state that cannot be
+ * batched across the sequence axis) but collects all N tokens' FFN inputs
+ * and dispatches a single batched MoE call per layer. The batched MoE
+ * amortizes expert weight reads — which dominate Qwen3.6 prefill cost —
+ * across N tokens with a shared routing pass.
+ *
+ * On success returns pos_start + N (KV cache + DeltaNet state populated
+ * for [pos_start..pos_start+N), logits for the last token ready in
+ * state->logits). Returns -1 for unsupported architectures so the caller
+ * falls back to a per-token loop of tq_forward.
+ *
+ * Opt-in via TQ_MOE_BATCH=1. TQ_MOE_BATCH_SANITY=1 forces a per-token
+ * tq_forward loop for A/B comparison. */
+int tq_forward_batch_moe_hybrid(tq_model_t* model, tq_state_t* state,
+                                 const int* tokens, int N, int pos_start);
+
 /* Generation */
 int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
                 const char* prompt, tq_gen_config_t* config,
