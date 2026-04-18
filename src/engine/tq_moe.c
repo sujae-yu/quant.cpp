@@ -1824,49 +1824,117 @@ void tq_moe_forward_batch(const tq_moe_layer_t* layer,
     free(active_eids);
     free(scratch_all);
 
-    /* Shared expert: always-active, per-token. Runs on each token. */
+    /* Shared expert: always-active. Mission A Step 3h — batched dispatch.
+     *
+     * Q4-converted path (Qwen3.6 typical): one tq_batched_matmul_q4 call
+     * each for gate/up/down across all N tokens. Amortizes expert weight
+     * reads (76 MB per layer for shared expert alone) and uses the matmul
+     * thread pool directly (outer context, tq_tls_force_serial_matmul=0).
+     *
+     * GGUF-native path (non-Q4): per-token fallback kept — TODO add
+     * batched tq_matmul_gguf later.
+     *
+     * Shared gate (sigmoid scalar per token) computed per-token; cheap
+     * compared to the matmul.
+     */
     if (config->has_shared_expert) {
-        for (int n = 0; n < N; n++) {
-            /* Use the per-token tq_moe_forward shared-expert path by calling
-             * a tiny helper: we just run the shared-expert part. Simplest:
-             * compute shared expert inline. */
-            int shared_dim = config->shared_expert_intermediate_dim;
-            if (shared_dim == 0) shared_dim = expert_dim;
+        int shared_dim = config->shared_expert_intermediate_dim;
+        if (shared_dim == 0) shared_dim = expert_dim;
 
-            const float* h_n = hidden + (size_t)n * hidden_dim;
-            float shared_gate_val = 1.0f;
-            if (layer->shared_gate) {
-                float dot = 0.0f;
-                for (int j = 0; j < hidden_dim; j++)
-                    dot += h_n[j] * layer->shared_gate[j];
-                shared_gate_val = 1.0f / (1.0f + fast_expf_moe(-dot));
+        int did_batched = 0;
+        if (layer->shared_expert.q4_converted) {
+            /* Batched Q4 path: three batched matmuls across all N tokens. */
+            float* gate_batch = (float*)malloc((size_t)N * shared_dim * sizeof(float));
+            float* up_batch   = (float*)malloc((size_t)N * shared_dim * sizeof(float));
+            float* down_batch = (float*)malloc((size_t)N * hidden_dim * sizeof(float));
+            if (gate_batch && up_batch && down_batch) {
+                /* gate_batch[N, shared_dim] = hidden[N, hidden_dim] @ W_gate^T */
+                tq_batched_matmul_q4(gate_batch,
+                                     layer->shared_expert.gate_q4_qs,
+                                     layer->shared_expert.gate_q4_scales,
+                                     hidden, shared_dim, hidden_dim, N, NULL);
+                /* up_batch[N, shared_dim] = hidden[N, hidden_dim] @ W_up^T */
+                tq_batched_matmul_q4(up_batch,
+                                     layer->shared_expert.up_q4_qs,
+                                     layer->shared_expert.up_q4_scales,
+                                     hidden, shared_dim, hidden_dim, N, NULL);
+
+                /* Per-token activation (SwiGLU/GeGLU) on gate/up rows. */
+                for (int n = 0; n < N; n++) {
+                    activation_fn(gate_batch + (size_t)n * shared_dim,
+                                  up_batch   + (size_t)n * shared_dim,
+                                  shared_dim);
+                }
+
+                /* down_batch[N, hidden_dim] = gate_batch[N, shared_dim] @ W_down^T */
+                tq_batched_matmul_q4(down_batch,
+                                     layer->shared_expert.down_q4_qs,
+                                     layer->shared_expert.down_q4_scales,
+                                     gate_batch, hidden_dim, shared_dim, N, NULL);
+
+                /* Scatter with optional sigmoid gate (per-token scalar). */
+                for (int n = 0; n < N; n++) {
+                    const float* h_n = hidden + (size_t)n * hidden_dim;
+                    float shared_gate_val = 1.0f;
+                    if (layer->shared_gate) {
+                        float dot = 0.0f;
+                        for (int j = 0; j < hidden_dim; j++)
+                            dot += h_n[j] * layer->shared_gate[j];
+                        shared_gate_val = 1.0f / (1.0f + fast_expf_moe(-dot));
+                    }
+                    float* out_row = output + (size_t)n * hidden_dim;
+                    const float* down_row = down_batch + (size_t)n * hidden_dim;
+                    for (int i = 0; i < hidden_dim; i++)
+                        out_row[i] += shared_gate_val * down_row[i];
+                }
+                did_batched = 1;
             }
-            if (layer->shared_expert.q4_converted) {
-                tq_matmul_q4(state->expert_hb, h_n,
-                             layer->shared_expert.gate_q4_qs, layer->shared_expert.gate_q4_scales,
-                             shared_dim, hidden_dim);
-                tq_matmul_q4(state->expert_hb2, h_n,
-                             layer->shared_expert.up_q4_qs, layer->shared_expert.up_q4_scales,
-                             shared_dim, hidden_dim);
-                activation_fn(state->expert_hb, state->expert_hb2, shared_dim);
-                tq_matmul_q4(state->expert_out, state->expert_hb,
-                             layer->shared_expert.down_q4_qs, layer->shared_expert.down_q4_scales,
-                             hidden_dim, shared_dim);
-            } else {
-                tq_matmul_gguf(state->expert_hb, h_n,
-                               layer->shared_expert.w_gate, layer->shared_expert.gate_type,
-                               shared_dim, hidden_dim);
-                tq_matmul_gguf(state->expert_hb2, h_n,
-                               layer->shared_expert.w_up, layer->shared_expert.up_type,
-                               shared_dim, hidden_dim);
-                activation_fn(state->expert_hb, state->expert_hb2, shared_dim);
-                tq_matmul_gguf(state->expert_out, state->expert_hb,
-                               layer->shared_expert.w_down, layer->shared_expert.down_type,
-                               hidden_dim, shared_dim);
+            free(gate_batch);
+            free(up_batch);
+            free(down_batch);
+        }
+
+        if (!did_batched) {
+            /* Fallback: per-token.
+             *   - GGUF-native shared expert (!q4_converted): TODO batched
+             *     tq_matmul_gguf for N tokens in a future round.
+             *   - Allocation failure on Q4 path: same per-token recovery. */
+            for (int n = 0; n < N; n++) {
+                const float* h_n = hidden + (size_t)n * hidden_dim;
+                float shared_gate_val = 1.0f;
+                if (layer->shared_gate) {
+                    float dot = 0.0f;
+                    for (int j = 0; j < hidden_dim; j++)
+                        dot += h_n[j] * layer->shared_gate[j];
+                    shared_gate_val = 1.0f / (1.0f + fast_expf_moe(-dot));
+                }
+                if (layer->shared_expert.q4_converted) {
+                    tq_matmul_q4(state->expert_hb, h_n,
+                                 layer->shared_expert.gate_q4_qs, layer->shared_expert.gate_q4_scales,
+                                 shared_dim, hidden_dim);
+                    tq_matmul_q4(state->expert_hb2, h_n,
+                                 layer->shared_expert.up_q4_qs, layer->shared_expert.up_q4_scales,
+                                 shared_dim, hidden_dim);
+                    activation_fn(state->expert_hb, state->expert_hb2, shared_dim);
+                    tq_matmul_q4(state->expert_out, state->expert_hb,
+                                 layer->shared_expert.down_q4_qs, layer->shared_expert.down_q4_scales,
+                                 hidden_dim, shared_dim);
+                } else {
+                    tq_matmul_gguf(state->expert_hb, h_n,
+                                   layer->shared_expert.w_gate, layer->shared_expert.gate_type,
+                                   shared_dim, hidden_dim);
+                    tq_matmul_gguf(state->expert_hb2, h_n,
+                                   layer->shared_expert.w_up, layer->shared_expert.up_type,
+                                   shared_dim, hidden_dim);
+                    activation_fn(state->expert_hb, state->expert_hb2, shared_dim);
+                    tq_matmul_gguf(state->expert_out, state->expert_hb,
+                                   layer->shared_expert.w_down, layer->shared_expert.down_type,
+                                   hidden_dim, shared_dim);
+                }
+                float* out_row = output + (size_t)n * hidden_dim;
+                for (int i = 0; i < hidden_dim; i++)
+                    out_row[i] += shared_gate_val * state->expert_out[i];
             }
-            float* out_row = output + (size_t)n * hidden_dim;
-            for (int i = 0; i < hidden_dim; i++)
-                out_row[i] += shared_gate_val * state->expert_out[i];
         }
     }
 
