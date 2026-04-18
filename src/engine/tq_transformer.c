@@ -1363,20 +1363,42 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
             rope_base = c->rope_local_base_freq;
         }
         if (c->rope_factors_short || c->rope_factors_long) {
-            /* Phi-3 LongRoPE with NeoX-style rotation (non-interleaved pairs) */
+            /* Phi-3 LongRoPE with NeoX-style rotation (non-interleaved pairs).
+             * TLS sin/cos cache keyed on (pos, base, head_dim, factors*). The
+             * factor pointer switches between rope_factors_short and long when
+             * pos crosses rope_orig_ctx_len — key includes factors* so either
+             * branch gets cache hits across layers. */
             const float* factors =
                 (pos >= c->rope_orig_ctx_len && c->rope_factors_long)
                     ? c->rope_factors_long
                     : (c->rope_factors_short ? c->rope_factors_short : c->rope_factors_long);
             int half = head_dim / 2;
-            for (int h = 0; h < n_heads; h++) {
-                float* qh = s->q + h * head_dim;
+            static __thread float longrope_cos[512];
+            static __thread float longrope_sin[512];
+            static __thread int   longrope_pos = -1;
+            static __thread float longrope_base = 0.0f;
+            static __thread int   longrope_dim = 0;
+            static __thread const float* longrope_factors = NULL;
+            if (half <= 512 &&
+                (longrope_pos != pos || longrope_base != rope_base ||
+                 longrope_dim != head_dim || longrope_factors != factors)) {
                 for (int i = 0; i < half; i++) {
                     float base_freq = 1.0f / powf(rope_base, 2.0f * i / (float)head_dim);
                     float freq = base_freq / factors[i];
                     float theta = pos * freq;
-                    float cos_t = cosf(theta);
-                    float sin_t = sinf(theta);
+                    longrope_cos[i] = cosf(theta);
+                    longrope_sin[i] = sinf(theta);
+                }
+                longrope_pos = pos;
+                longrope_base = rope_base;
+                longrope_dim = head_dim;
+                longrope_factors = factors;
+            }
+            for (int h = 0; h < n_heads; h++) {
+                float* qh = s->q + h * head_dim;
+                for (int i = 0; i < half; i++) {
+                    float cos_t = longrope_cos[i];
+                    float sin_t = longrope_sin[i];
                     float q0 = qh[i], q1 = qh[i + half];
                     qh[i]        = q0 * cos_t - q1 * sin_t;
                     qh[i + half] = q0 * sin_t + q1 * cos_t;
@@ -1385,11 +1407,8 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
             for (int h = 0; h < n_kv_heads; h++) {
                 float* kh = s->k + h * head_dim;
                 for (int i = 0; i < half; i++) {
-                    float base_freq = 1.0f / powf(rope_base, 2.0f * i / (float)head_dim);
-                    float freq = base_freq / factors[i];
-                    float theta = pos * freq;
-                    float cos_t = cosf(theta);
-                    float sin_t = sinf(theta);
+                    float cos_t = longrope_cos[i];
+                    float sin_t = longrope_sin[i];
                     float k0 = kh[i], k1 = kh[i + half];
                     kh[i]        = k0 * cos_t - k1 * sin_t;
                     kh[i + half] = k0 * sin_t + k1 * cos_t;
