@@ -6,6 +6,39 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v0.14.1] — 2026-04-18 (Q3 breakthrough)
+
+### Highlights
+
+**Q3 weight-class unlocked on 16 GB Mac.** Three more scalar `fused_dot_*` kernels replaced with `vdotq_s32` int8 fast paths. Primary target: raise Qwen3.6-35B-A3B quantization from IQ2_XXS (2.05 bpw) to UD-IQ3_XXS (3.06 bpw) for a measurable quality step-up, without losing the speed lead over llama.cpp.
+
+Measured on Qwen3.6-35B-A3B-UD-IQ3_XXS (M1 Pro 16 GB, CPU 8 threads, `TQ_NO_MLOCK=1`, warm peak):
+
+| iteration | t/s | vs llama.cpp CPU |
+|---|:-:|:-:|
+| scalar baseline (new kernels disabled) | 7.9 | 1.5× |
+| + Q3_K int8 | 12.2 | 2.3× |
+| + IQ3_XXS int8 (post qs-advance fix) | 12.8 | 2.4× |
+| + IQ4_XS int8 (TBL lookup) | **14.6** | **2.8×** |
+| llama.cpp CPU 8t reference | 5.23 | — |
+
+RSS: **6.82 GB** on 16 GB Mac (vs 6.54 GB for IQ2_XXS — only +0.28 GB for the quality step-up). Coherent decode persists **~2× longer** before drift compared with IQ2_XXS.
+
+### Added
+- **Q3_K × int8 NEON fast path** (`fused_dot_q3_k_int8`). Scalar fused_dot_q3_k was latent since initial Q3_K support. 16 × `vdotq_s32` per 256-element block. `vbicq_u8` resolves the `(hmask_bit ? 0 : 4)` branch without conditional. Env `TQ_Q3K_NOINT=1` reverts. Covers Q3_K_S / Q3_K_M / Q3_K_L / Q3_K_XL.
+- **IQ3_XXS × int8 NEON fast path** (`fused_dot_iq3_xxs_int8`). Previous kernel was partial NEON (float FMA end). Reuses `iq3s_build8` helper from IQ3_S int8 path. Env `TQ_IQ3XXS_NOINT=1` reverts.
+- **IQ4_XS × int8 NEON fast path** (`fused_dot_iq4_xs_int8`). `kvalues_iq4nl[16]` codebook fits in one ARM NEON TBL register — single `vqtbl1q_s8` does 16 parallel byte lookups per sub-block, cleanest possible NEON kernel shape. Env `TQ_IQ4XS_NOINT=1` reverts.
+- **`scripts/qwen36_quality_probe.sh`** — factual Q&A (10 prompts, greedy T=0) + 100-token coherence probe + 3 multi-turn probes. Used for Q3 vs IQ2 A/B quality comparison.
+- **`bench/results/2026-04-18_q3_breakthrough.md`** — full methodology, bug-caught-during-A/B writeup, reproduce commands.
+
+### Fixed
+- **`fused_dot_iq3_xxs_int8` missing `qs += 8;` between sub-blocks** (caught during A/B before commit). Without the advance, all 8 sub-blocks read the first sub-block's grid indices → 0/10 factual and digit-soup decode. A/B toggle (`TQ_IQ3XXS_NOINT=1` vs new kernel) isolated the bug in minutes. Precedent documented in commit `11e3c32`.
+
+### Regression
+`scripts/test_models.sh`: **12/12 PASS** across the full model suite (no Q3-family model is in the regression suite, so these kernels were validated via Qwen3.6 greedy-decode + A/B against scalar).
+
+---
+
 ## [v0.14.0] — 2026-04-18
 
 ### Highlights
