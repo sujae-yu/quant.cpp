@@ -2,7 +2,7 @@
 
 **Last updated**: 2026-04-19
 **Score**: 12/12 regression PASS, 0 build warnings (core)
-**Session HEAD**: `f255b46` (Step 3e: prefill driver landed, measured neutral at j=8)
+**Session HEAD**: `f9e5af1` (Step 3f: cross-expert parallel in batched + Q3_K batched)
 
 ## What Works
 
@@ -53,31 +53,44 @@
 
 ## What Needs Work (Priority Order)
 
-### P0 🔥 Mission A Step 3f: Batched MoE + cross-expert parallel
-**Step 3e landed but measured neutral at j=8.** Root cause: existing
-per-token path already runs 8 experts in parallel (`expert_parallel_worker`
-at tq_moe.c:1031), saturating 8 threads. New batched path has serial
-expert-wise outer loop (only inner matmul parallelizes), so j=8 doesn't
-benefit.
+### ✅ Mission A Step 3 COMPLETE (3d + 3e + 3f)
 
-Measured (Qwen3.6-UD-Q3_K_S, 450-word prompt, warm, 2026-04-19):
-| threads | baseline | TQ_MOE_BATCH=1 | Δ |
-|---:|---:|---:|---:|
-| 6 | 6.8 t/s | 9.5 t/s | **+40%** |
-| 8 | 4.8 t/s | 4.6 t/s | -4% |
+**Final measurement** (Qwen3.6-UD-Q3_K_S, 450-word prompt, warm, j=8):
+| | baseline | TQ_MOE_BATCH=1 | Δ |
+|---|---:|---:|---:|
+| Wall time | 103.2s | 85.3s | **-17%** |
+| Prefill rate | 4.4 t/s | **5.4 t/s** | **+23%** |
+| CPU work (user) | 307s | 178s | **-42%** |
 
-Batched wins when baseline can't saturate threads (j≤6). Step 3f target:
-batched + cross-expert parallel combo — each of 8 workers runs one
-expert's batched matmul. Hybrid inherits both amortizations.
+Agent reported at j=8 with 951-tok prompt: baseline 10.3 → batched 11.3 t/s (+9%).
+Longer prompts benefit more (larger M_e per expert = better amortization).
 
-Estimated: **300-400 LOC** (refactor tq_moe_forward_batch Phase 3 into
-expert-parallel task layout).
+Decode: unchanged (13+ t/s, batched path only affects prefill).
 
-Secondary Step 3f tasks:
-- Q3_K batched matmul kernel (currently Q3_K_S routed experts fall to
-  per-row fallback in batched path — removes most weight-amortization)
-- FP-precise batched kernel variant (current 1e-5 noise flips greedy
-  top-1 after 40 layers; TQ_MOE_BATCH=1 currently default OFF)
+**Step 3f completed** via `/grow` Round 3:
+- Cross-expert parallel dispatch in `tq_moe_forward_batch` Phase 3
+  (`e5f721a`) — 8 workers, one expert each, private scatter buffer
+  reduced serially at end. Respects `tq_tls_force_serial_matmul`.
+- Q3_K batched kernel + MoE dispatch (`f9e5af1`) — mirrors IQ3_XXS
+  pattern. Dormant on UD-Q3_K_S (mixed-tier uses IQ3_XXS/IQ3_S) but
+  active for pure Q3_K MoE models.
+- Patches to `tq_batched_matmul_q8_0` and `tq_batched_matmul_q4` for
+  nested-pool safety.
+
+Sanity: `TQ_MOE_BATCH_SELFTEST=1` max_abs_diff 1.2e-7. First-20-token
+match with per-token reference under `TQ_MOE_BATCH_SANITY=1`.
+
+### P0 Remaining (small incremental gains)
+**Step 3g: dynamic work queue for expert stragglers**
+Current wave-based `tq_tp_run` has long tails when one expert gets
+600+ tokens and others 30. First-come-first-served atomic dispatch
+would flatten. ~100-200 LOC in `tq_ops.c` `tq_tp_run` or a new
+`tq_tp_dynamic`. Expected +5-10% additional.
+
+**Step 3h: shared expert batched**
+Qwen3.6 shared expert runs per-token (40 layers × N tokens). Making
+it batched would cut another slice. But it's Q4 or Q6_K (already has
+`tq_batched_matmul_q4`), so integration is lighter than Step 3f.
 
 `tq_moe_forward_batch` is implemented + validated (1.2e-7 diff). Calling it with N>1 requires a new `tq_forward_batch_moe_hybrid` driver because existing `tq_forward_batch` is Llama-shaped and bails on `is_moe || has_fused_qkv || delta_kv_enabled`.
 
