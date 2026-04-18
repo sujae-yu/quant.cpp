@@ -1269,6 +1269,452 @@ moe_shared_expert:
 }
 
 /* ============================================================
+ * Mission A Step 3d: Batched MoE forward for prefill.
+ *
+ * The idea: for N prompt tokens, route each token independently (small
+ * cost), then group tokens by expert. For each active expert e with M_e
+ * tokens routed to it, do ONE batched gate/up/down matmul across its
+ * M_e token subset instead of M_e separate per-token matmuls. The win
+ * comes from amortizing expert weight reads (which dominate memory
+ * bandwidth for IQ3/IQ4 experts on M1 Pro).
+ *
+ * Phase 1: Route — tq_moe_route × N
+ * Phase 2: Inverse index — tokens_of[e] = [list of (token_idx, slot_k, weight)]
+ * Phase 3: Per active expert: gather X subset → batched matmul → SwiGLU
+ *          → down batched matmul → scatter weighted accumulate
+ *
+ * If TQ_MOE_BATCH=1 is not set in the environment, falls back to N ×
+ * tq_moe_forward. This is an opt-in optimization.
+ *
+ * Sanity mode: TQ_MOE_BATCH_SANITY=1 runs BOTH paths and checks
+ * max-abs-diff < 1e-3 per layer.
+ * ============================================================ */
+
+/* External public batched matmul wrappers (tq_gguf_quants.c) */
+extern int tq_batched_matmul_iq3_xxs(float* out, const void* weight,
+                                      const float* x, int out_dim, int in_dim, int N);
+extern int tq_batched_matmul_iq3_s(float* out, const void* weight,
+                                    const float* x, int out_dim, int in_dim, int N);
+extern int tq_batched_matmul_iq4_xs(float* out, const void* weight,
+                                     const float* x, int out_dim, int in_dim, int N);
+extern void tq_batched_matmul_q8_0(float* out, const void* w_blocks,
+                                    const float* x, int n_rows, int d, int N);
+
+/* Dispatch ONE batched matmul for the [M_e, out_dim] = X[M_e, in_dim] @ W.
+ * Returns 0 on success, -1 if no batched kernel available (caller falls
+ * back to M_e × tq_matmul_gguf). */
+static int moe_batched_dispatch(
+    float* out, const tq_expert_weights_t* exp,
+    int which, /* 0=gate, 1=up, 2=down */
+    const float* x, int out_dim, int in_dim, int M_e)
+{
+    const void* w = NULL;
+    int wt = 0;
+    if (which == 0) { w = exp->w_gate;  wt = (int)exp->gate_type; }
+    else if (which == 1) { w = exp->w_up;    wt = (int)exp->up_type; }
+    else { w = exp->w_down;  wt = (int)exp->down_type; }
+
+    if (exp->q4_converted && which != 2) {
+        /* Q4 converted gate/up */
+        const uint8_t* qs = (which == 0) ? exp->gate_q4_qs : exp->up_q4_qs;
+        const float*   sc = (which == 0) ? exp->gate_q4_scales : exp->up_q4_scales;
+        if (qs && sc) {
+            tq_batched_matmul_q4(out, qs, sc, x, out_dim, in_dim, M_e, NULL);
+            return 0;
+        }
+    }
+    if (exp->q4_converted && which == 2) {
+        if (exp->down_q4_qs && exp->down_q4_scales) {
+            tq_batched_matmul_q4(out, exp->down_q4_qs, exp->down_q4_scales,
+                                 x, out_dim, in_dim, M_e, NULL);
+            return 0;
+        }
+    }
+
+    if (!w) return -1;
+    if (M_e > 64) return -1; /* kernel safety cap */
+    if (in_dim % 256 != 0) return -1;
+
+    if (wt == TQ_GGML_TYPE_IQ3_XXS) {
+        return tq_batched_matmul_iq3_xxs(out, w, x, out_dim, in_dim, M_e);
+    } else if (wt == TQ_GGML_TYPE_IQ3_S) {
+        return tq_batched_matmul_iq3_s(out, w, x, out_dim, in_dim, M_e);
+    } else if (wt == TQ_GGML_TYPE_IQ4_XS) {
+        return tq_batched_matmul_iq4_xs(out, w, x, out_dim, in_dim, M_e);
+    } else if (wt == TQ_GGML_TYPE_Q8_0) {
+        tq_batched_matmul_q8_0(out, w, x, out_dim, in_dim, M_e);
+        return 0;
+    }
+    return -1;
+}
+
+/* Per-token fallback: used when no batched kernel for this expert's type. */
+static void moe_per_token_fallback(
+    const tq_moe_layer_t* layer,
+    const tq_moe_config_t* config,
+    tq_moe_state_t* state,
+    const float* hidden, float* output,
+    int N, int hidden_dim, int layer_idx,
+    int* top_experts_all, float* expert_weights_all)
+{
+    int num_active = config->num_active;
+    for (int n = 0; n < N; n++) {
+        /* Copy precomputed routing into state and set flag */
+        memcpy(state->top_experts, top_experts_all + n * num_active,
+               (size_t)num_active * sizeof(int));
+        memcpy(state->expert_weights, expert_weights_all + n * num_active,
+               (size_t)num_active * sizeof(float));
+        state->routing_precomputed = 1;
+
+        float* out_row = output + (size_t)n * hidden_dim;
+        /* tq_moe_forward zeros output internally, so this is fine. */
+        tq_moe_forward(layer, config, state, hidden + (size_t)n * hidden_dim,
+                       out_row, hidden_dim, layer_idx);
+    }
+}
+
+void tq_moe_forward_batch(const tq_moe_layer_t* layer,
+                          const tq_moe_config_t* config,
+                          tq_moe_state_t* state,
+                          const float* hidden, float* output,
+                          int N, int hidden_dim, int layer_idx)
+{
+    if (N <= 0) return;
+    int num_active = config->num_active;
+    int num_experts = config->num_experts;
+    int expert_dim = config->expert_intermediate_dim;
+
+    void (*activation_fn)(float* restrict, const float* restrict, int) =
+        config->use_gelu ? geglu_fused : swiglu_fused;
+
+    int debug = (getenv("TQ_DEBUG_MOE_BATCH") != NULL);
+    int sanity = (getenv("TQ_MOE_BATCH_SANITY") != NULL);
+
+    /* Phase 1: Route all N tokens — N × tq_moe_route.
+     * Allocate per-token arrays for top_experts and expert_weights. */
+    int* top_experts_all = (int*)malloc((size_t)N * num_active * sizeof(int));
+    float* expert_weights_all = (float*)malloc((size_t)N * num_active * sizeof(float));
+    if (!top_experts_all || !expert_weights_all) {
+        free(top_experts_all); free(expert_weights_all);
+        /* Fallback: per-token, no precomputed routing */
+        for (int n = 0; n < N; n++) {
+            state->routing_precomputed = 0;
+            tq_moe_forward(layer, config, state, hidden + (size_t)n * hidden_dim,
+                           output + (size_t)n * hidden_dim, hidden_dim, layer_idx);
+        }
+        return;
+    }
+
+    float scaled_input_buf[4096];
+    for (int n = 0; n < N; n++) {
+        const float* h_n = hidden + (size_t)n * hidden_dim;
+        const float* route_input = h_n;
+        if (layer->router_input_scale && hidden_dim <= 4096) {
+            float inv_sqrt_dim = 1.0f / sqrtf((float)hidden_dim);
+            for (int i = 0; i < hidden_dim; i++) {
+                scaled_input_buf[i] = h_n[i] * inv_sqrt_dim * layer->router_input_scale[i];
+            }
+            route_input = scaled_input_buf;
+        }
+        tq_moe_route(route_input, layer->router_weight,
+                     num_experts, num_active, hidden_dim,
+                     top_experts_all + n * num_active,
+                     expert_weights_all + n * num_active);
+    }
+
+    /* Optional sanity mode: save a reference copy from per-token path. */
+    float* ref_output = NULL;
+    if (sanity) {
+        ref_output = (float*)malloc((size_t)N * hidden_dim * sizeof(float));
+        if (ref_output) {
+            memset(ref_output, 0, (size_t)N * hidden_dim * sizeof(float));
+            moe_per_token_fallback(layer, config, state, hidden, ref_output,
+                                    N, hidden_dim, layer_idx,
+                                    top_experts_all, expert_weights_all);
+        }
+    }
+
+    /* Phase 2: Inverse index — for each expert e, build list of (token_idx,
+     * slot_k, weight). Use compact arrays indexed by active_experts[]. */
+    int* tokens_per_expert_count = (int*)calloc((size_t)num_experts, sizeof(int));
+    if (!tokens_per_expert_count) {
+        free(top_experts_all); free(expert_weights_all); free(ref_output);
+        return;
+    }
+    /* Count pass */
+    for (int n = 0; n < N; n++) {
+        for (int k = 0; k < num_active; k++) {
+            int eid = top_experts_all[n * num_active + k];
+            if (eid >= 0 && eid < num_experts) tokens_per_expert_count[eid]++;
+        }
+    }
+
+    /* Per-expert arrays */
+    int** tokens_per_expert_idx = (int**)calloc((size_t)num_experts, sizeof(int*));
+    float** tokens_per_expert_w = (float**)calloc((size_t)num_experts, sizeof(float*));
+    int* tokens_per_expert_pos = (int*)calloc((size_t)num_experts, sizeof(int));
+    if (!tokens_per_expert_idx || !tokens_per_expert_w || !tokens_per_expert_pos) {
+        free(tokens_per_expert_count);
+        free(tokens_per_expert_idx); free(tokens_per_expert_w); free(tokens_per_expert_pos);
+        free(top_experts_all); free(expert_weights_all); free(ref_output);
+        return;
+    }
+    int n_active_experts = 0;
+    int max_M = 0, total_M = 0;
+    for (int e = 0; e < num_experts; e++) {
+        int c = tokens_per_expert_count[e];
+        if (c > 0) {
+            tokens_per_expert_idx[e] = (int*)malloc((size_t)c * sizeof(int));
+            tokens_per_expert_w[e] = (float*)malloc((size_t)c * sizeof(float));
+            if (!tokens_per_expert_idx[e] || !tokens_per_expert_w[e]) {
+                /* Clean-up and bail to fallback. */
+                for (int ee = 0; ee < num_experts; ee++) {
+                    free(tokens_per_expert_idx[ee]);
+                    free(tokens_per_expert_w[ee]);
+                }
+                free(tokens_per_expert_idx); free(tokens_per_expert_w);
+                free(tokens_per_expert_pos); free(tokens_per_expert_count);
+                free(top_experts_all); free(expert_weights_all); free(ref_output);
+                /* Zero + per-token fallback */
+                memset(output, 0, (size_t)N * hidden_dim * sizeof(float));
+                for (int n = 0; n < N; n++) {
+                    state->routing_precomputed = 0;
+                    tq_moe_forward(layer, config, state,
+                                   hidden + (size_t)n * hidden_dim,
+                                   output + (size_t)n * hidden_dim,
+                                   hidden_dim, layer_idx);
+                }
+                return;
+            }
+            n_active_experts++;
+            if (c > max_M) max_M = c;
+            total_M += c;
+        }
+    }
+    /* Fill pass */
+    for (int n = 0; n < N; n++) {
+        for (int k = 0; k < num_active; k++) {
+            int eid = top_experts_all[n * num_active + k];
+            if (eid < 0 || eid >= num_experts) continue;
+            int p = tokens_per_expert_pos[eid]++;
+            tokens_per_expert_idx[eid][p] = n;
+            tokens_per_expert_w[eid][p] = expert_weights_all[n * num_active + k];
+        }
+    }
+
+    if (debug) {
+        float avg_M = n_active_experts > 0 ? (float)total_M / (float)n_active_experts : 0.0f;
+        fprintf(stderr, "[moe_batch L%d] N=%d active_experts=%d max_M=%d avg_M=%.1f\n",
+                layer_idx, N, n_active_experts, max_M, (double)avg_M);
+    }
+
+    /* Zero output (caller pre-zero is also fine; do it defensively). */
+    memset(output, 0, (size_t)N * hidden_dim * sizeof(float));
+
+    /* Phase 3: Per active expert — gather → batched matmul → activation →
+     * down matmul → scatter weighted accumulate. */
+    int max_M_cap = max_M > 64 ? 64 : max_M;
+    float* X_sub = (float*)malloc((size_t)max_M_cap * hidden_dim * sizeof(float));
+    float* gate_out = (float*)malloc((size_t)max_M_cap * expert_dim * sizeof(float));
+    float* up_out = (float*)malloc((size_t)max_M_cap * expert_dim * sizeof(float));
+    float* down_out = (float*)malloc((size_t)max_M_cap * hidden_dim * sizeof(float));
+    if (!X_sub || !gate_out || !up_out || !down_out) {
+        free(X_sub); free(gate_out); free(up_out); free(down_out);
+        goto cleanup_and_fallback;
+    }
+
+    for (int e = 0; e < num_experts; e++) {
+        int M_e = tokens_per_expert_count[e];
+        if (M_e <= 0) continue;
+        const tq_expert_weights_t* exp = &layer->experts[e];
+
+        /* Chunk to fit kernel M<=64 cap */
+        int chunks = (M_e + 63) / 64;
+        for (int ci = 0; ci < chunks; ci++) {
+            int chunk_start = ci * 64;
+            int chunk_end = chunk_start + 64;
+            if (chunk_end > M_e) chunk_end = M_e;
+            int M_c = chunk_end - chunk_start;
+
+            /* Gather X_sub rows for this chunk */
+            for (int m = 0; m < M_c; m++) {
+                int tok = tokens_per_expert_idx[e][chunk_start + m];
+                memcpy(X_sub + (size_t)m * hidden_dim,
+                       hidden + (size_t)tok * hidden_dim,
+                       (size_t)hidden_dim * sizeof(float));
+            }
+
+            /* Gate: [M_c, expert_dim] = X_sub @ W_gate^T */
+            int rc_gate = moe_batched_dispatch(gate_out, exp, 0,
+                                                X_sub, expert_dim, hidden_dim, M_c);
+            int rc_up   = moe_batched_dispatch(up_out, exp, 1,
+                                                X_sub, expert_dim, hidden_dim, M_c);
+
+            if (rc_gate != 0 || rc_up != 0) {
+                /* Per-row fallback using tq_matmul_gguf */
+                for (int m = 0; m < M_c; m++) {
+                    tq_matmul_gguf(gate_out + (size_t)m * expert_dim,
+                                   X_sub + (size_t)m * hidden_dim,
+                                   exp->w_gate, exp->gate_type, expert_dim, hidden_dim);
+                    tq_matmul_gguf(up_out + (size_t)m * expert_dim,
+                                   X_sub + (size_t)m * hidden_dim,
+                                   exp->w_up, exp->up_type, expert_dim, hidden_dim);
+                }
+            }
+
+            /* Activation per-row: gate_out[m] = gate_out[m] * silu(..) * up_out[m] */
+            for (int m = 0; m < M_c; m++) {
+                activation_fn(gate_out + (size_t)m * expert_dim,
+                              up_out + (size_t)m * expert_dim, expert_dim);
+            }
+
+            /* Down: [M_c, hidden_dim] = gate_out @ W_down^T */
+            int rc_down = moe_batched_dispatch(down_out, exp, 2,
+                                                gate_out, hidden_dim, expert_dim, M_c);
+            if (rc_down != 0) {
+                for (int m = 0; m < M_c; m++) {
+                    tq_matmul_gguf(down_out + (size_t)m * hidden_dim,
+                                   gate_out + (size_t)m * expert_dim,
+                                   exp->w_down, exp->down_type, hidden_dim, expert_dim);
+                }
+            }
+
+            /* Scatter weighted accumulate.
+             * Gemma 4 has per-expert output scaling. */
+            float exp_scale = (layer->expert_scale) ? layer->expert_scale[e] : 1.0f;
+            for (int m = 0; m < M_c; m++) {
+                int tok = tokens_per_expert_idx[e][chunk_start + m];
+                float w = tokens_per_expert_w[e][chunk_start + m] * exp_scale;
+                float* out_row = output + (size_t)tok * hidden_dim;
+                const float* dout = down_out + (size_t)m * hidden_dim;
+#if TQ_MOE_HAS_NEON
+                int i = 0;
+                float32x4_t vw = vdupq_n_f32(w);
+                for (; i + 3 < hidden_dim; i += 4) {
+                    float32x4_t vo = vld1q_f32(out_row + i);
+                    float32x4_t vd = vld1q_f32(dout + i);
+                    vst1q_f32(out_row + i, vfmaq_f32(vo, vw, vd));
+                }
+                for (; i < hidden_dim; i++) out_row[i] += w * dout[i];
+#else
+                for (int i = 0; i < hidden_dim; i++) out_row[i] += w * dout[i];
+#endif
+            }
+        }
+    }
+
+    free(X_sub); free(gate_out); free(up_out); free(down_out);
+
+    /* Shared expert: always-active, per-token. Runs on each token. */
+    if (config->has_shared_expert) {
+        for (int n = 0; n < N; n++) {
+            /* Use the per-token tq_moe_forward shared-expert path by calling
+             * a tiny helper: we just run the shared-expert part. Simplest:
+             * compute shared expert inline. */
+            int shared_dim = config->shared_expert_intermediate_dim;
+            if (shared_dim == 0) shared_dim = expert_dim;
+
+            const float* h_n = hidden + (size_t)n * hidden_dim;
+            float shared_gate_val = 1.0f;
+            if (layer->shared_gate) {
+                float dot = 0.0f;
+                for (int j = 0; j < hidden_dim; j++)
+                    dot += h_n[j] * layer->shared_gate[j];
+                shared_gate_val = 1.0f / (1.0f + fast_expf_moe(-dot));
+            }
+            if (layer->shared_expert.q4_converted) {
+                tq_matmul_q4(state->expert_hb, h_n,
+                             layer->shared_expert.gate_q4_qs, layer->shared_expert.gate_q4_scales,
+                             shared_dim, hidden_dim);
+                tq_matmul_q4(state->expert_hb2, h_n,
+                             layer->shared_expert.up_q4_qs, layer->shared_expert.up_q4_scales,
+                             shared_dim, hidden_dim);
+                activation_fn(state->expert_hb, state->expert_hb2, shared_dim);
+                tq_matmul_q4(state->expert_out, state->expert_hb,
+                             layer->shared_expert.down_q4_qs, layer->shared_expert.down_q4_scales,
+                             hidden_dim, shared_dim);
+            } else {
+                tq_matmul_gguf(state->expert_hb, h_n,
+                               layer->shared_expert.w_gate, layer->shared_expert.gate_type,
+                               shared_dim, hidden_dim);
+                tq_matmul_gguf(state->expert_hb2, h_n,
+                               layer->shared_expert.w_up, layer->shared_expert.up_type,
+                               shared_dim, hidden_dim);
+                activation_fn(state->expert_hb, state->expert_hb2, shared_dim);
+                tq_matmul_gguf(state->expert_out, state->expert_hb,
+                               layer->shared_expert.w_down, layer->shared_expert.down_type,
+                               hidden_dim, shared_dim);
+            }
+            float* out_row = output + (size_t)n * hidden_dim;
+            for (int i = 0; i < hidden_dim; i++)
+                out_row[i] += shared_gate_val * state->expert_out[i];
+        }
+    }
+
+    /* Sanity check: compare output vs ref_output */
+    if (sanity && ref_output) {
+        float max_diff = 0.0f;
+        for (size_t i = 0; i < (size_t)N * hidden_dim; i++) {
+            float d = output[i] - ref_output[i];
+            if (d < 0) d = -d;
+            if (d > max_diff) max_diff = d;
+        }
+        fprintf(stderr, "[moe_batch_sanity L%d] N=%d max_abs_diff=%.6g\n",
+                layer_idx, N, (double)max_diff);
+        if (max_diff > 1e-3f) {
+            fprintf(stderr, "[moe_batch_sanity L%d] FAIL: diff exceeds 1e-3\n", layer_idx);
+        }
+    }
+    free(ref_output);
+
+    /* Cleanup */
+    for (int e = 0; e < num_experts; e++) {
+        free(tokens_per_expert_idx[e]);
+        free(tokens_per_expert_w[e]);
+    }
+    free(tokens_per_expert_idx);
+    free(tokens_per_expert_w);
+    free(tokens_per_expert_pos);
+    free(tokens_per_expert_count);
+    free(top_experts_all);
+    free(expert_weights_all);
+
+    /* Advance token counter for LRU tracking */
+    g_token_counter += N;
+#ifdef TQ_HAS_ACCELERATE
+    g_cblas_token += N;
+#endif
+    return;
+
+cleanup_and_fallback:
+    /* Couldn't allocate scratch for batched path — fall back per-token.
+     * First clean up what we have. */
+    for (int e = 0; e < num_experts; e++) {
+        free(tokens_per_expert_idx[e]);
+        free(tokens_per_expert_w[e]);
+    }
+    free(tokens_per_expert_idx);
+    free(tokens_per_expert_w);
+    free(tokens_per_expert_pos);
+    free(tokens_per_expert_count);
+    free(ref_output);
+    memset(output, 0, (size_t)N * hidden_dim * sizeof(float));
+    for (int n = 0; n < N; n++) {
+        memcpy(state->top_experts, top_experts_all + n * num_active,
+               (size_t)num_active * sizeof(int));
+        memcpy(state->expert_weights, expert_weights_all + n * num_active,
+               (size_t)num_active * sizeof(float));
+        state->routing_precomputed = 1;
+        tq_moe_forward(layer, config, state,
+                       hidden + (size_t)n * hidden_dim,
+                       output + (size_t)n * hidden_dim,
+                       hidden_dim, layer_idx);
+    }
+    free(top_experts_all);
+    free(expert_weights_all);
+}
+
+/* ============================================================
  * Expert memory advise (madvise hints for paging)
  * ============================================================ */
 

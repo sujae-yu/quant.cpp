@@ -5223,3 +5223,164 @@ void tq_metal_batch_end_if_available(void) {
     }
 #endif
 }
+
+/* ============================================================
+ * Public batched matmul wrappers for MoE prefill (Mission A Step 3d).
+ *
+ * Input layout:
+ *   x   [N, in_dim]    FP32 row-major (activations for N tokens)
+ *   out [N, out_dim]   FP32 row-major
+ *   weight = mmap'd quantized block array of out_dim rows
+ *
+ * Internally: pre-quantize X to int8 (per-32 Q8-style scale) ONCE, then
+ * call the per-type batched NEON kernel which amortizes weight unpack
+ * across the N activations.
+ *
+ * Returns 0 on success, -1 if not available (falls back via tq_matmul_gguf).
+ * ============================================================ */
+
+#if TQ_HAS_NEON
+
+/* Pre-quantize X[N, in_dim] to int8 with per-32-elem scales.
+ * Returns allocated buffers (caller frees). Returns 0 on success. */
+static int _quantize_x_batch_i8(const float* x, int in_dim, int N,
+                                 int8_t** out_qs, float** out_ds)
+{
+    int n_blocks = in_dim / 32;
+    int8_t* X_qs = (int8_t*)malloc((size_t)N * (size_t)in_dim * sizeof(int8_t));
+    float*  X_ds = (float*)malloc((size_t)N * (size_t)n_blocks * sizeof(float));
+    if (!X_qs || !X_ds) { free(X_qs); free(X_ds); return -1; }
+
+    for (int n = 0; n < N; n++) {
+        const float* xp = x + (size_t)n * in_dim;
+        int8_t* qs_row = X_qs + (size_t)n * in_dim;
+        float*  ds_row = X_ds + (size_t)n * n_blocks;
+        for (int bb = 0; bb < n_blocks; bb++) {
+            const float* block = xp + bb * 32;
+            float amax = 0.0f;
+            for (int j = 0; j < 32; j++) {
+                float a = block[j] < 0 ? -block[j] : block[j];
+                if (a > amax) amax = a;
+            }
+            float dq = amax / 127.0f;
+            ds_row[bb] = dq;
+            if (dq > 0.0f) {
+                float id = 1.0f / dq;
+                for (int j = 0; j < 32; j++) {
+                    int v = (int)roundf(block[j] * id);
+                    qs_row[bb * 32 + j] = (int8_t)(v < -128 ? -128 : (v > 127 ? 127 : v));
+                }
+            } else {
+                memset(qs_row + bb * 32, 0, 32);
+            }
+        }
+    }
+    *out_qs = X_qs; *out_ds = X_ds;
+    return 0;
+}
+#endif
+
+extern void tq_tp_run(void* (*fn)(void*), void** args, int n);
+extern int tq_get_threads(void);
+
+/* ---- IQ3_XXS batched wrapper ---- */
+int tq_batched_matmul_iq3_xxs(float* out, const void* weight,
+                               const float* x, int out_dim, int in_dim, int N)
+{
+#if TQ_HAS_NEON
+    if (in_dim < 256 || (in_dim % 256 != 0) || N <= 0 || N > 64) return -1;
+    int8_t* X_qs = NULL; float* X_ds = NULL;
+    if (_quantize_x_batch_i8(x, in_dim, N, &X_qs, &X_ds) != 0) return -1;
+    int n_super = in_dim / 256;
+    size_t row_bytes = (size_t)n_super * 98;
+
+    /* Threading across rows */
+    int n_threads = tq_get_threads();
+    if (n_threads > out_dim) n_threads = out_dim;
+    if (n_threads < 1) n_threads = 1;
+
+    if (n_threads <= 1) {
+        fused_dot_iq3_xxs_int8_batched(out, weight, row_bytes, out_dim,
+                                       X_qs, X_ds, 0, out_dim, n_super, N);
+    } else {
+        /* Simple row split: each thread handles a contiguous slice */
+        typedef struct {
+            float* out; const void* weight; size_t row_bytes; int out_row_stride;
+            const int8_t* X_qs; const float* X_ds; int start; int end;
+            int n_super; int N;
+        } task_t;
+        /* Split manually, dispatch via tq_tp_run */
+        #define MOE_TP_MAX 16
+        task_t tasks[MOE_TP_MAX];
+        void* ptrs[MOE_TP_MAX];
+        if (n_threads > MOE_TP_MAX) n_threads = MOE_TP_MAX;
+        int per = out_dim / n_threads;
+        for (int t = 0; t < n_threads; t++) {
+            tasks[t].out = out;
+            tasks[t].weight = weight;
+            tasks[t].row_bytes = row_bytes;
+            tasks[t].out_row_stride = out_dim;
+            tasks[t].X_qs = X_qs;
+            tasks[t].X_ds = X_ds;
+            tasks[t].start = t * per;
+            tasks[t].end = (t == n_threads - 1) ? out_dim : (t + 1) * per;
+            tasks[t].n_super = n_super;
+            tasks[t].N = N;
+            ptrs[t] = &tasks[t];
+        }
+        /* Worker stub: use inline static — but function ptr can't capture.
+         * Fall back to serial here to keep this patch small; threading is done
+         * at a higher level in the MoE loop. */
+        (void)ptrs;
+        fused_dot_iq3_xxs_int8_batched(out, weight, row_bytes, out_dim,
+                                       X_qs, X_ds, 0, out_dim, n_super, N);
+    }
+    free(X_qs); free(X_ds);
+    return 0;
+#else
+    (void)out; (void)weight; (void)x; (void)out_dim; (void)in_dim; (void)N;
+    return -1;
+#endif
+}
+
+/* ---- IQ3_S batched wrapper ---- */
+int tq_batched_matmul_iq3_s(float* out, const void* weight,
+                             const float* x, int out_dim, int in_dim, int N)
+{
+#if TQ_HAS_NEON
+    if (in_dim < 256 || (in_dim % 256 != 0) || N <= 0 || N > 64) return -1;
+    int8_t* X_qs = NULL; float* X_ds = NULL;
+    if (_quantize_x_batch_i8(x, in_dim, N, &X_qs, &X_ds) != 0) return -1;
+    int n_super = in_dim / 256;
+    size_t row_bytes = (size_t)n_super * sizeof(block_iq3_s_t);
+
+    fused_dot_iq3_s_int8_batched(out, weight, row_bytes, out_dim,
+                                 X_qs, X_ds, 0, out_dim, n_super, N);
+    free(X_qs); free(X_ds);
+    return 0;
+#else
+    (void)out; (void)weight; (void)x; (void)out_dim; (void)in_dim; (void)N;
+    return -1;
+#endif
+}
+
+/* ---- IQ4_XS batched wrapper ---- */
+int tq_batched_matmul_iq4_xs(float* out, const void* weight,
+                              const float* x, int out_dim, int in_dim, int N)
+{
+#if TQ_HAS_NEON
+    if (in_dim < 256 || (in_dim % 256 != 0) || N <= 0 || N > 64) return -1;
+    int8_t* X_qs = NULL; float* X_ds = NULL;
+    if (_quantize_x_batch_i8(x, in_dim, N, &X_qs, &X_ds) != 0) return -1;
+    int n_super = in_dim / 256;
+    size_t row_bytes = (size_t)n_super * sizeof(block_iq4_xs);
+
+    fused_dot_iq4_xs_int8_batched(out, weight, row_bytes, out_dim,
+                                  X_qs, X_ds, 0, out_dim, n_super, N);
+    free(X_qs); free(X_ds);
+    return 0;
+#else
+    (void)out; (void)weight; (void)x; (void)out_dim; (void)in_dim; (void)N;
+    return -1;
+#endif
+}

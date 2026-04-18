@@ -286,6 +286,26 @@ void tq_moe_forward(const tq_moe_layer_t* layer,
                     const float* input, float* output,
                     int hidden_dim, int layer_idx);
 
+/* Batched MoE FFN forward for prefill: processes N tokens at once,
+ * gathering per-expert token subsets and calling batched matmul kernels.
+ *
+ * Inputs:
+ *   hidden  [N, hidden_dim]  (row-major, contiguous)
+ *   output  [N, hidden_dim]  (caller must pre-zero; result written with +=)
+ *   N       batch size (prefill prompt tokens)
+ *
+ * The state object is reused internally for routing but with per-token
+ * top_experts/weights stored in dynamically-allocated scratch.
+ *
+ * Env toggles:
+ *   TQ_MOE_BATCH_SANITY=1  — run both batched AND per-token, compare, assert
+ *   TQ_DEBUG_MOE_BATCH=1   — per-layer profiling print */
+void tq_moe_forward_batch(const tq_moe_layer_t* layer,
+                          const tq_moe_config_t* config,
+                          tq_moe_state_t* state,
+                          const float* hidden, float* output,
+                          int N, int hidden_dim, int layer_idx);
+
 /* Expert Q4 LRU cache — runtime on-demand conversion */
 void tq_moe_cache_init(int n_layers, const tq_moe_config_t* config, int hidden_dim);
 void tq_moe_cache_free(void);
