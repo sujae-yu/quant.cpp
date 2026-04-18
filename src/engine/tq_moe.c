@@ -1327,6 +1327,8 @@ extern int tq_batched_matmul_iq3_s(float* out, const void* weight,
                                     const float* x, int out_dim, int in_dim, int N);
 extern int tq_batched_matmul_iq4_xs(float* out, const void* weight,
                                      const float* x, int out_dim, int in_dim, int N);
+extern int tq_batched_matmul_q3_k(float* out, const void* weight,
+                                   const float* x, int out_dim, int in_dim, int N);
 extern void tq_batched_matmul_q8_0(float* out, const void* w_blocks,
                                     const float* x, int n_rows, int d, int N);
 
@@ -1374,6 +1376,8 @@ static int moe_batched_dispatch(
         return tq_batched_matmul_iq3_s(out, w, x, out_dim, in_dim, M_e);
     } else if (wt == TQ_GGML_TYPE_IQ4_XS) {
         return tq_batched_matmul_iq4_xs(out, w, x, out_dim, in_dim, M_e);
+    } else if (wt == TQ_GGML_TYPE_Q3_K) {
+        return tq_batched_matmul_q3_k(out, w, x, out_dim, in_dim, M_e);
     } else if (wt == TQ_GGML_TYPE_Q8_0) {
         tq_batched_matmul_q8_0(out, w, x, out_dim, in_dim, M_e);
         return 0;
@@ -1404,6 +1408,133 @@ static void moe_per_token_fallback(
         tq_moe_forward(layer, config, state, hidden + (size_t)n * hidden_dim,
                        out_row, hidden_dim, layer_idx);
     }
+}
+
+/* ============================================================
+ * Mission A Step 3f: cross-expert parallel worker for tq_moe_forward_batch.
+ *
+ * Each task = ONE expert's entire [M_e] token batch: gather → batched
+ * gate/up matmul → SwiGLU/GeGLU → batched down matmul → scatter into a
+ * private per-worker output buffer. After all workers finish, the main
+ * thread serially reduces per-worker outputs into the shared output.
+ *
+ * Why private output buffers? Multiple experts may share a token (top-K
+ * routing with K>1 selects K experts per token), so concurrent scatter
+ * into output[tok] would race. Private accumulators eliminate the race
+ * without atomics. Memory cost: n_threads × N × hidden_dim floats
+ * (e.g. 8 × 256 × 2560 × 4 bytes ≈ 20 MB — fits easily).
+ *
+ * Each worker sets tq_tls_force_serial_matmul=1 to prevent nested pool
+ * dispatch inside tq_batched_matmul_* (the outer pool is already saturated
+ * by the expert-level workers).
+ * ============================================================ */
+typedef struct {
+    /* Per-expert inputs (shared read state) */
+    const tq_moe_layer_t*       layer;
+    const tq_moe_config_t*      config;
+    const float*                hidden;          /* [N_total, hidden_dim] */
+    int                         N_total;
+    int                         hidden_dim;
+    int                         expert_dim;
+    int                         eid;             /* global expert id */
+    int                         M_e;             /* tokens routed to this expert */
+    const int*                  tokens_idx;      /* [M_e] token indices */
+    const float*                tokens_w;        /* [M_e] routing weights */
+    float                       exp_scale;       /* per-expert output scale (Gemma 4) */
+    void (*activation_fn)(float* restrict, const float* restrict, int);
+    /* Per-worker private scratch — caller-provided, sized for max_M_cap=64 */
+    float*                      X_sub;           /* [64, hidden_dim] */
+    float*                      gate_out;        /* [64, expert_dim] */
+    float*                      up_out;          /* [64, expert_dim] */
+    float*                      down_out;        /* [64, hidden_dim] */
+    float*                      output_private;  /* [N_total, hidden_dim] — this worker's accumulator */
+} moe_batch_expert_task_t;
+
+static void* moe_batch_expert_worker(void* arg) {
+    moe_batch_expert_task_t* t = (moe_batch_expert_task_t*)arg;
+    const tq_expert_weights_t* exp = &t->layer->experts[t->eid];
+    int hidden_dim = t->hidden_dim;
+    int expert_dim = t->expert_dim;
+    int M_e = t->M_e;
+    if (M_e <= 0) return NULL;
+
+    /* Force inner matmuls to run single-threaded (outer pool is busy) */
+    int prev_flag = tq_tls_force_serial_matmul;
+    tq_tls_force_serial_matmul = 1;
+
+    /* Chunk to fit kernel M<=64 cap */
+    int chunks = (M_e + 63) / 64;
+    for (int ci = 0; ci < chunks; ci++) {
+        int chunk_start = ci * 64;
+        int chunk_end = chunk_start + 64;
+        if (chunk_end > M_e) chunk_end = M_e;
+        int M_c = chunk_end - chunk_start;
+
+        /* Gather X_sub rows for this chunk */
+        for (int m = 0; m < M_c; m++) {
+            int tok = t->tokens_idx[chunk_start + m];
+            memcpy(t->X_sub + (size_t)m * hidden_dim,
+                   t->hidden + (size_t)tok * hidden_dim,
+                   (size_t)hidden_dim * sizeof(float));
+        }
+
+        /* Gate + up projections */
+        int rc_gate = moe_batched_dispatch(t->gate_out, exp, 0,
+                                            t->X_sub, expert_dim, hidden_dim, M_c);
+        int rc_up   = moe_batched_dispatch(t->up_out, exp, 1,
+                                            t->X_sub, expert_dim, hidden_dim, M_c);
+        if (rc_gate != 0 || rc_up != 0) {
+            for (int m = 0; m < M_c; m++) {
+                tq_matmul_gguf(t->gate_out + (size_t)m * expert_dim,
+                               t->X_sub + (size_t)m * hidden_dim,
+                               exp->w_gate, exp->gate_type, expert_dim, hidden_dim);
+                tq_matmul_gguf(t->up_out + (size_t)m * expert_dim,
+                               t->X_sub + (size_t)m * hidden_dim,
+                               exp->w_up, exp->up_type, expert_dim, hidden_dim);
+            }
+        }
+
+        /* Activation (SwiGLU/GeGLU) per row */
+        for (int m = 0; m < M_c; m++) {
+            t->activation_fn(t->gate_out + (size_t)m * expert_dim,
+                             t->up_out + (size_t)m * expert_dim, expert_dim);
+        }
+
+        /* Down projection */
+        int rc_down = moe_batched_dispatch(t->down_out, exp, 2,
+                                            t->gate_out, hidden_dim, expert_dim, M_c);
+        if (rc_down != 0) {
+            for (int m = 0; m < M_c; m++) {
+                tq_matmul_gguf(t->down_out + (size_t)m * hidden_dim,
+                               t->gate_out + (size_t)m * expert_dim,
+                               exp->w_down, exp->down_type, hidden_dim, expert_dim);
+            }
+        }
+
+        /* Scatter weighted accumulate into this worker's PRIVATE output buffer */
+        float exp_scale = t->exp_scale;
+        for (int m = 0; m < M_c; m++) {
+            int tok = t->tokens_idx[chunk_start + m];
+            float w = t->tokens_w[chunk_start + m] * exp_scale;
+            float* out_row = t->output_private + (size_t)tok * hidden_dim;
+            const float* dout = t->down_out + (size_t)m * hidden_dim;
+#if TQ_MOE_HAS_NEON
+            int i = 0;
+            float32x4_t vw = vdupq_n_f32(w);
+            for (; i + 3 < hidden_dim; i += 4) {
+                float32x4_t vo = vld1q_f32(out_row + i);
+                float32x4_t vd = vld1q_f32(dout + i);
+                vst1q_f32(out_row + i, vfmaq_f32(vo, vw, vd));
+            }
+            for (; i < hidden_dim; i++) out_row[i] += w * dout[i];
+#else
+            for (int i = 0; i < hidden_dim; i++) out_row[i] += w * dout[i];
+#endif
+        }
+    }
+
+    tq_tls_force_serial_matmul = prev_flag;
+    return NULL;
 }
 
 void tq_moe_forward_batch(const tq_moe_layer_t* layer,
@@ -1548,98 +1679,150 @@ void tq_moe_forward_batch(const tq_moe_layer_t* layer,
     memset(output, 0, (size_t)N * hidden_dim * sizeof(float));
 
     /* Phase 3: Per active expert — gather → batched matmul → activation →
-     * down matmul → scatter weighted accumulate. */
+     * down matmul → scatter weighted accumulate.
+     *
+     * Step 3f: cross-expert parallel dispatch. Build a compact list of
+     * active experts (those with M_e > 0), then dispatch one task per
+     * expert via the shared thread pool. Each worker owns private
+     * scratch + a private output accumulator to avoid scatter conflicts.
+     *
+     * Bounded by TQ_TP_MAX=16 — if n_active_experts > TQ_TP_MAX we process
+     * in waves of TQ_TP_MAX experts. In practice for Qwen3.6 (N<=256,
+     * num_active=8), n_active_experts stays ≤ min(N*8, 128) ≤ 128 at
+     * large N but typical prefill (N=32..128) yields 30-60 active experts.
+     */
+    #ifndef TQ_TP_MAX
+    #define TQ_TP_MAX 16
+    #endif
     int max_M_cap = max_M > 64 ? 64 : max_M;
-    float* X_sub = (float*)malloc((size_t)max_M_cap * hidden_dim * sizeof(float));
-    float* gate_out = (float*)malloc((size_t)max_M_cap * expert_dim * sizeof(float));
-    float* up_out = (float*)malloc((size_t)max_M_cap * expert_dim * sizeof(float));
-    float* down_out = (float*)malloc((size_t)max_M_cap * hidden_dim * sizeof(float));
-    if (!X_sub || !gate_out || !up_out || !down_out) {
-        free(X_sub); free(gate_out); free(up_out); free(down_out);
-        goto cleanup_and_fallback;
+
+    /* Thread/worker count: cap by active experts count, hw threads, TQ_TP_MAX */
+    extern void tq_tp_run(void* (*fn)(void*), void** args, int n_tasks);
+    int n_threads = tq_get_threads();
+    if (n_threads > TQ_TP_MAX) n_threads = TQ_TP_MAX;
+    if (n_threads < 1) n_threads = 1;
+    /* Don't spawn more workers than active experts */
+    int n_workers = n_threads;
+    if (n_workers > n_active_experts) n_workers = n_active_experts;
+    if (n_workers < 1) n_workers = 1;
+    /* Already holding the pool (nested call)? Fall back to serial. */
+    if (tq_tls_force_serial_matmul) n_workers = 1;
+
+    /* Per-worker scratch: X_sub [64 × hidden_dim] + gate_out/up_out [64 × expert_dim]
+     * + down_out [64 × hidden_dim] + private output [N × hidden_dim].
+     * Total per worker ≈ 64*(hidden+2*expert+hidden) + N*hidden floats.
+     * For Qwen3.6 hidden=2560 expert=768 N≤256: ≈ (64*6656 + 256*2560) floats
+     * = 1.08 M floats = 4.3 MB per worker × 8 workers = 35 MB — fits 16 GB. */
+    size_t per_worker_scratch =
+        (size_t)max_M_cap * hidden_dim         /* X_sub */
+      + (size_t)max_M_cap * expert_dim         /* gate_out */
+      + (size_t)max_M_cap * expert_dim         /* up_out */
+      + (size_t)max_M_cap * hidden_dim;        /* down_out */
+    size_t per_worker_output = (size_t)N * hidden_dim;
+    size_t per_worker_total = per_worker_scratch + per_worker_output;
+
+    float* scratch_all = (float*)malloc((size_t)n_workers * per_worker_total * sizeof(float));
+    if (!scratch_all) goto cleanup_and_fallback;
+    /* Zero private outputs (scratch can stay uninitialized).
+     * Worker 0 reuses the shared `output` buffer (already zeroed above) to save
+     * both its memset and its reduce pass — one fewer N×hidden_dim buffer
+     * touched per layer. Workers 1..n_workers-1 use the private scratch. */
+    for (int w = 1; w < n_workers; w++) {
+        float* base = scratch_all + (size_t)w * per_worker_total;
+        float* priv_out = base + per_worker_scratch;
+        memset(priv_out, 0, per_worker_output * sizeof(float));
     }
 
-    for (int e = 0; e < num_experts; e++) {
-        int M_e = tokens_per_expert_count[e];
-        if (M_e <= 0) continue;
-        const tq_expert_weights_t* exp = &layer->experts[e];
-
-        /* Chunk to fit kernel M<=64 cap */
-        int chunks = (M_e + 63) / 64;
-        for (int ci = 0; ci < chunks; ci++) {
-            int chunk_start = ci * 64;
-            int chunk_end = chunk_start + 64;
-            if (chunk_end > M_e) chunk_end = M_e;
-            int M_c = chunk_end - chunk_start;
-
-            /* Gather X_sub rows for this chunk */
-            for (int m = 0; m < M_c; m++) {
-                int tok = tokens_per_expert_idx[e][chunk_start + m];
-                memcpy(X_sub + (size_t)m * hidden_dim,
-                       hidden + (size_t)tok * hidden_dim,
-                       (size_t)hidden_dim * sizeof(float));
-            }
-
-            /* Gate: [M_c, expert_dim] = X_sub @ W_gate^T */
-            int rc_gate = moe_batched_dispatch(gate_out, exp, 0,
-                                                X_sub, expert_dim, hidden_dim, M_c);
-            int rc_up   = moe_batched_dispatch(up_out, exp, 1,
-                                                X_sub, expert_dim, hidden_dim, M_c);
-
-            if (rc_gate != 0 || rc_up != 0) {
-                /* Per-row fallback using tq_matmul_gguf */
-                for (int m = 0; m < M_c; m++) {
-                    tq_matmul_gguf(gate_out + (size_t)m * expert_dim,
-                                   X_sub + (size_t)m * hidden_dim,
-                                   exp->w_gate, exp->gate_type, expert_dim, hidden_dim);
-                    tq_matmul_gguf(up_out + (size_t)m * expert_dim,
-                                   X_sub + (size_t)m * hidden_dim,
-                                   exp->w_up, exp->up_type, expert_dim, hidden_dim);
-                }
-            }
-
-            /* Activation per-row: gate_out[m] = gate_out[m] * silu(..) * up_out[m] */
-            for (int m = 0; m < M_c; m++) {
-                activation_fn(gate_out + (size_t)m * expert_dim,
-                              up_out + (size_t)m * expert_dim, expert_dim);
-            }
-
-            /* Down: [M_c, hidden_dim] = gate_out @ W_down^T */
-            int rc_down = moe_batched_dispatch(down_out, exp, 2,
-                                                gate_out, hidden_dim, expert_dim, M_c);
-            if (rc_down != 0) {
-                for (int m = 0; m < M_c; m++) {
-                    tq_matmul_gguf(down_out + (size_t)m * hidden_dim,
-                                   gate_out + (size_t)m * expert_dim,
-                                   exp->w_down, exp->down_type, hidden_dim, expert_dim);
-                }
-            }
-
-            /* Scatter weighted accumulate.
-             * Gemma 4 has per-expert output scaling. */
-            float exp_scale = (layer->expert_scale) ? layer->expert_scale[e] : 1.0f;
-            for (int m = 0; m < M_c; m++) {
-                int tok = tokens_per_expert_idx[e][chunk_start + m];
-                float w = tokens_per_expert_w[e][chunk_start + m] * exp_scale;
-                float* out_row = output + (size_t)tok * hidden_dim;
-                const float* dout = down_out + (size_t)m * hidden_dim;
-#if TQ_MOE_HAS_NEON
-                int i = 0;
-                float32x4_t vw = vdupq_n_f32(w);
-                for (; i + 3 < hidden_dim; i += 4) {
-                    float32x4_t vo = vld1q_f32(out_row + i);
-                    float32x4_t vd = vld1q_f32(dout + i);
-                    vst1q_f32(out_row + i, vfmaq_f32(vo, vw, vd));
-                }
-                for (; i < hidden_dim; i++) out_row[i] += w * dout[i];
-#else
-                for (int i = 0; i < hidden_dim; i++) out_row[i] += w * dout[i];
-#endif
-            }
+    /* Build compact active-expert list */
+    int* active_eids = (int*)malloc((size_t)n_active_experts * sizeof(int));
+    if (!active_eids) {
+        free(scratch_all);
+        goto cleanup_and_fallback;
+    }
+    {
+        int ap = 0;
+        for (int e = 0; e < num_experts; e++) {
+            if (tokens_per_expert_count[e] > 0) active_eids[ap++] = e;
         }
     }
 
-    free(X_sub); free(gate_out); free(up_out); free(down_out);
+    /* Process active experts in waves of n_workers. Each worker owns one
+     * expert per wave and scatters into its private output buffer. */
+    moe_batch_expert_task_t tasks[TQ_TP_MAX];
+    void* task_ptrs[TQ_TP_MAX];
+
+    for (int wave_start = 0; wave_start < n_active_experts; wave_start += n_workers) {
+        int wave_end = wave_start + n_workers;
+        if (wave_end > n_active_experts) wave_end = n_active_experts;
+        int wave_count = wave_end - wave_start;
+
+        for (int w = 0; w < wave_count; w++) {
+            int eid = active_eids[wave_start + w];
+            float* base = scratch_all + (size_t)w * per_worker_total;
+            tasks[w].layer = layer;
+            tasks[w].config = config;
+            tasks[w].hidden = hidden;
+            tasks[w].N_total = N;
+            tasks[w].hidden_dim = hidden_dim;
+            tasks[w].expert_dim = expert_dim;
+            tasks[w].eid = eid;
+            tasks[w].M_e = tokens_per_expert_count[eid];
+            tasks[w].tokens_idx = tokens_per_expert_idx[eid];
+            tasks[w].tokens_w = tokens_per_expert_w[eid];
+            tasks[w].exp_scale = (layer->expert_scale) ? layer->expert_scale[eid] : 1.0f;
+            tasks[w].activation_fn = activation_fn;
+            tasks[w].X_sub    = base + 0;
+            tasks[w].gate_out = base + (size_t)max_M_cap * hidden_dim;
+            tasks[w].up_out   = base + (size_t)max_M_cap * hidden_dim
+                                     + (size_t)max_M_cap * expert_dim;
+            tasks[w].down_out = base + (size_t)max_M_cap * hidden_dim
+                                     + 2 * (size_t)max_M_cap * expert_dim;
+            /* Worker 0 scatters directly into shared output (skip memset+reduce). */
+            tasks[w].output_private = (w == 0) ? output : (base + per_worker_scratch);
+            task_ptrs[w] = &tasks[w];
+        }
+
+        if (wave_count == 1) {
+            /* Serial: run directly on this thread. */
+            moe_batch_expert_worker(task_ptrs[0]);
+        } else {
+            tq_tp_run(moe_batch_expert_worker, task_ptrs, wave_count);
+        }
+    }
+
+    /* Reduce per-worker outputs into the shared output, serially.
+     * Each worker accumulated different tokens' contributions; we simply
+     * sum them (float add is commutative-associative up to rounding).
+     * Worker 0 wrote directly into `output` so we skip it. */
+    for (int w = 1; w < n_workers; w++) {
+        float* base = scratch_all + (size_t)w * per_worker_total;
+        const float* priv_out = base + per_worker_scratch;
+#if TQ_MOE_HAS_NEON
+        size_t total = (size_t)N * hidden_dim;
+        size_t i = 0;
+        for (; i + 15 < total; i += 16) {
+            float32x4_t a0 = vld1q_f32(output + i + 0);
+            float32x4_t a1 = vld1q_f32(output + i + 4);
+            float32x4_t a2 = vld1q_f32(output + i + 8);
+            float32x4_t a3 = vld1q_f32(output + i + 12);
+            float32x4_t b0 = vld1q_f32(priv_out + i + 0);
+            float32x4_t b1 = vld1q_f32(priv_out + i + 4);
+            float32x4_t b2 = vld1q_f32(priv_out + i + 8);
+            float32x4_t b3 = vld1q_f32(priv_out + i + 12);
+            vst1q_f32(output + i + 0,  vaddq_f32(a0, b0));
+            vst1q_f32(output + i + 4,  vaddq_f32(a1, b1));
+            vst1q_f32(output + i + 8,  vaddq_f32(a2, b2));
+            vst1q_f32(output + i + 12, vaddq_f32(a3, b3));
+        }
+        for (; i < total; i++) output[i] += priv_out[i];
+#else
+        size_t total = (size_t)N * hidden_dim;
+        for (size_t i = 0; i < total; i++) output[i] += priv_out[i];
+#endif
+    }
+
+    free(active_eids);
+    free(scratch_all);
 
     /* Shared expert: always-active, per-token. Runs on each token. */
     if (config->has_shared_expert) {

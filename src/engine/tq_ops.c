@@ -1331,6 +1331,10 @@ void tq_batched_matmul_q8_0(float* out, const void* w_blocks,
     if (n_threads > n_rows) n_threads = n_rows;
     if (n_threads > TP_MAX)  n_threads = TP_MAX;
     if (n_threads < 1)       n_threads = 1;
+    /* Nested pool protection: if a caller already holds the pool (e.g.
+     * cross-expert parallel MoE worker), force single-threaded here. */
+    extern __thread int tq_tls_force_serial_matmul;
+    if (tq_tls_force_serial_matmul) n_threads = 1;
 
     bm_q8_task_t tasks[TP_MAX];
     void* ptrs[TP_MAX];
@@ -1411,6 +1415,12 @@ void tq_batched_matmul_q4(float* out, const uint8_t* w_qs, const float* w_scales
     if (n_threads > n_rows) n_threads = n_rows;
     if (n_threads > TP_MAX)  n_threads = TP_MAX;
     if (n_threads < 1)       n_threads = 1;
+    /* Nested pool protection: if a caller already holds the pool (e.g.
+     * cross-expert parallel MoE worker), force single-threaded here. */
+    {
+        extern __thread int tq_tls_force_serial_matmul;
+        if (tq_tls_force_serial_matmul) n_threads = 1;
+    }
 
     bm_q4_task_t tasks[TP_MAX];
     void* ptrs[TP_MAX];
