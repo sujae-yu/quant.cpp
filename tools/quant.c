@@ -197,6 +197,8 @@ int main(int argc, char** argv) {
     int max_tokens = 256;
     float temperature = 0.7f;
     float top_p = 0.9f;
+    float rep_penalty = -1.0f;  /* -1 = use engine default (1.1) */
+    int   rep_window = -1;
     tq_type kv_type = TQ_TYPE_TURBO_KV_4B;
     /* Default: P-core count on macOS, total core count elsewhere.
      * On Apple Silicon, mixing P+E cores at the same priority makes
@@ -264,6 +266,11 @@ int main(int argc, char** argv) {
             temperature = (float)atof(argv[++i]);
         } else if (strcmp(argv[i], "-P") == 0 && i + 1 < argc) {
             top_p = (float)atof(argv[++i]);
+        } else if ((strcmp(argv[i], "--rep-penalty") == 0 ||
+                    strcmp(argv[i], "--repeat-penalty") == 0) && i + 1 < argc) {
+            rep_penalty = (float)atof(argv[++i]);
+        } else if (strcmp(argv[i], "--rep-window") == 0 && i + 1 < argc) {
+            rep_window = atoi(argv[++i]);
         } else if (strcmp(argv[i], "-k") == 0 && i + 1 < argc) {
             kv_type = parse_kv_type(argv[++i]);
         } else if (strcmp(argv[i], "-v") == 0 && i + 1 < argc) {
@@ -1357,6 +1364,8 @@ int main(int argc, char** argv) {
     tq_gen_config_t config = tq_default_gen_config();
     config.temperature = temperature;
     config.top_p = top_p;
+    if (rep_penalty >= 0.0f) config.rep_penalty = rep_penalty;
+    if (rep_window  >= 0)    config.rep_window  = rep_window;
     config.max_tokens = max_tokens;
     config.kv_type = kv_type;
     config.value_quant_bits = value_quant_bits;
