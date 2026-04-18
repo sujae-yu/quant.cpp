@@ -3390,7 +3390,178 @@ typedef struct {
     size_t row_bytes; int n_blocks; int start_row; int end_row;
 } q8_int_task_t;
 
+/* v2: 2-block unroll + vector FMA accumulator.
+ *
+ * Prior kernel added to a scalar `row_sum` float each block — that's a 3-cycle
+ * FMA latency chain roughly n_blocks deep. For Qwen3.6 with dim=2048 → 64
+ * blocks per row → 192 cycles of latency per row on M1 P-core before the
+ * result is available, so the actual throughput is latency-bound even though
+ * vdotq_s32 itself can pipeline.
+ *
+ * Fix: keep the partial sum in a float32x4_t, accumulate via vfmaq_n_f32
+ * (vector += vector × scalar). That lifts the dependency chain into a
+ * 4-lane vector; lanes reduce to scalar only once at the end of the row.
+ * Combined with 2-block unrolling (distinct vsum0a / vsum0b accumulators),
+ * the per-row chain depth halves while issuing 2 vdotq per cycle.
+ *
+ * Env: TQ_Q8_V1=1 reverts to the original worker (for A/B). */
+static void* q8_int_dot_worker_v2(void* arg) {
+    q8_int_task_t* t = (q8_int_task_t*)arg;
+    int d = t->start_row;
+
+    for (; d + 1 < t->end_row; d += 2) {
+        const block_q8_0* w0 = (const block_q8_0*)((const uint8_t*)t->weight + (size_t)d       * t->row_bytes);
+        const block_q8_0* w1 = (const block_q8_0*)((const uint8_t*)t->weight + (size_t)(d + 1) * t->row_bytes);
+        if (d + 2 < t->end_row) {
+            const uint8_t* next = (const uint8_t*)t->weight + (size_t)(d + 2) * t->row_bytes;
+            __builtin_prefetch(next +   0, 0, 0);
+            __builtin_prefetch(next +  64, 0, 0);
+            __builtin_prefetch(next + 128, 0, 0);
+            __builtin_prefetch(next + 192, 0, 0);
+        }
+
+        /* Dual accumulators per row (block_even / block_odd) to break the
+         * FMA dependency chain. Reduced to scalar at the end of the row. */
+        float32x4_t vsum0a = vdupq_n_f32(0.0f);
+        float32x4_t vsum0b = vdupq_n_f32(0.0f);
+        float32x4_t vsum1a = vdupq_n_f32(0.0f);
+        float32x4_t vsum1b = vdupq_n_f32(0.0f);
+
+        int b = 0;
+        for (; b + 1 < t->n_blocks; b += 2) {
+            /* block b (even) */
+            const int8_t* xqs_b = t->x_qs + b * 32;
+            int8x16_t xq0_b = vld1q_s8(xqs_b +  0);
+            int8x16_t xq1_b = vld1q_s8(xqs_b + 16);
+#ifdef __ARM_FEATURE_DOTPROD
+            int32x4_t vd0_b = vdotq_s32(vdupq_n_s32(0), vld1q_s8(w0[b].qs +  0), xq0_b);
+            vd0_b = vdotq_s32(vd0_b, vld1q_s8(w0[b].qs + 16), xq1_b);
+            int32x4_t vd1_b = vdotq_s32(vdupq_n_s32(0), vld1q_s8(w1[b].qs +  0), xq0_b);
+            vd1_b = vdotq_s32(vd1_b, vld1q_s8(w1[b].qs + 16), xq1_b);
+#else
+            int32x4_t vd0a = vdupq_n_s32(0), vd0bz = vdupq_n_s32(0);
+            int32x4_t vd1a = vdupq_n_s32(0), vd1bz = vdupq_n_s32(0);
+            int8x16_t vw0_a = vld1q_s8(w0[b].qs +  0);
+            int8x16_t vw0_b = vld1q_s8(w0[b].qs + 16);
+            int8x16_t vw1_a = vld1q_s8(w1[b].qs +  0);
+            int8x16_t vw1_b = vld1q_s8(w1[b].qs + 16);
+            vd0a = vpadalq_s16(vd0a, vmull_s8(vget_low_s8(vw0_a),  vget_low_s8(xq0_b)));
+            vd0a = vpadalq_s16(vd0a, vmull_s8(vget_high_s8(vw0_a), vget_high_s8(xq0_b)));
+            vd0bz = vpadalq_s16(vd0bz, vmull_s8(vget_low_s8(vw0_b),  vget_low_s8(xq1_b)));
+            vd0bz = vpadalq_s16(vd0bz, vmull_s8(vget_high_s8(vw0_b), vget_high_s8(xq1_b)));
+            vd1a = vpadalq_s16(vd1a, vmull_s8(vget_low_s8(vw1_a),  vget_low_s8(xq0_b)));
+            vd1a = vpadalq_s16(vd1a, vmull_s8(vget_high_s8(vw1_a), vget_high_s8(xq0_b)));
+            vd1bz = vpadalq_s16(vd1bz, vmull_s8(vget_low_s8(vw1_b),  vget_low_s8(xq1_b)));
+            vd1bz = vpadalq_s16(vd1bz, vmull_s8(vget_high_s8(vw1_b), vget_high_s8(xq1_b)));
+            int32x4_t vd0_b = vaddq_s32(vd0a, vd0bz);
+            int32x4_t vd1_b = vaddq_s32(vd1a, vd1bz);
+#endif
+            float scale0_b = fp16_to_fp32(w0[b].d) * t->x_ds[b];
+            float scale1_b = fp16_to_fp32(w1[b].d) * t->x_ds[b];
+            vsum0a = vfmaq_n_f32(vsum0a, vcvtq_f32_s32(vd0_b), scale0_b);
+            vsum1a = vfmaq_n_f32(vsum1a, vcvtq_f32_s32(vd1_b), scale1_b);
+
+            /* block b+1 (odd) — independent accumulators */
+            const int8_t* xqs_c = t->x_qs + (b + 1) * 32;
+            int8x16_t xq0_c = vld1q_s8(xqs_c +  0);
+            int8x16_t xq1_c = vld1q_s8(xqs_c + 16);
+#ifdef __ARM_FEATURE_DOTPROD
+            int32x4_t vd0_c = vdotq_s32(vdupq_n_s32(0), vld1q_s8(w0[b + 1].qs +  0), xq0_c);
+            vd0_c = vdotq_s32(vd0_c, vld1q_s8(w0[b + 1].qs + 16), xq1_c);
+            int32x4_t vd1_c = vdotq_s32(vdupq_n_s32(0), vld1q_s8(w1[b + 1].qs +  0), xq0_c);
+            vd1_c = vdotq_s32(vd1_c, vld1q_s8(w1[b + 1].qs + 16), xq1_c);
+#else
+            int32x4_t vd0ca = vdupq_n_s32(0), vd0cb = vdupq_n_s32(0);
+            int32x4_t vd1ca = vdupq_n_s32(0), vd1cb = vdupq_n_s32(0);
+            int8x16_t vw0c_a = vld1q_s8(w0[b + 1].qs +  0);
+            int8x16_t vw0c_b = vld1q_s8(w0[b + 1].qs + 16);
+            int8x16_t vw1c_a = vld1q_s8(w1[b + 1].qs +  0);
+            int8x16_t vw1c_b = vld1q_s8(w1[b + 1].qs + 16);
+            vd0ca = vpadalq_s16(vd0ca, vmull_s8(vget_low_s8(vw0c_a),  vget_low_s8(xq0_c)));
+            vd0ca = vpadalq_s16(vd0ca, vmull_s8(vget_high_s8(vw0c_a), vget_high_s8(xq0_c)));
+            vd0cb = vpadalq_s16(vd0cb, vmull_s8(vget_low_s8(vw0c_b),  vget_low_s8(xq1_c)));
+            vd0cb = vpadalq_s16(vd0cb, vmull_s8(vget_high_s8(vw0c_b), vget_high_s8(xq1_c)));
+            vd1ca = vpadalq_s16(vd1ca, vmull_s8(vget_low_s8(vw1c_a),  vget_low_s8(xq0_c)));
+            vd1ca = vpadalq_s16(vd1ca, vmull_s8(vget_high_s8(vw1c_a), vget_high_s8(xq0_c)));
+            vd1cb = vpadalq_s16(vd1cb, vmull_s8(vget_low_s8(vw1c_b),  vget_low_s8(xq1_c)));
+            vd1cb = vpadalq_s16(vd1cb, vmull_s8(vget_high_s8(vw1c_b), vget_high_s8(xq1_c)));
+            int32x4_t vd0_c = vaddq_s32(vd0ca, vd0cb);
+            int32x4_t vd1_c = vaddq_s32(vd1ca, vd1cb);
+#endif
+            float scale0_c = fp16_to_fp32(w0[b + 1].d) * t->x_ds[b + 1];
+            float scale1_c = fp16_to_fp32(w1[b + 1].d) * t->x_ds[b + 1];
+            vsum0b = vfmaq_n_f32(vsum0b, vcvtq_f32_s32(vd0_c), scale0_c);
+            vsum1b = vfmaq_n_f32(vsum1b, vcvtq_f32_s32(vd1_c), scale1_c);
+        }
+        /* Odd remaining block */
+        for (; b < t->n_blocks; b++) {
+            const int8_t* xqs = t->x_qs + b * 32;
+            int8x16_t xq0 = vld1q_s8(xqs +  0);
+            int8x16_t xq1 = vld1q_s8(xqs + 16);
+#ifdef __ARM_FEATURE_DOTPROD
+            int32x4_t vd0 = vdotq_s32(vdupq_n_s32(0), vld1q_s8(w0[b].qs +  0), xq0);
+            vd0 = vdotq_s32(vd0, vld1q_s8(w0[b].qs + 16), xq1);
+            int32x4_t vd1 = vdotq_s32(vdupq_n_s32(0), vld1q_s8(w1[b].qs +  0), xq0);
+            vd1 = vdotq_s32(vd1, vld1q_s8(w1[b].qs + 16), xq1);
+#else
+            int32x4_t vd0a = vdupq_n_s32(0), vd0b = vdupq_n_s32(0);
+            int32x4_t vd1a = vdupq_n_s32(0), vd1b = vdupq_n_s32(0);
+            int8x16_t vw0_lo = vld1q_s8(w0[b].qs +  0);
+            int8x16_t vw0_hi = vld1q_s8(w0[b].qs + 16);
+            int8x16_t vw1_lo = vld1q_s8(w1[b].qs +  0);
+            int8x16_t vw1_hi = vld1q_s8(w1[b].qs + 16);
+            vd0a = vpadalq_s16(vd0a, vmull_s8(vget_low_s8(vw0_lo),  vget_low_s8(xq0)));
+            vd0a = vpadalq_s16(vd0a, vmull_s8(vget_high_s8(vw0_lo), vget_high_s8(xq0)));
+            vd0b = vpadalq_s16(vd0b, vmull_s8(vget_low_s8(vw0_hi),  vget_low_s8(xq1)));
+            vd0b = vpadalq_s16(vd0b, vmull_s8(vget_high_s8(vw0_hi), vget_high_s8(xq1)));
+            vd1a = vpadalq_s16(vd1a, vmull_s8(vget_low_s8(vw1_lo),  vget_low_s8(xq0)));
+            vd1a = vpadalq_s16(vd1a, vmull_s8(vget_high_s8(vw1_lo), vget_high_s8(xq0)));
+            vd1b = vpadalq_s16(vd1b, vmull_s8(vget_low_s8(vw1_hi),  vget_low_s8(xq1)));
+            vd1b = vpadalq_s16(vd1b, vmull_s8(vget_high_s8(vw1_hi), vget_high_s8(xq1)));
+            int32x4_t vd0 = vaddq_s32(vd0a, vd0b);
+            int32x4_t vd1 = vaddq_s32(vd1a, vd1b);
+#endif
+            float scale0 = fp16_to_fp32(w0[b].d) * t->x_ds[b];
+            float scale1 = fp16_to_fp32(w1[b].d) * t->x_ds[b];
+            vsum0a = vfmaq_n_f32(vsum0a, vcvtq_f32_s32(vd0), scale0);
+            vsum1a = vfmaq_n_f32(vsum1a, vcvtq_f32_s32(vd1), scale1);
+        }
+        /* Combine dual accumulators then horizontal reduce */
+        t->out[d]     = vaddvq_f32(vaddq_f32(vsum0a, vsum0b));
+        t->out[d + 1] = vaddvq_f32(vaddq_f32(vsum1a, vsum1b));
+    }
+    /* Tail: single row */
+    for (; d < t->end_row; d++) {
+        const block_q8_0* wblk = (const block_q8_0*)((const uint8_t*)t->weight + (size_t)d * t->row_bytes);
+        float32x4_t vsum = vdupq_n_f32(0.0f);
+        for (int b = 0; b < t->n_blocks; b++) {
+            const int8_t* xqs = t->x_qs + b * 32;
+#ifdef __ARM_FEATURE_DOTPROD
+            int32x4_t vd = vdotq_s32(vdupq_n_s32(0), vld1q_s8(wblk[b].qs +  0), vld1q_s8(xqs +  0));
+            vd = vdotq_s32(vd, vld1q_s8(wblk[b].qs + 16), vld1q_s8(xqs + 16));
+#else
+            int32x4_t vd0 = vdupq_n_s32(0), vd1 = vdupq_n_s32(0);
+            for (int j = 0; j < 32; j += 16) {
+                int8x16_t vw = vld1q_s8(wblk[b].qs + j);
+                int8x16_t vx = vld1q_s8(xqs + j);
+                vd0 = vpadalq_s16(vd0, vmull_s8(vget_low_s8(vw), vget_low_s8(vx)));
+                vd1 = vpadalq_s16(vd1, vmull_s8(vget_high_s8(vw), vget_high_s8(vx)));
+            }
+            int32x4_t vd = vaddq_s32(vd0, vd1);
+#endif
+            float scale = fp16_to_fp32(wblk[b].d) * t->x_ds[b];
+            vsum = vfmaq_n_f32(vsum, vcvtq_f32_s32(vd), scale);
+        }
+        t->out[d] = vaddvq_f32(vsum);
+    }
+    return NULL;
+}
+
 void* q8_int_dot_worker(void* arg) {
+    /* v1 stays as the A/B fallback under TQ_Q8_V1. v2 is the new default. */
+    if (!getenv("TQ_Q8_V1")) {
+        return q8_int_dot_worker_v2(arg);
+    }
     q8_int_task_t* t = (q8_int_task_t*)arg;
     int d = t->start_row;
     /* 2-row inner loop: pair rows share x_qs / x_ds. ILP hides weight load
