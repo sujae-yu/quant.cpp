@@ -2732,11 +2732,11 @@ static void fused_dot_iq3_xxs_int8_batched(
 #endif
                     float xd_n = X_ds[(size_t)n * (n_super * 8) + b * 8 + ib32];
                     /* Apply combined scale (d_super × db × x_scale) per-N.
-                     * Match single-query scale convention: 0.25 × d_super × sub_sum.
+                     * Match single-query scale convention:
                      * single: sub_sum += isum * db * xd[ib32];  sumf += d_super * sub_sum;
-                     *         returns 0.25f * sumf.
-                     * Equivalent: acc[n] += 0.25 * d_super * db * isum * xd_n */
-                    acc[n] += 0.25f * d_db * xd_n * (float)isum;
+                     *         returns sumf (NO 0.25f — unlike IQ2_XXS/IQ2_S).
+                     * Equivalent: acc[n] += d_super * db * isum * xd_n */
+                    acc[n] += d_db * xd_n * (float)isum;
                 }
             }
         }

@@ -798,12 +798,42 @@ void* expert_parallel_worker(void* arg) {
  * Full MoE FFN forward pass
  * ============================================================ */
 
+/* Forward decl for self-test wrapper */
+void tq_moe_forward_batch(const tq_moe_layer_t* layer,
+                          const tq_moe_config_t* config,
+                          tq_moe_state_t* state,
+                          const float* hidden, float* output,
+                          int N, int hidden_dim, int layer_idx);
+
 void tq_moe_forward(const tq_moe_layer_t* layer,
                     const tq_moe_config_t* config,
                     tq_moe_state_t* state,
                     const float* input, float* output,
                     int hidden_dim, int layer_idx)
 {
+    /* TQ_MOE_BATCH_SELFTEST=1: route this single-token call through the
+     * batched path (N=1). Activates the new code on every MoE invocation
+     * during decode/prefill for correctness validation. Adds modest
+     * overhead but ensures regression picks up any divergence. */
+    static int selftest_checked = 0;
+    static int selftest_enabled = 0;
+    if (!selftest_checked) {
+        selftest_enabled = getenv("TQ_MOE_BATCH_SELFTEST") != NULL;
+        selftest_checked = 1;
+    }
+    if (selftest_enabled && !state->routing_precomputed) {
+        /* Must NOT recurse — clear the flag while calling the batched path. */
+        static __thread int in_selftest = 0;
+        if (!in_selftest) {
+            in_selftest = 1;
+            memset(output, 0, (size_t)hidden_dim * sizeof(float));
+            tq_moe_forward_batch(layer, config, state, input, output,
+                                 1, hidden_dim, layer_idx);
+            in_selftest = 0;
+            return;
+        }
+    }
+
     int num_active = config->num_active;
     int expert_dim = config->expert_intermediate_dim;
 
@@ -1335,16 +1365,11 @@ static int moe_batched_dispatch(
     if (M_e > 64) return -1; /* kernel safety cap */
     if (in_dim % 256 != 0) return -1;
 
-    if (wt == TQ_GGML_TYPE_IQ3_XXS) {
-        return tq_batched_matmul_iq3_xxs(out, w, x, out_dim, in_dim, M_e);
-    } else if (wt == TQ_GGML_TYPE_IQ3_S) {
-        return tq_batched_matmul_iq3_s(out, w, x, out_dim, in_dim, M_e);
-    } else if (wt == TQ_GGML_TYPE_IQ4_XS) {
-        return tq_batched_matmul_iq4_xs(out, w, x, out_dim, in_dim, M_e);
-    } else if (wt == TQ_GGML_TYPE_Q8_0) {
-        tq_batched_matmul_q8_0(out, w, x, out_dim, in_dim, M_e);
-        return 0;
-    }
+    /* TEMPORARY: All batched kernels disabled — using per-row fallback for
+     * correctness validation. The static batched kernels have numerical
+     * differences vs their single-query counterparts that need investigation
+     * before enabling. */
+    (void)wt; (void)w;
     return -1;
 }
 
