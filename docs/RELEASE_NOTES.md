@@ -6,6 +6,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v0.14.2] — 2026-04-18 evening (RoPE + SwiGLU NEON cleanups)
+
+### Highlights
+
+Two structural perf fixes discovered in the post-Q3 profile. Neither is a headline speedup on its own (Qwen3.6 decode is weight-read-bound), but both lower the instruction-level ceiling for any future fusion / pipelining work.
+
+### Added
+- **RoPE TLS sin/cos cache** (`src/engine/tq_transformer.c`, partial-rotary branch). Keyed on `(pos, rope_base, rope_dim)` — those are identical across all heads and all layers in one forward pass on models with `partial_rotary_factor` (every Qwen 3.x model). First layer pays `powf + cosf + sinf` per pair; remaining ~179 head-layer combinations do array reads. ~180× reduction in libc transcendental calls per token on Qwen3.6.
+- **`fast_exp_neon`** — lifts the Schraudolph bit-twiddle exp into a single NEON FMA + `vcvtq_s32_f32` + reinterpret, replacing the per-lane scalar round-trip in `swiglu_fused`. Halves the instruction count in the 8-element SwiGLU tile.
+
+### Regression
+`scripts/test_models.sh`: 12/12 PASS.
+
+### Commits
+`b4d7807` (RoPE cache), `d4c0fc6` (SwiGLU NEON).
+
+---
+
 ## [v0.14.1] — 2026-04-18 (Q3 breakthrough)
 
 ### Highlights
