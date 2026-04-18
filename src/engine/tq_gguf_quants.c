@@ -2426,6 +2426,114 @@ static float fused_dot_iq3_xxs_int8(const void* row, const int8_t* x_qs,
     return sumf;
 }
 
+/* ============================================================
+ * IQ3_XXS × int8 BATCHED dot — Mission A Step 3 core kernel.
+ *
+ * Shape: out[N, out_dim] = X[N, in_dim] @ W[out_dim, in_dim]^T
+ * where W is block_iq3_xxs_gguf (98 bytes per 256 elements).
+ *
+ * The key optimization vs calling fused_dot_iq3_xxs_int8 N times:
+ *   For each (output_row, block), unpack the 32 signed int8 weights ONCE,
+ *   then dot them against all N batched activations. This amortizes the
+ *   grid lookup + sign application across the batch dim.
+ *
+ * Expected speedup at N≥8: ≥ 3× on the IQ3_XXS compute path (most of
+ * Qwen3.6 MoE expert cost). Mission A Step 3 core.
+ * ============================================================ */
+#if TQ_HAS_NEON
+static void fused_dot_iq3_xxs_int8_batched(
+    float* out,              /* [N, n_rows] row-major */
+    const void* weight,      /* block_iq3_xxs_gguf array, n_rows × 98 × n_super */
+    size_t row_bytes,        /* = n_super × 98 */
+    int out_row_stride_n,    /* = n_rows (for indexing out[n*n_rows + d]) */
+    const int8_t* X_qs,      /* [N, n_super × 256] int8 */
+    const float* X_ds,       /* [N, n_super × 8] fp32 scales */
+    int start_row, int end_row,
+    int n_super, int N)
+{
+    const uint8x8_t vbit_masks = vld1_u8(iq3s_neon_bit_masks);
+
+    for (int d = start_row; d < end_row; d++) {
+        const uint8_t* base = (const uint8_t*)weight + (size_t)d * row_bytes;
+
+        /* Per-batch float accumulator across blocks */
+        float acc[64];
+        if (N > 64) return;  /* safety cap */
+        memset(acc, 0, (size_t)N * sizeof(float));
+
+        for (int b = 0; b < n_super; b++) {
+            const uint8_t* blk = base + (size_t)b * 98;
+            if (b + 1 < n_super) {
+                __builtin_prefetch(blk + 98, 0, 3);
+                __builtin_prefetch(blk + 98 + 64, 0, 3);
+            }
+            uint16_t d_raw;
+            memcpy(&d_raw, blk, 2);
+            float d_super = fp16_to_fp32(d_raw);
+            const uint8_t* qs = blk + 2;
+            const uint8_t* scales_and_signs = qs + 64;
+
+            for (int ib32 = 0; ib32 < 8; ib32++) {
+                uint32_t aux32;
+                memcpy(&aux32, scales_and_signs + 4 * ib32, sizeof(uint32_t));
+                const float db = (0.5f + (float)(aux32 >> 28)) * 0.5f;
+
+                /* Build 32 signed int8 weights — N-invariant (compute once). */
+                uint32_t g[8];
+                for (int l = 0; l < 4; l++) {
+                    g[2*l + 0] = iq3xxs_grid[qs[2*l + 0]];
+                    g[2*l + 1] = iq3xxs_grid[qs[2*l + 1]];
+                }
+                uint8_t s0 = ksigns_iq2xs[(aux32 >> (7 * 0)) & 127];
+                uint8_t s1 = ksigns_iq2xs[(aux32 >> (7 * 1)) & 127];
+                uint8_t s2 = ksigns_iq2xs[(aux32 >> (7 * 2)) & 127];
+                uint8_t s3 = ksigns_iq2xs[(aux32 >> (7 * 3)) & 127];
+
+                int8x8_t w0 = iq3s_build8(g[0], g[1], s0, vbit_masks);
+                int8x8_t w1 = iq3s_build8(g[2], g[3], s1, vbit_masks);
+                int8x8_t w2 = iq3s_build8(g[4], g[5], s2, vbit_masks);
+                int8x8_t w3 = iq3s_build8(g[6], g[7], s3, vbit_masks);
+                int8x16_t vw_lo = vcombine_s8(w0, w1);
+                int8x16_t vw_hi = vcombine_s8(w2, w3);
+
+                /* Inner batch loop — reuses the unpacked weight across N activations */
+                const float d_db = d_super * db;  /* combined super-scale × sub-scale */
+                for (int n = 0; n < N; n++) {
+                    const int8_t* xb_n = X_qs + (size_t)n * (n_super * 256) + b * 256 + ib32 * 32;
+                    int8x16_t vx_lo = vld1q_s8(xb_n +  0);
+                    int8x16_t vx_hi = vld1q_s8(xb_n + 16);
+
+#ifdef __ARM_FEATURE_DOTPROD
+                    int32x4_t vacc = vdotq_s32(vdupq_n_s32(0), vw_lo, vx_lo);
+                    vacc = vdotq_s32(vacc, vw_hi, vx_hi);
+                    int32_t isum = vaddvq_s32(vacc);
+#else
+                    int16x8_t pa = vmull_s8(vget_low_s8(vw_lo),  vget_low_s8(vx_lo));
+                    int16x8_t pb = vmull_s8(vget_high_s8(vw_lo), vget_high_s8(vx_lo));
+                    int16x8_t pc = vmull_s8(vget_low_s8(vw_hi),  vget_low_s8(vx_hi));
+                    int16x8_t pd = vmull_s8(vget_high_s8(vw_hi), vget_high_s8(vx_hi));
+                    int32x4_t vacc = vpaddlq_s16(vaddq_s16(vaddq_s16(pa, pb), vaddq_s16(pc, pd)));
+                    int32_t isum = vaddvq_s32(vacc);
+#endif
+                    float xd_n = X_ds[(size_t)n * (n_super * 8) + b * 8 + ib32];
+                    /* Apply combined scale (d_super × db × x_scale) per-N.
+                     * Match single-query scale convention: 0.25 × d_super × sub_sum.
+                     * single: sub_sum += isum * db * xd[ib32];  sumf += d_super * sub_sum;
+                     *         returns 0.25f * sumf.
+                     * Equivalent: acc[n] += 0.25 * d_super * db * isum * xd_n */
+                    acc[n] += 0.25f * d_db * xd_n * (float)isum;
+                }
+            }
+        }
+
+        /* Store results row-wise */
+        for (int n = 0; n < N; n++) {
+            out[(size_t)n * out_row_stride_n + d] = acc[n];
+        }
+    }
+}
+#endif
+
 typedef struct {
     float* out; const void* weight; const int8_t* x_qs;
     const float* x_ds; size_t row_bytes; int in_dim;
