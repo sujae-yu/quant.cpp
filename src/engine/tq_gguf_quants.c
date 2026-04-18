@@ -1389,6 +1389,141 @@ static float fused_dot_iq3_s_int8(const void* row, const int8_t* x_qs,
     return sumf;
 }
 
+/* ============================================================
+ * IQ3_S × int8 BATCHED dot — Mission A Step 3b.
+ *
+ * Same pattern as IQ3_XXS batched (Step 3a): amortize the per-block
+ * weight unpack (grid + signs) across N activations. IQ3_S is 19% of
+ * Qwen3.6 prefill compute per profile 2026-04-18.
+ *
+ * Block layout: 110 bytes per 256 elems (see block_iq3_s_t struct).
+ * Inner structure: 8 sub-blocks × 2 qh halves × 4 l-iters × 2 grids
+ * — but cache hot weight-unpack vectors across the N loop.
+ * ============================================================ */
+#if TQ_HAS_NEON
+static void fused_dot_iq3_s_int8_batched(
+    float* out,              /* [N, n_rows] row-major */
+    const void* weight,      /* block_iq3_s_t array, n_rows × n_super × 110 */
+    size_t row_bytes,        /* = n_super × sizeof(block_iq3_s_t) */
+    int out_row_stride_n,
+    const int8_t* X_qs,      /* [N, n_super × 256] int8 */
+    const float* X_ds,       /* [N, n_super × 8] */
+    int start_row, int end_row,
+    int n_super, int N)
+{
+    const uint8x8_t vbit_masks = vld1_u8(iq3s_neon_bit_masks);
+
+    for (int d = start_row; d < end_row; d++) {
+        const uint8_t* base = (const uint8_t*)weight + (size_t)d * row_bytes;
+
+        float acc[64];
+        if (N > 64) return;
+        memset(acc, 0, (size_t)N * sizeof(float));
+
+        for (int b = 0; b < n_super; b++) {
+            const block_iq3_s_t* blk = (const block_iq3_s_t*)(base + (size_t)b * sizeof(block_iq3_s_t));
+            if (b + 1 < n_super) {
+                __builtin_prefetch((const uint8_t*)blk + 110, 0, 3);
+                __builtin_prefetch((const uint8_t*)blk + 110 + 64, 0, 3);
+            }
+            const float d_super = fp16_to_fp32(blk->d);
+            const uint8_t* qs = blk->qs;
+            const uint8_t* qh = blk->qh;
+            const uint8_t* signs = blk->signs;
+
+            /* 8 sub-blocks (4 pairs using qh[0] + qh[1]).
+             * Mirror single-query layout exactly: outer ib32 stride 2, inner 2 halves.
+             * Restructure outer loops per-block, inner loop vectorizes N dim. */
+            for (int ib32 = 0; ib32 < 8; ib32 += 2) {
+                const float db1 = d_super * (1 + 2 * (blk->scales[ib32 / 2] & 0xf));
+                const float db2 = d_super * (1 + 2 * (blk->scales[ib32 / 2] >> 4));
+
+                /* ---- first sub-block of 32 elements (uses qh[0]) ---- */
+                uint32_t g[8];
+                for (int l = 0; l < 4; l++) {
+                    int idx1 = qs[2*l + 0] | ((qh[0] << (8 - 2*l)) & 256);
+                    int idx2 = qs[2*l + 1] | ((qh[0] << (7 - 2*l)) & 256);
+                    g[2*l + 0] = iq3s_grid[idx1];
+                    g[2*l + 1] = iq3s_grid[idx2];
+                }
+                int8x8_t w0 = iq3s_build8(g[0], g[1], signs[0], vbit_masks);
+                int8x8_t w1 = iq3s_build8(g[2], g[3], signs[1], vbit_masks);
+                int8x8_t w2 = iq3s_build8(g[4], g[5], signs[2], vbit_masks);
+                int8x8_t w3 = iq3s_build8(g[6], g[7], signs[3], vbit_masks);
+                int8x16_t vw_lo1 = vcombine_s8(w0, w1);
+                int8x16_t vw_hi1 = vcombine_s8(w2, w3);
+
+                /* Inner N loop for first sub-block */
+                for (int n = 0; n < N; n++) {
+                    const int8_t* xb_n = X_qs + (size_t)n * (n_super * 256) + b * 256 + ib32 * 32;
+                    int8x16_t vx_lo = vld1q_s8(xb_n + 0);
+                    int8x16_t vx_hi = vld1q_s8(xb_n + 16);
+#ifdef __ARM_FEATURE_DOTPROD
+                    int32x4_t vacc = vdotq_s32(vdupq_n_s32(0), vw_lo1, vx_lo);
+                    vacc = vdotq_s32(vacc, vw_hi1, vx_hi);
+                    int32_t isum = vaddvq_s32(vacc);
+#else
+                    int16x8_t pa = vmull_s8(vget_low_s8(vw_lo1), vget_low_s8(vx_lo));
+                    int16x8_t pb = vmull_s8(vget_high_s8(vw_lo1), vget_high_s8(vx_lo));
+                    int16x8_t pc = vmull_s8(vget_low_s8(vw_hi1), vget_low_s8(vx_hi));
+                    int16x8_t pd = vmull_s8(vget_high_s8(vw_hi1), vget_high_s8(vx_hi));
+                    int32x4_t vacc = vpaddlq_s16(vaddq_s16(vaddq_s16(pa, pb), vaddq_s16(pc, pd)));
+                    int32_t isum = vaddvq_s32(vacc);
+#endif
+                    float xd_n = X_ds[(size_t)n * (n_super * 8) + b * 8 + ib32];
+                    acc[n] += (float)isum * db1 * xd_n;
+                }
+
+                /* advance qs & signs pointers for second sub-block */
+                qs += 8;
+                signs += 4;
+
+                /* ---- second sub-block of 32 elements (uses qh[1]) ---- */
+                for (int l = 0; l < 4; l++) {
+                    int idx1 = qs[2*l + 0] | ((qh[1] << (8 - 2*l)) & 256);
+                    int idx2 = qs[2*l + 1] | ((qh[1] << (7 - 2*l)) & 256);
+                    g[2*l + 0] = iq3s_grid[idx1];
+                    g[2*l + 1] = iq3s_grid[idx2];
+                }
+                int8x8_t w0b = iq3s_build8(g[0], g[1], signs[0], vbit_masks);
+                int8x8_t w1b = iq3s_build8(g[2], g[3], signs[1], vbit_masks);
+                int8x8_t w2b = iq3s_build8(g[4], g[5], signs[2], vbit_masks);
+                int8x8_t w3b = iq3s_build8(g[6], g[7], signs[3], vbit_masks);
+                int8x16_t vw_lo2 = vcombine_s8(w0b, w1b);
+                int8x16_t vw_hi2 = vcombine_s8(w2b, w3b);
+
+                for (int n = 0; n < N; n++) {
+                    const int8_t* xb_n = X_qs + (size_t)n * (n_super * 256) + b * 256 + (ib32 + 1) * 32;
+                    int8x16_t vx_lo = vld1q_s8(xb_n + 0);
+                    int8x16_t vx_hi = vld1q_s8(xb_n + 16);
+#ifdef __ARM_FEATURE_DOTPROD
+                    int32x4_t vacc = vdotq_s32(vdupq_n_s32(0), vw_lo2, vx_lo);
+                    vacc = vdotq_s32(vacc, vw_hi2, vx_hi);
+                    int32_t isum = vaddvq_s32(vacc);
+#else
+                    int16x8_t pa = vmull_s8(vget_low_s8(vw_lo2), vget_low_s8(vx_lo));
+                    int16x8_t pb = vmull_s8(vget_high_s8(vw_lo2), vget_high_s8(vx_lo));
+                    int16x8_t pc = vmull_s8(vget_low_s8(vw_hi2), vget_low_s8(vx_hi));
+                    int16x8_t pd = vmull_s8(vget_high_s8(vw_hi2), vget_high_s8(vx_hi));
+                    int32x4_t vacc = vpaddlq_s16(vaddq_s16(vaddq_s16(pa, pb), vaddq_s16(pc, pd)));
+                    int32_t isum = vaddvq_s32(vacc);
+#endif
+                    float xd_n = X_ds[(size_t)n * (n_super * 8) + b * 8 + ib32 + 1];
+                    acc[n] += (float)isum * db2 * xd_n;
+                }
+
+                qs += 8;
+                signs += 4;
+                qh += 2;
+            }
+        }
+        for (int n = 0; n < N; n++) {
+            out[(size_t)n * out_row_stride_n + d] = acc[n];
+        }
+    }
+}
+#endif
+
 typedef struct {
     float* out; const void* weight; const int8_t* x_qs;
     const float* x_ds; size_t row_bytes; int in_dim;
@@ -2289,6 +2424,86 @@ static float fused_dot_iq4_xs_int8(const void* row, const int8_t* x_qs,
     }
     return sumf;
 }
+
+/* ============================================================
+ * IQ4_XS × int8 BATCHED dot — Mission A Step 3c.
+ *
+ * Same amortization pattern. IQ4_XS is simplest of the three because
+ * weight unpack = one vqtbl1q_s8 (TBL-16 lookup of kvalues_iq4nl).
+ * Small share of Qwen3.6 compute (0.9%) but completes the expert
+ * kernel trio (IQ3_XXS + IQ3_S + IQ4_XS = 55.5% of prefill compute).
+ * ============================================================ */
+#if TQ_HAS_NEON
+static void fused_dot_iq4_xs_int8_batched(
+    float* out,
+    const void* weight,
+    size_t row_bytes,
+    int out_row_stride_n,
+    const int8_t* X_qs,
+    const float* X_ds,
+    int start_row, int end_row,
+    int n_super, int N)
+{
+    const int8x16_t vtbl = vld1q_s8(kvalues_iq4nl);
+
+    for (int d = start_row; d < end_row; d++) {
+        const uint8_t* base = (const uint8_t*)weight + (size_t)d * row_bytes;
+
+        float acc[64];
+        if (N > 64) return;
+        memset(acc, 0, (size_t)N * sizeof(float));
+
+        for (int b = 0; b < n_super; b++) {
+            const block_iq4_xs* blk = (const block_iq4_xs*)(base + (size_t)b * sizeof(block_iq4_xs));
+            if (b + 1 < n_super) {
+                __builtin_prefetch((const uint8_t*)blk + 136, 0, 3);
+                __builtin_prefetch((const uint8_t*)blk + 136 + 64, 0, 3);
+            }
+            const float d_super = fp16_to_fp32(blk->d);
+            const uint8_t* qs = blk->qs;
+
+            /* 8 sub-blocks × 32 elems each */
+            for (int ib = 0; ib < 8; ib++) {
+                const int ls = ((blk->scales_l[ib / 2] >> (4 * (ib % 2))) & 0xf)
+                             | (((blk->scales_h >> (2 * ib)) & 3) << 4);
+                const float dl = d_super * (float)(ls - 32);
+
+                /* Unpack weights ONCE for this (row, block, sub-block) */
+                uint8x16_t qs_v = vld1q_u8(qs);
+                uint8x16_t low  = vandq_u8(qs_v, vdupq_n_u8(0x0F));
+                uint8x16_t high = vshrq_n_u8(qs_v, 4);
+                int8x16_t w_lo  = vqtbl1q_s8(vtbl, low);
+                int8x16_t w_hi  = vqtbl1q_s8(vtbl, high);
+
+                /* Inner batch loop */
+                for (int n = 0; n < N; n++) {
+                    const int8_t* xb_n = X_qs + (size_t)n * (n_super * 256) + b * 256 + ib * 32;
+                    int8x16_t vx_lo = vld1q_s8(xb_n +  0);
+                    int8x16_t vx_hi = vld1q_s8(xb_n + 16);
+#ifdef __ARM_FEATURE_DOTPROD
+                    int32x4_t vacc = vdotq_s32(vdupq_n_s32(0), w_lo, vx_lo);
+                    vacc = vdotq_s32(vacc, w_hi, vx_hi);
+                    int32_t isum = vaddvq_s32(vacc);
+#else
+                    int16x8_t pa = vmull_s8(vget_low_s8(w_lo),  vget_low_s8(vx_lo));
+                    int16x8_t pb = vmull_s8(vget_high_s8(w_lo), vget_high_s8(vx_lo));
+                    int16x8_t pc = vmull_s8(vget_low_s8(w_hi),  vget_low_s8(vx_hi));
+                    int16x8_t pd = vmull_s8(vget_high_s8(w_hi), vget_high_s8(vx_hi));
+                    int32x4_t vacc = vpaddlq_s16(vaddq_s16(vaddq_s16(pa, pb), vaddq_s16(pc, pd)));
+                    int32_t isum = vaddvq_s32(vacc);
+#endif
+                    float xd_n = X_ds[(size_t)n * (n_super * 8) + b * 8 + ib];
+                    acc[n] += (float)isum * dl * xd_n;
+                }
+                qs += 16;
+            }
+        }
+        for (int n = 0; n < N; n++) {
+            out[(size_t)n * out_row_stride_n + d] = acc[n];
+        }
+    }
+}
+#endif
 
 typedef struct {
     float* out; const void* weight; const int8_t* x_qs;
