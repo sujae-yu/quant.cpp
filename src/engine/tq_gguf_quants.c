@@ -3252,6 +3252,131 @@ static void* q3_k_int_dot_worker(void* arg) {
     }
     return NULL;
 }
+
+/* Q3_K batched int8 dot: mirrors fused_dot_iq3_xxs_int8_batched shape.
+ * Amortizes 2-bit + hmask unpack + sub-scale decode across N activations. */
+static void fused_dot_q3_k_int8_batched(
+    float* out,              /* [N, n_rows] row-major */
+    const void* weight,      /* block_q3_K array, n_rows × n_super × 110 bytes */
+    size_t row_bytes,        /* = n_super × sizeof(block_q3_K) = n_super × 110 */
+    int out_row_stride_n,    /* = n_rows */
+    const int8_t* X_qs,      /* [N, n_super × 256] int8 */
+    const float* X_ds,       /* [N, n_super × 8] fp32 scales (per-32 quant groups) */
+    int start_row, int end_row,
+    int n_super, int N)
+{
+    const uint32_t kmask1 = 0x03030303;
+    const uint32_t kmask2 = 0x0f0f0f0f;
+    uint32_t aux[4];
+    const int8_t* scales = (const int8_t*)aux;
+
+    for (int d = start_row; d < end_row; d++) {
+        const block_q3_K* blk = (const block_q3_K*)((const uint8_t*)weight + (size_t)d * row_bytes);
+
+        float acc[64];
+        if (N > 64) return;
+        memset(acc, 0, (size_t)N * sizeof(float));
+
+        for (int b = 0; b < n_super; b++) {
+            if (b + 1 < n_super) {
+                __builtin_prefetch((const uint8_t*)&blk[b+1], 0, 3);
+                __builtin_prefetch((const uint8_t*)&blk[b+1] + 64, 0, 3);
+            }
+            const float d_all = fp16_to_fp32(blk[b].d);
+
+            /* Decode 16 × 6-bit sub-block scales */
+            memcpy(aux, blk[b].scales, 12);
+            uint32_t tmp = aux[2];
+            aux[2] = ((aux[0] >> 4) & kmask2) | (((tmp >> 4) & kmask1) << 4);
+            aux[3] = ((aux[1] >> 4) & kmask2) | (((tmp >> 6) & kmask1) << 4);
+            aux[0] = (aux[0] & kmask2) | (((tmp >> 0) & kmask1) << 4);
+            aux[1] = (aux[1] & kmask2) | (((tmp >> 2) & kmask1) << 4);
+
+            const uint8_t* q = blk[b].qs;
+            const uint8_t* hm = blk[b].hmask;
+            int is = 0;
+
+            for (int half = 0; half < 2; half++) {
+                const uint8_t* qh = q + half * 32;
+                uint8x16_t q_a = vld1q_u8(qh + 0);
+                uint8x16_t q_b = vld1q_u8(qh + 16);
+                uint8x16_t hm_a = vld1q_u8(hm + 0);
+                uint8x16_t hm_b = vld1q_u8(hm + 16);
+                uint8_t m_base = (uint8_t)(1 << (half * 4));
+
+                /* Unpack 8 sub-blocks of 16 signed int8 weights each. N-invariant. */
+                int8x16_t w0a = q3k_build16(Q3K_2BIT_S0(q_a), hm_a, m_base << 0);
+                int8x16_t w0b = q3k_build16(Q3K_2BIT_S0(q_b), hm_b, m_base << 0);
+                int8x16_t w1a = q3k_build16(Q3K_2BIT_S2(q_a), hm_a, m_base << 1);
+                int8x16_t w1b = q3k_build16(Q3K_2BIT_S2(q_b), hm_b, m_base << 1);
+                int8x16_t w2a = q3k_build16(Q3K_2BIT_S4(q_a), hm_a, m_base << 2);
+                int8x16_t w2b = q3k_build16(Q3K_2BIT_S4(q_b), hm_b, m_base << 2);
+                int8x16_t w3a = q3k_build16(Q3K_2BIT_S6(q_a), hm_a, m_base << 3);
+                int8x16_t w3b = q3k_build16(Q3K_2BIT_S6(q_b), hm_b, m_base << 3);
+
+                /* Pre-combine sub-block scales (4 pairs per half) */
+                float s0 = (float)(scales[is  ] - 32);
+                float s1 = (float)(scales[is+1] - 32);
+                float s2 = (float)(scales[is+2] - 32);
+                float s3 = (float)(scales[is+3] - 32);
+                float s4 = (float)(scales[is+4] - 32);
+                float s5 = (float)(scales[is+5] - 32);
+                float s6 = (float)(scales[is+6] - 32);
+                float s7 = (float)(scales[is+7] - 32);
+
+                /* Inner batch loop — reuses unpacked weight vectors across N. */
+                for (int n = 0; n < N; n++) {
+                    const int8_t* xh = X_qs + (size_t)n * (n_super * 256)
+                                             + b * 256 + half * 128;
+                    const float*  xd = X_ds + (size_t)n * (n_super * 8) + b * 8;
+
+                    int8x16_t xv0a = vld1q_s8(xh +   0);
+                    int8x16_t xv0b = vld1q_s8(xh +  16);
+                    int8x16_t xv1a = vld1q_s8(xh +  32);
+                    int8x16_t xv1b = vld1q_s8(xh +  48);
+                    int8x16_t xv2a = vld1q_s8(xh +  64);
+                    int8x16_t xv2b = vld1q_s8(xh +  80);
+                    int8x16_t xv3a = vld1q_s8(xh +  96);
+                    int8x16_t xv3b = vld1q_s8(xh + 112);
+
+#ifdef __ARM_FEATURE_DOTPROD
+                    int32_t i0a = vaddvq_s32(vdotq_s32(vdupq_n_s32(0), w0a, xv0a));
+                    int32_t i0b = vaddvq_s32(vdotq_s32(vdupq_n_s32(0), w0b, xv0b));
+                    int32_t i1a = vaddvq_s32(vdotq_s32(vdupq_n_s32(0), w1a, xv1a));
+                    int32_t i1b = vaddvq_s32(vdotq_s32(vdupq_n_s32(0), w1b, xv1b));
+                    int32_t i2a = vaddvq_s32(vdotq_s32(vdupq_n_s32(0), w2a, xv2a));
+                    int32_t i2b = vaddvq_s32(vdotq_s32(vdupq_n_s32(0), w2b, xv2b));
+                    int32_t i3a = vaddvq_s32(vdotq_s32(vdupq_n_s32(0), w3a, xv3a));
+                    int32_t i3b = vaddvq_s32(vdotq_s32(vdupq_n_s32(0), w3b, xv3b));
+#else
+                    #define DOT16_Q3K(w, xp) vaddvq_s32(vpaddlq_s16(vaddq_s16( \
+                        vmull_s8(vget_low_s8(w), vget_low_s8(xp)), \
+                        vmull_s8(vget_high_s8(w), vget_high_s8(xp)))))
+                    int32_t i0a = DOT16_Q3K(w0a, xv0a);
+                    int32_t i0b = DOT16_Q3K(w0b, xv0b);
+                    int32_t i1a = DOT16_Q3K(w1a, xv1a);
+                    int32_t i1b = DOT16_Q3K(w1b, xv1b);
+                    int32_t i2a = DOT16_Q3K(w2a, xv2a);
+                    int32_t i2b = DOT16_Q3K(w2b, xv2b);
+                    int32_t i3a = DOT16_Q3K(w3a, xv3a);
+                    int32_t i3b = DOT16_Q3K(w3b, xv3b);
+                    #undef DOT16_Q3K
+#endif
+                    float block_sum = xd[half*4 + 0] * (s0 * (float)i0a + s1 * (float)i0b)
+                                    + xd[half*4 + 1] * (s2 * (float)i1a + s3 * (float)i1b)
+                                    + xd[half*4 + 2] * (s4 * (float)i2a + s5 * (float)i2b)
+                                    + xd[half*4 + 3] * (s6 * (float)i3a + s7 * (float)i3b);
+                    acc[n] += d_all * block_sum;
+                }
+                is += 8;
+            }
+        }
+
+        for (int n = 0; n < N; n++) {
+            out[(size_t)n * out_row_stride_n + d] = acc[n];
+        }
+    }
+}
 #endif /* TQ_HAS_NEON */
 
 static float fused_dot_q3_k(const void* row, const float* x, int n) {
@@ -5380,6 +5505,29 @@ int tq_batched_matmul_iq4_xs(float* out, const void* weight,
 
     fused_dot_iq4_xs_int8_batched(out, weight, row_bytes, out_dim,
                                   X_qs, X_ds, 0, out_dim, n_super, N);
+    free(X_qs); free(X_ds);
+    return 0;
+#else
+    (void)out; (void)weight; (void)x; (void)out_dim; (void)in_dim; (void)N;
+    return -1;
+#endif
+}
+
+/* ---- Q3_K batched wrapper ----
+ * Exposed via moe_batched_dispatch in tq_moe.c for Q3_K_S routed experts.
+ * Uses per-32 int8 activation quantization (same scheme as IQ3/IQ4 batched). */
+int tq_batched_matmul_q3_k(float* out, const void* weight,
+                            const float* x, int out_dim, int in_dim, int N)
+{
+#if TQ_HAS_NEON
+    if (in_dim < 256 || (in_dim % 256 != 0) || N <= 0 || N > 64) return -1;
+    int8_t* X_qs = NULL; float* X_ds = NULL;
+    if (_quantize_x_batch_i8(x, in_dim, N, &X_qs, &X_ds) != 0) return -1;
+    int n_super = in_dim / 256;
+    size_t row_bytes = (size_t)n_super * sizeof(block_q3_K);
+
+    fused_dot_q3_k_int8_batched(out, weight, row_bytes, out_dim,
+                                 X_qs, X_ds, 0, out_dim, n_super, N);
     free(X_qs); free(X_ds);
     return 0;
 #else
