@@ -1447,14 +1447,35 @@ void tq_rmsnorm(float* out, const float* x, const float* weight, int n, float ep
  * ============================================================ */
 void tq_rope(float* q, float* k, int pos, int head_dim,
              int n_heads, int n_kv_heads, float freq_base) {
+    /* TLS sin/cos cache keyed on (pos, freq_base, head_dim). Identical
+     * across all heads and all layers within one forward pass, so the
+     * first layer computes once and the remaining head-layer combos do
+     * array reads. Same pattern as the partial-rotary path in
+     * tq_transformer.c. */
+    int pairs = head_dim / 2;
+    static __thread float tls_cos[256];
+    static __thread float tls_sin[256];
+    static __thread int   tls_pos = -1;
+    static __thread float tls_base = 0.0f;
+    static __thread int   tls_dim = 0;
+    if (pairs <= 256 &&
+        (tls_pos != pos || tls_base != freq_base || tls_dim != head_dim)) {
+        for (int i = 0; i < pairs; i++) {
+            float freq = 1.0f / powf(freq_base, 2.0f * i / head_dim);
+            float theta = pos * freq;
+            tls_cos[i] = cosf(theta);
+            tls_sin[i] = sinf(theta);
+        }
+        tls_pos = pos;
+        tls_base = freq_base;
+        tls_dim = head_dim;
+    }
     /* Apply RoPE to query heads */
     for (int h = 0; h < n_heads; h++) {
         float* qh = q + h * head_dim;
-        for (int i = 0; i < head_dim / 2; i++) {
-            float freq = 1.0f / powf(freq_base, 2.0f * i / head_dim);
-            float theta = pos * freq;
-            float cos_t = cosf(theta);
-            float sin_t = sinf(theta);
+        for (int i = 0; i < pairs; i++) {
+            float cos_t = tls_cos[i];
+            float sin_t = tls_sin[i];
             float q0 = qh[2 * i];
             float q1 = qh[2 * i + 1];
             qh[2 * i]     = q0 * cos_t - q1 * sin_t;
@@ -1464,11 +1485,9 @@ void tq_rope(float* q, float* k, int pos, int head_dim,
     /* Apply RoPE to key heads */
     for (int h = 0; h < n_kv_heads; h++) {
         float* kh = k + h * head_dim;
-        for (int i = 0; i < head_dim / 2; i++) {
-            float freq = 1.0f / powf(freq_base, 2.0f * i / head_dim);
-            float theta = pos * freq;
-            float cos_t = cosf(theta);
-            float sin_t = sinf(theta);
+        for (int i = 0; i < pairs; i++) {
+            float cos_t = tls_cos[i];
+            float sin_t = tls_sin[i];
             float k0 = kh[2 * i];
             float k1 = kh[2 * i + 1];
             kh[2 * i]     = k0 * cos_t - k1 * sin_t;
