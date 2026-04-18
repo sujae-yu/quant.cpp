@@ -6,6 +6,54 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v0.14.0] — 2026-04-18
+
+### Highlights
+
+**MoE & Q4_K_M throughput breakthrough** — Qwen3.6-35B-A3B (MoE) now runs at **16.1 t/s on a 16 GB M1 Pro** (CPU-only), **3.2× faster than llama.cpp's CPU path** (5.07 t/s) at **35% lower RSS** (6.5 GB vs ~10 GB). Every Q4_K_M model in the suite also picked up **+115% to +180%** decode throughput from a single kernel fix.
+
+All three changes were driven by `sample`-based profiling done *after* model load (earlier samples were dominated by the single-threaded Q4 load conversion, which hid the real hot path).
+
+### Added
+- **Q6_K × int8 NEON fast path** (`fused_dot_q6_k_int8`, `src/engine/tq_gguf_quants.c`). The existing `fused_dot_q6_k` is pure scalar; Q4_K_M embeds Q6_K for `attention.wo` and `ffn_down`, so it silently dominated decode on every Q4_K_M model. New kernel pre-quantizes activation to int8 (Q8_0 layout) and issues one `vdotq_s32` per 16-element sub-block. Env `TQ_Q6K_NOINT=1` reverts for A/B.
+- **IQ3_S × int8 NEON fast path** (`fused_dot_iq3_s_int8`). UD-IQ2_XXS quantizations (e.g., Qwen3.6) embed IQ3_S for some critical layers; same scalar-to-vdotq_s32 fix. Env `TQ_IQ3S_NOINT=1` reverts.
+- **MoE router NEON vectorize** (`tq_moe_route` in `src/engine/tq_moe.c`). Previous scalar `for e in 256 experts: dot(hidden, row)` loop replaced with 4-accumulator FMA (16 floats/cycle peak). Scratch buffers moved to `static __thread` — eliminates per-call `malloc`/`calloc` (60 allocs/token on Qwen3.6).
+- **`TQ_NO_MLOCK=1` environment variable** — for MoE models on memory-constrained hosts, skips `mlock()` and uses `MADV_WILLNEED` instead. On a 16GB M1 Pro this is *both* faster (OS page cache LRU tracks the small hot-expert set better than mlock pinning the whole 10 GB) and saves ~5 GB RSS.
+- **pthread QoS hint** (`QOS_CLASS_USER_INTERACTIVE`) applied to thread-pool workers on macOS to prefer P-cores over E-cores on asymmetric Apple Silicon (M-series Pro / Max / Ultra).
+- **Dual-accumulator pair** in `matmul_q4_rows` inner loop (kept for kernel readability even though it did not move the needle on M1 — FMA throughput was not the bound).
+- **`bench/results/2026-04-18_moe_and_q4_k_m_breakthrough.md`** — full methodology, per-iteration numbers, and reproduce commands.
+
+### Performance
+Measured on M1 Pro 16 GB, macOS 24, CPU-only (`TQ_NO_METAL=1`), 8 threads, warm 3-run peak, greedy decode.
+
+| Model | before | after | vs llama.cpp CPU 8t |
+|---|:-:|:-:|:-:|
+| Qwen3.6-35B-A3B-UD-IQ2_XXS | 3.08 → 7.8 | **16.1** | 5.07 — **3.2× faster** |
+| Qwen3.5-4B Q4_K_M | 5.0 | **14.1** | 19.9 (71%) |
+| Phi-3.5-mini Q4_K_M | 6.2 | **14.1** | 26.7 (53%) |
+
+Qwen3.6 RSS: **12.0 GB → 6.5 GB** with `TQ_NO_MLOCK=1`.
+
+### Fixed
+- **`fused_dot_q6_k` scalar performance regression** (latent since initial Q6_K support). Sample profiling attributed its cost to "matmul" in the wall-clock profile, hiding it for multiple releases. Fixed by the int8 fast path above.
+- **`tq_moe_route` hot-path heap churn** — `malloc(num_experts)` and `calloc(num_experts)` on every router call (per layer, per token). Now thread-local.
+
+### Recommended usage
+```bash
+# 16 GB Mac, Qwen3.6-35B-A3B MoE (best speed AND lowest RSS)
+TQ_NO_METAL=1 TQ_NO_MLOCK=1 ./build/quant \
+  models/Qwen3.6-35B-A3B-UD-IQ2_XXS.gguf \
+  --chat -p "..." -n 60 -T 0.7 -j 8
+
+# Q4_K_M dense models (Phi-3.5, Qwen3.5-4B, Llama family)
+TQ_NO_METAL=1 ./build/quant <model-Q4_K_M.gguf> -p "..." -n 50 -T 0 -j 8
+```
+
+### Regression
+`scripts/test_models.sh`: **12/12 PASS** across Llama 3.1/3.2, Qwen 2.5/3.5/3.6, Phi-3.5, Gemma-4.
+
+---
+
 ## [v0.13.0] — 2026-04-12
 
 ### Highlights

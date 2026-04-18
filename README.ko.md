@@ -76,6 +76,15 @@ Chunk-RAG가 잘못된 섹션을 검색하면, 모델은 **"모른다"고 하지
 
 > **v2 후속 — Working Memory Cliff (2026-04-11)**: v1 결과를 더 큰 grid로 확장 측정했습니다 (1B/3B 모델, ctx 256-2048, 204 NIAH trials + FP32-weights 통제 실험). 두 모델 모두 명목 128K context window의 **1% 미만**에서 sharp cliff가 존재합니다 (1B Q8 cliff 512-1024, 3B Q4 cliff 1024-1280을 **step function**으로). 6.4× KV 압축은 20개 cell 중 18개에서 fp32 baseline과 bit-for-bit 일치 — cliff는 model property이지 KV/weight quantization artifact가 아닙니다. 정직한 재해석: Beyond RAG는 *유효* working memory 안에 들어가는 문서에 대해서만 동작하며, 그 크기는 명목 context window의 100분의 1에서 1000분의 1입니다. 전체 tech report: [`docs/paper/working-memory-cliff.md`](docs/paper/working-memory-cliff.md). HuggingFace blog post draft: [`docs/paper/hf-blog-draft.md`](docs/paper/hf-blog-draft.md).
 
+> **v3.3 MoE + Q4_K_M 성능 돌파 (2026-04-18)**: 프로파일 기반(`sample`) 핫 경로 분석으로 세 가지 커널 문제를 동시에 수정했습니다. **(1) Q6_K NEON int8 fast path** — `fused_dot_q6_k`가 순수 스칼라였습니다. Q4_K_M은 `attention.wo`/`ffn_down`에 Q6_K를 쓰기 때문에 모든 Q4_K_M 모델의 숨은 병목이었음. **Qwen3.5-4B Q4_K_M 5.0 → 14.1 t/s**, **Phi-3.5-mini Q4_K_M 6.2 → 14.1 t/s**. **(2) MoE router NEON 벡터화** — 라우터 logit 계산 (토큰당 30 layers × 256 experts × 2048 dim = 15.7M scalar FMA)을 4-accumulator NEON FMA로, scratch 버퍼는 thread-local로 (malloc 제거). **(3) `TQ_NO_MLOCK=1` 환경변수** — 16GB Mac에서 `mlock(10 GB)`는 오히려 OS LRU를 방해. 끄면 **RSS 12→6.5 GB 절감 + 속도도 더 빨라짐** (256 experts 중 hot set이 작아서 OS page cache가 더 똑똑하게 관리). **Qwen3.6-35B-A3B-UD-IQ2_XXS: 3.08 → 16.1 t/s (5.2×), llama.cpp CPU 대비 3.2× 빠름**. 전체 측정: [`bench/results/2026-04-18_moe_and_q4_k_m_breakthrough.md`](bench/results/2026-04-18_moe_and_q4_k_m_breakthrough.md).
+>
+> 16GB Mac에서 35B MoE 실행 권장 명령:
+> ```bash
+> TQ_NO_METAL=1 TQ_NO_MLOCK=1 ./build/quant \
+>   models/Qwen3.6-35B-A3B-UD-IQ2_XXS.gguf \
+>   --chat -p "질문" -n 60 -T 0.7 -j 8
+> ```
+
 ---
 
 ## 왜 quant.cpp인가?
