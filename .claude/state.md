@@ -1,7 +1,14 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-20 (Round 52)
-**Session HEAD**: Round 52 — **TTFT daily-driver baseline 매트릭스**
+**Last updated**: 2026-04-20 (Round 53)
+**Session HEAD**: Round 53 — **README v3.11 blurb (TTFT 발견성)**
+
+## Round 53 — README v3.11 blurb (en + ko)
+
+`README.md`와 `README.ko.md`에 v3.11 블러브 추가 (v3.10 위). 한 단락에
+TTFT/decode 분리 설명 + 3-모델 warm 수치 + bench report 링크.
+외부 발견성 확보: 사용자가 저장소 첫 방문 시 엔진 속도의 정직한
+프레이밍을 즉시 읽게 됨.
 
 ## Round 52 — TTFT daily-driver baseline 문서
 
