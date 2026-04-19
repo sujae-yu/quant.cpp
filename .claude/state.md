@@ -1,8 +1,44 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-19 (Round 15)
+**Last updated**: 2026-04-19 (Round 16)
 **Score**: **0.9979 / 1.0000 (99.8%)** — full `score.sh`, 5/6 dimensions at 100%, structure 98.7%, 12/12 regression PASS
-**Session HEAD**: Round 15 — layer prefetch pipelining. 15 /grow rounds complete this session.
+**Session HEAD**: Round 16 — Qwen3.6 Q5_K_M on 16 GB Mac 실증 돌파. 16 /grow rounds complete this session.
+
+## Round 16 — Q5_K_M Breakthrough on 16 GB Mac ✅ (품질) ⚠️ (속도)
+
+**역사적 돌파**: Qwen3.6-35B-A3B-UD-Q5_K_M (26.46 GB GGUF) 파일이
+16 GB M1 Pro에서 로드 + 추론 성공. Round 12 auto-policy MADV가
+제공한 공간 예산 이론이 실측으로 확인됨.
+
+### 측정
+- File size: 26,456 MB (26.46 GB)
+- **Selective MADV**: 613 non-expert WILLNEED (2.50 GB), 120 routed-expert
+  at OS default (22.13 GB)
+- **RSS: 9.72 GB** — 26.46 GB 파일의 36.7%만 실제 메모리 점유 (MoE 희소성
+  + OS 페이지 캐시의 hot-subset 관리)
+- Decode: 1.0-1.5 t/s (warm, T=0)
+- Output quality: "1+1=" → "2" ✓, coherent text, no character doubling
+
+### 속도 병목 (profile)
+| Component | Q3_K_S (기준) | **Q5_K_M** | Δ |
+|---|---:|---:|---:|
+| MoE | 63.5% (192 ms) | **90.5% (453 ms)** | +2.36× |
+| Matmul | 34.2% (104 ms) | 12.8% (60 ms) | -42% |
+| Per-token total | 302 ms | 501 ms | +1.66× |
+
+MoE 90%가 주 원인. 대부분 Q5_K 커널의 5번째 비트 처리 오버헤드
+(qh bit mask + vceqq_u8 + vorrq_u8 chain vs Q3_K의 단순 shift).
+일부는 cold-expert SSD paging.
+
+### 결론
+- ✅ **기술적 돌파**: 16 GB Mac에서 Q5 품질 MoE 추론 — 엔진 차원
+  최초로 증명. Unsloth UD-Q5_K_M + 우리 selective MADV의 조합이 핵심.
+- ⚠️ **실용 속도 부족**: 1 t/s는 장기 대화 어려움. Q3_K_S 14 t/s가
+  여전히 실용 최적점. Q5_K_M은 품질-중시 batch 추론용.
+- 🎯 **다음 최적화 기회 (Round 17+)**:
+  1. Q5_K NEON 커널 추가 최적화 (qh unpack SIMD, 2-row parallel)
+  2. Q4_K_M (22 GB) 실증 — 속도/품질 중간점 예상 5-8 t/s
+  3. Expert prefetch 확장 (Round 15 paradigm → routed expert 영역)
 
 ## Round 15 — Layer prefetch pipelining (flash-moe deferred-CMD3 CPU analog)
 
