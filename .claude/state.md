@@ -1,6 +1,36 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-19 (Round 30)
+**Last updated**: 2026-04-19 (Round 32)
+
+## Round 32 — Mission C: Qwen-common 드리프트 (DeltaNet 전용 아님)
+
+llama.cpp reference 비교로 결정적 발견:
+
+| 테스트 | 결과 |
+|---|---|
+| Llama-3.2-3B "The quick brown fox" n=30 | "This is a well-known example of a pangram" ✓ |
+| Qwen3.6-IQ4_XS 동일 프롬프트 | "lazy dog.mp in a jolly" → "quicck bbrrown foxfo" (n=20) ✗ |
+| **Qwen3.5-4B 동일 프롬프트** | "12345678901234567890..." digit spam ✗ |
+| Qwen3.5-4B "Once upon a time" | "in the land of the sun" ✓ |
+| "A fox" | coherent (social eng.) ✓ |
+| "The story goes: once a fox jumped" | "the the sky andnd" char doubling ✗ |
+
+**결론**: 드리프트는 **Qwen 공통** (DeltaNet/MoE 아님). 프롬프트-sensitive. Llama에선 발생 안 함.
+
+Round 32 제외 기법:
+- FP32 KV로 해결 안 됨 (다른 실패 패턴)
+- TQ_NO_MOE_BATCH (per-token forced) 같음
+- n=1-3 coherent, n=10+ 드리프트
+
+**다음 후보 (Qwen 특유)**:
+1. QK-norm (per-head RMSNorm on Q, K) — Qwen 전용
+2. Partial rotary 0.25 — head_dim/4만 rotate
+3. RMSNorm "1+w" convention 처리
+4. 특정 token sequence trigger
+
+Mission C Round 33+: 후보별 disable 실험 + instrumentation.
+
+## Round 30 — Long-gen regression guard
 **Score**: **0.9979 / 1.0000 (99.8%)** — unchanged
 **Session HEAD**: Round 30 — Long-gen regression guard. **30 라운드 세션 완료**.
 
