@@ -4177,6 +4177,26 @@ int tq_forward_batch_moe_hybrid(tq_model_t* model, tq_state_t* s,
                                    dim, l);
                 }
             } else {
+                /* Round 15: flash-moe deferred-CMD3 CPU analog. Issue one
+                 * prefetch hint per next-layer non-expert weight buffer
+                 * right before the MoE batch kicks off. MoE dominates the
+                 * layer (~62% of prefill), so the prefetch and the MoE
+                 * compute overlap naturally — by the time MoE returns,
+                 * the next layer's attn weights have their first cache
+                 * line in L2 and TLB entries primed. Cheap (one intrinsic
+                 * call per weight) and harmless if data is already hot.
+                 *
+                 * Opt-out: TQ_NO_LAYER_PREFETCH=1. */
+                if (l + 1 < c->n_layers && !getenv("TQ_NO_LAYER_PREFETCH")) {
+                    const tq_layer_weights_t* nl = &model->layers[l + 1];
+                    if (nl->attn_norm) __builtin_prefetch(nl->attn_norm, 0, 1);
+                    if (nl->gguf_w_qkv) __builtin_prefetch(nl->gguf_w_qkv, 0, 1);
+                    if (nl->gguf_wq)    __builtin_prefetch(nl->gguf_wq, 0, 1);
+                    if (nl->gguf_wk)    __builtin_prefetch(nl->gguf_wk, 0, 1);
+                    if (nl->gguf_wv)    __builtin_prefetch(nl->gguf_wv, 0, 1);
+                    if (nl->gguf_wo)    __builtin_prefetch(nl->gguf_wo, 0, 1);
+                    if (nl->ffn_norm)   __builtin_prefetch(nl->ffn_norm, 0, 1);
+                }
                 tq_moe_forward_batch((const tq_moe_layer_t*)layer->moe,
                                      (const tq_moe_config_t*)model->moe_config,
                                      (tq_moe_state_t*)s->moe_state,

@@ -1,8 +1,42 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-19 (Round 14)
+**Last updated**: 2026-04-19 (Round 15)
 **Score**: **0.9979 / 1.0000 (99.8%)** — full `score.sh`, 5/6 dimensions at 100%, structure 98.7%, 12/12 regression PASS
-**Session HEAD**: Round 14 — full score + WBS verification pass. 14 /grow rounds complete this session.
+**Session HEAD**: Round 15 — layer prefetch pipelining. 15 /grow rounds complete this session.
+
+## Round 15 — Layer prefetch pipelining (flash-moe deferred-CMD3 CPU analog)
+
+`tq_transformer.c:tq_forward_batch_moe_hybrid` — before calling
+`tq_moe_forward_batch` for layer L, issue one `__builtin_prefetch`
+per next-layer (L+1) non-expert weight buffer: `attn_norm`,
+`gguf_w_qkv`/`gguf_wq`/`gguf_wk`/`gguf_wv`/`gguf_wo`, `ffn_norm`.
+
+Rationale: MoE compute dominates layer time (~62% of prefill per
+Mission A profile). Prefetching next layer's attn weights during
+this window means by the time MoE returns, the first cache line
+of each target weight is in L2 and its TLB entry is primed.
+Cheap (7 intrinsics × 40 layers = 280 CPU instructions total).
+
+Opt-out: `TQ_NO_LAYER_PREFETCH=1`.
+
+Measured (Qwen3.6-UD-Q3_K_S, 40-token warm runs):
+
+| | Run 1 cold | Run 2 warm | Run 3 warm | median |
+|---|---:|---:|---:|---:|
+| No prefetch | 8.1 t/s | 9.6 t/s | — | 9.6 |
+| With prefetch | 8.4 t/s | 9.4 t/s | — | 9.4 |
+
+**Neutral at Q3_K_S** (within noise). Expected: Q3_K_S 14.3 GB fits
+fully in 16 GB RAM after warmup, so all attn data is already
+page-cache-resident and hardware prefetch handles the rest.
+
+Value proposition is for Q5_K_M (23 GB) / Q6_K (28 GB) on 16 GB Mac:
+some attn pages may not be in page cache when a layer starts; the
+prefetch touches them during the MoE window, amortizing the fault
+into the compute time rather than the critical path. Verifiable once
+Q5_K_M file is available.
+
+12/12 regression PASS. Zero warnings. Score 0.9979 preserved.
 
 ## Round 14 — Full score.sh reveals all-time high (0.9979)
 
