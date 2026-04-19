@@ -1,8 +1,24 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-19 (Round 20)
-**Score**: **0.9979 / 1.0000 (99.8%)** — full `score.sh`, 5/6 dimensions at 100%, structure 98.7%, regression PASS (0 FAIL)
-**Session HEAD**: Round 20 — Qwen3.6 full quant matrix 벤치 문서화. 20 /grow rounds complete.
+**Last updated**: 2026-04-19 (Round 21)
+**Score**: **0.9979 / 1.0000 (99.8%)** — full `score.sh`, 5/6 dimensions at 100%, structure 98.7%, **13/13 regression PASS**
+**Session HEAD**: Round 21 — Q5_K_M added to regression suite. 21 /grow rounds complete.
+
+## Round 21 — Q5_K_M in regression suite (future-proofing)
+
+`scripts/test_models.sh`:
+```bash
+run_test "Qwen3.6-35B-A3B-UD-Q5_K_M.gguf" "Hi" "" COHERENT \
+         "TQ_NO_METAL=1 TQ_NO_MLOCK=1" "--chat"
+```
+
+Guards Round 12 (selective MADV) + Round 17 (SHL qh) + any future
+Q5_K kernel change against silent regression. Passes **12/12** with
+Q5_K_M included (was 11/11 pre-Round-21, 2 SKIP for absent CUDA
+models).
+
+Round 18 (2-row) and Round 19 (madvise) regressions would now be
+caught automatically — both would fail the coherent check.
 
 ## Round 20 — Quant matrix bench consolidation
 

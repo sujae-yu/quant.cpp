@@ -100,6 +100,9 @@ run_test "Qwen3.5-4B-Q4_K_M.gguf"              "Hi" "Hello" STRICT "TQ_NO_METAL=
 # Regression guard: without <think>\n\n</think>\n\n close, model emits
 # immediate <|im_end|> (0 tokens). 2026-04-17.
 run_test "Qwen3.6-35B-A3B-UD-IQ2_XXS.gguf"     "Hi" "" COHERENT "TQ_NO_METAL=1" "--chat"
+# Q5_K_M — higher-bpw MoE path, requires Round 12 selective MADV + Round 17
+# SHL qh extraction. Regression guard for future Q5_K kernel changes.
+run_test "Qwen3.6-35B-A3B-UD-Q5_K_M.gguf"      "Hi" "" COHERENT "TQ_NO_METAL=1 TQ_NO_MLOCK=1" "--chat"
 
 echo ""
 echo "--- Metal-ON tier (default build must also produce coherent output) ---"
