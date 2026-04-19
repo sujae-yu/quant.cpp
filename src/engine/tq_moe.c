@@ -841,7 +841,9 @@ moe_cpu_fallback: ;
 
         tq_tp_run(expert_parallel_worker, task_ptrs, num_active);
 
-        /* Accumulate results (serial — small hidden_dim, negligible) */
+        /* Accumulate results. R59: NEON-vectorized — 4× FMAs per iter,
+         * small but clean win since this runs serially in the main thread
+         * after the parallel barrier (320 calls × 2048 floats/tok = 655K FMAs). */
         for (int k = 0; k < num_active; k++) {
             int eid = state->top_experts[k];
             if (eid < 0 || eid >= config->num_experts) continue;
@@ -849,7 +851,17 @@ moe_cpu_fallback: ;
             float exp_scale = (layer->expert_scale) ? layer->expert_scale[eid] : 1.0f;
             float ws = w * exp_scale;
             float* eout = tasks[k].scratch_out;
-            for (int i = 0; i < hidden_dim; i++)
+            int i = 0;
+#ifdef __ARM_NEON
+            float32x4_t vws = vdupq_n_f32(ws);
+            for (; i + 3 < hidden_dim; i += 4) {
+                float32x4_t vo = vld1q_f32(output + i);
+                float32x4_t ve = vld1q_f32(eout + i);
+                vo = vmlaq_f32(vo, ve, vws);
+                vst1q_f32(output + i, vo);
+            }
+#endif
+            for (; i < hidden_dim; i++)
                 output[i] += ws * eout[i];
         }
         goto moe_shared_expert;

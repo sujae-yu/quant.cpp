@@ -3,6 +3,21 @@
 **Last updated**: 2026-04-20 (Round 55)
 **Session HEAD**: Round 55 — **bench_my_mac.sh 1-command readiness**
 
+## Round 58 — IQ4_XS prefetch-2 ATTEMPTED, rolled back (neutral)
+
+`fused_dot_iq4_xs_int8` prefetch distance 1 → 2 super-blocks. 실측 매우
+노이즈 크게 나옴 (6.6-13.1 range). 메모리 prefetch는 이미 충분
+최적화된 상태로 보임. Rolled back.
+
+## Round 59 — MoE accumulation NEON vectorization
+
+Parallel MoE dispatch 후 `output += ws * eout[i]` 누적 loop를 NEON
+vmlaq_f32으로 변환 (4 FMAs/iter). 655K FMAs/tok의 스칼라 경로 제거.
+
+**실측**: 매우 노이즈 (6.9-13.6), 작업 본질이 너무 작아서 노이즈 범위
+내에서 win 확인 어려움. 이론적 타당성 + 15/15 regression PASS로 commit.
+코드 위생 개선 의의.
+
 ## Round 57 — tq_matmul_q8 int8 path ATTEMPTED, rolled back (dormant)
 
 Added vdotq_s32 fast path to `tq_matmul_q8` (internal .q8 weight format,
