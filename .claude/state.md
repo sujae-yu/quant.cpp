@@ -1,7 +1,24 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-20 (Round 51)
-**Session HEAD**: Round 51 — **CLI TTFT split for daily-driver UX**
+**Last updated**: 2026-04-20 (Round 52)
+**Session HEAD**: Round 52 — **TTFT daily-driver baseline 매트릭스**
+
+## Round 52 — TTFT daily-driver baseline 문서
+
+`bench/results/2026-04-20_ttft_daily_driver.md` — R51 TTFT split을
+이용한 3-모델 cold/warm 실측 매트릭스:
+
+| 모델 | Cold TTFT | Warm TTFT | Warm decode |
+|---|---:|---:|---:|
+| Phi-3.5 Q4_K_M (3.8B) | 4.14s | 2.3s | **14.5 t/s** |
+| Llama-3.2-3B Q8→Q4 | ~1.5s | 0.97s | **29.0 t/s** |
+| Qwen3.6-35B IQ4_XS | 9.61s | 1.83s | **10.5 t/s** |
+
+핵심 발견: **decode 속도는 모델 성질, TTFT는 warmup 성질**.
+과거 "overall tok/s"로 뭉뚱그렸던 수치가 엔진 속도를 과소평가
+(예: Qwen3.6 cold 1.6 t/s overall vs warm 10.5 t/s decode).
+
+용도별 picks + reproducibility snippet + warm-up advice 포함.
 
 ## Round 51 — CLI TTFT/decode split (Mission D Phase α 시작)
 
