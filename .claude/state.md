@@ -1,7 +1,44 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-20 (Round 44)
-**Session HEAD**: Round 44 — **v0.17.0 안정화 릴리즈 준비 완료**
+**Last updated**: 2026-04-20 (Round 51)
+**Session HEAD**: Round 51 — **CLI TTFT split for daily-driver UX**
+
+## Round 51 — CLI TTFT/decode split (Mission D Phase α 시작)
+
+`tools/quant.c`: `print_token` 콜백에 첫 토큰 타임스탬프 기록 →
+`tq_generate` 종료 후 TTFT + 순수 decode 속도 분리 출력.
+
+**Before** (single blended metric):
+```
+30 tokens in 5.3s (5.7 tok/s, 8 threads, weights=FP32, kv=turbo_kv_4b)
+```
+
+**After** (Phi-3.5 Q4_K_M daily driver):
+```
+cold: TTFT 3.28s | decode 29 tok in 2.00s (14.5 tok/s) | total 5.3s (5.7 overall)
+warm: TTFT 0.99s | decode 29 tok in 1.99s (14.6 tok/s) | total 3.0s (10.1 overall)
+```
+
+**왜 중요한가** (individual developer 경험):
+- TTFT = 사용자가 "응답 시작"을 체감하는 지연 (UX 핵심 지표)
+- Decode = 지속적 출력 속도 (실용권 판단 기준)
+- Overall은 짧은 질의에서 TTFT에 지배됨 — 엔진 본질 속도를 호도
+- 개인 개발자가 `-n 10` 짧게 실험할 때 "5.7 tok/s → 느리네"가 아니라
+  "TTFT 3.3s, decode 14.5 tok/s → 엔진은 빠르고 초기 로드가 원인"
+  이라는 진단이 한 줄에서 가능
+
+**구현**: 25 LOC. `cli_timing_ctx_t` struct + `user_data` 경유.
+n_generated=1 edge case는 기존 single-line 포맷으로 fallback.
+
+**Regression**: 15/15 PASS (COHERENT/STRICT/Metal-ON 모두 통과).
+
+## Round 46-50 — Mission D Phase A (context scaling + long-prefill finding)
+
+- R46: max_seq_len cap 4096 → 16384 (tq_model.c:2954)
+- R47-49: Qwen3.6 long-prefill (≥40 words) 구조적 버그 재현 + 격리
+- R50: IQ4_XS vs Q5_K_M daily-driver 전략 확정 (IQ4_XS 승)
+
+## Round 41-44 — 안정화 + 배포 준비
 
 ## Round 41-44 — 안정화 + 배포 준비
 

@@ -66,10 +66,20 @@ static int clock_gettime(int id, struct timespec* ts) {
 /* Forward-pass profiling flag (defined in tq_transformer.c) */
 extern int g_tq_profile_enabled;
 
+/* Timing context for TTFT measurement. Passed via on_token user_data. */
+typedef struct {
+    struct timespec ts_first_token;
+    int has_first_token;
+} cli_timing_ctx_t;
+
 /* Streaming token callback — filters chat-template control tokens that
  * would otherwise leak into CLI output when --chat is active. */
 static void print_token(const char* text, void* user_data) {
-    (void)user_data;
+    cli_timing_ctx_t* t = (cli_timing_ctx_t*)user_data;
+    if (t && !t->has_first_token) {
+        clock_gettime(CLOCK_MONOTONIC, &t->ts_first_token);
+        t->has_first_token = 1;
+    }
     if (!text || !text[0]) return;
 
     /* Skip thinking / template tokens (same list as server). Gemma 4 raw
@@ -1380,8 +1390,9 @@ int main(int argc, char** argv) {
     config.save_kv_path = save_kv_file;
     config.load_kv_path = load_kv_file;
     config.rng_seed = rng_seed;
+    cli_timing_ctx_t timing = {0};
     config.on_token = print_token;
-    config.user_data = NULL;
+    config.user_data = &timing;
 
     /* Generate */
     fprintf(stderr, "Prompt: %s\n", prompt);
@@ -1404,9 +1415,26 @@ int main(int argc, char** argv) {
     if (n_generated > 0 && elapsed > 0.0) {
         double tok_per_sec = (double)n_generated / elapsed;
         const char* wq_name = model->use_q2_weights ? "Q2" : (model->use_q4_weights ? "Q4" : (model->use_q8_weights ? "Q8" : "FP32"));
-        fprintf(stderr, "%d tokens in %.1fs (%.1f tok/s, %d threads, weights=%s, kv=%s)\n",
-                n_generated, elapsed, tok_per_sec, tq_get_threads(), wq_name,
-                kv_type < TQ_TYPE_COUNT ? tq_type_name(kv_type) : "fp32");
+        if (timing.has_first_token && n_generated > 1) {
+            double ttft = (double)(timing.ts_first_token.tv_sec - ts_start.tv_sec)
+                        + (double)(timing.ts_first_token.tv_nsec - ts_start.tv_nsec) / 1e9;
+            double decode_s = elapsed - ttft;
+            if (decode_s > 0.0) {
+                double decode_rate = (double)(n_generated - 1) / decode_s;
+                fprintf(stderr, "TTFT %.2fs | decode %d tok in %.2fs (%.1f tok/s) | total %.1fs (%.1f tok/s overall, %d threads, weights=%s, kv=%s)\n",
+                        ttft, n_generated - 1, decode_s, decode_rate,
+                        elapsed, tok_per_sec, tq_get_threads(), wq_name,
+                        kv_type < TQ_TYPE_COUNT ? tq_type_name(kv_type) : "fp32");
+            } else {
+                fprintf(stderr, "%d tokens in %.1fs (%.1f tok/s, %d threads, weights=%s, kv=%s)\n",
+                        n_generated, elapsed, tok_per_sec, tq_get_threads(), wq_name,
+                        kv_type < TQ_TYPE_COUNT ? tq_type_name(kv_type) : "fp32");
+            }
+        } else {
+            fprintf(stderr, "%d tokens in %.1fs (%.1f tok/s, %d threads, weights=%s, kv=%s)\n",
+                    n_generated, elapsed, tok_per_sec, tq_get_threads(), wq_name,
+                    kv_type < TQ_TYPE_COUNT ? tq_type_name(kv_type) : "fp32");
+        }
     } else {
         fprintf(stderr, "Generated %d tokens\n", n_generated);
     }
