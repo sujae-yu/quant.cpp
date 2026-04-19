@@ -6,6 +6,71 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v0.18.0] — 2026-04-20 (Daily-Driver UX — TTFT/decode split)
+
+### Headline
+
+**CLI now reports TTFT and decode rate separately**, replacing the
+blended "overall tok/s" that dominated short-query reports with
+cold-start latency. Individual developers evaluating the engine on
+a 16 GB Mac can now distinguish prefill cost from sustained decode.
+
+### Changes
+
+**R51 — TTFT measurement** (`tools/quant.c`):
+`print_token` callback records first-token timestamp via a
+`cli_timing_ctx_t` struct passed through `user_data`. After
+`tq_generate` returns, the summary line splits:
+
+```
+TTFT 0.99s | decode 29 tok in 1.99s (14.6 tok/s) | total 3.0s (10.1 tok/s overall)
+```
+
+Fallback to the old single-line format when `n_generated ≤ 1`.
+25 LOC total. No engine behavior change.
+
+**R52 — Daily-driver baseline matrix** (`bench/results/2026-04-20_ttft_daily_driver.md`):
+Measured warm numbers on 16 GB M1 Pro CPU-only:
+
+| Model | Warm TTFT | Warm decode |
+|---|---:|---:|
+| Phi-3.5 Q4_K_M (3.8B) | 2.3s | **14.5 t/s** |
+| Llama-3.2-3B Q8→Q4 | 0.97s | **29.0 t/s** |
+| Qwen3.6-35B IQ4_XS | 1.83s | **10.5 t/s** |
+
+Cold first-run Qwen3.6 TTFT is 9.6s (5.3× warm) due to cold SSD
+paging; subsequent runs benefit from macOS page cache.
+
+**R53 — README v3.11 blurb** (`README.md` + `README.ko.md`):
+External discoverability — first-visit users see the TTFT/decode
+framing and warm numbers immediately above the v3.10 correctness
+entry.
+
+### Why "decode is a model property, TTFT is a warmup property"
+
+For short queries (-n 30), cold-start mmap + MADV traversal +
+transformer pass #1 can dominate wall time. Reporting only the
+blended rate understates engine compute speed. Example:
+
+- Qwen3.6-35B cold: total 19.3s → 1.6 t/s overall
+- Qwen3.6-35B warm: total  4.6s → 6.5 t/s overall, **10.5 t/s decode**
+
+The engine isn't 6× faster warm; it's doing the same compute. TTFT
+just dropped from 9.6s to 1.8s. Individual devs need to see both.
+
+### Compatibility
+
+No API change. Existing `tq_gen_config_t::on_token` callbacks with
+`user_data = NULL` continue to work — `user_data` is opaque from
+the library's perspective; the CLI passes its own timing struct.
+
+### Regression
+
+15/15 PASS (unchanged). Existing COHERENT + STRICT + Metal-ON
+tier tests traverse new stderr format without breakage.
+
+---
+
 ## [v0.17.0] — 2026-04-20 (Qwen3.x Correctness — ALL FORMATS WIN)
 
 ### Headline

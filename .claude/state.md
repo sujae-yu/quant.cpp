@@ -1,7 +1,15 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-20 (Round 53)
-**Session HEAD**: Round 53 — **README v3.11 blurb (TTFT 발견성)**
+**Last updated**: 2026-04-20 (Round 54)
+**Session HEAD**: Round 54 — **v0.18.0 release 준비 (TTFT UX)**
+
+## Round 54 — v0.18.0 release hygiene
+
+- `bindings/python/pyproject.toml`: 0.17.0 → 0.18.0
+- `bindings/python/quantcpp/__init__.py` fallback 0.17 → 0.18
+- `docs/RELEASE_NOTES.md` v0.18.0 entry (R51 CLI + R52 bench + R53 README)
+  — Headline "Daily-Driver UX — TTFT/decode split", includes warm
+  matrix + compatibility note + decode vs TTFT framing.
 
 ## Round 53 — README v3.11 blurb (en + ko)
 
