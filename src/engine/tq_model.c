@@ -57,6 +57,9 @@ static void closedir(DIR* d) { FindClose(d->h); free(d); }
 #include <fcntl.h>
 #include <unistd.h>
 #include <dirent.h>
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#endif
 #endif
 
 /* ============================================================
@@ -4291,27 +4294,121 @@ skip_q4_conversion: ;
             tq_gguf_ctx_t* gctx = (tq_gguf_ctx_t*)model->gguf_ctx;
             if (gctx->mmap_data && gctx->mmap_size > 0) {
                 if (c->is_moe) {
-                    /* MoE: lock model data in physical RAM to prevent page-out.
-                     * Without mlock, expert weights get evicted by OS memory pressure,
-                     * causing 100x+ slowdown from SSD page faults.
-                     * mlock may fail if ulimit is too low — fall back to MADV_WILLNEED.
+                    /* Round 12: auto-policy MADV for higher-bpw MoE quants.
                      *
-                     * TQ_NO_MLOCK=1 skips mlock — useful on memory-constrained
-                     * systems (e.g., Qwen3.6 on 16GB Mac where 10GB mlock leaves
-                     * only 4GB for OS + apps). Trade-off: slower if any expert
-                     * pages get evicted, but better cooperation with the system. */
-                    if (getenv("TQ_NO_MLOCK")) {
-                        madvise(gctx->mmap_data, gctx->mmap_size, MADV_WILLNEED);
-                        fprintf(stderr, "tq_load_gguf: TQ_NO_MLOCK set — skipping mlock, using MADV_WILLNEED for %.1f GB\n",
-                                (double)gctx->mmap_size / (1024.0 * 1024.0 * 1024.0));
-                    } else if (mlock(gctx->mmap_data, gctx->mmap_size) == 0) {
-                        fprintf(stderr, "tq_load_gguf: mlock(%.1f GB) — expert weights pinned in RAM\n",
-                                (double)gctx->mmap_size / (1024.0 * 1024.0 * 1024.0));
+                     * Two policies:
+                     *   (A) Blanket MADV_WILLNEED — force-loads whole file.
+                     *       Optimal when file < ~75% RAM (OS read-ahead hides
+                     *       latency, no swap risk). Measured +12% on Q3_K_S 14 GB.
+                     *   (B) Selective WILLNEED — only non-expert tensors get
+                     *       forced; routed experts left at OS default so
+                     *       natural MoE sparsity (K/N active) keeps working
+                     *       set small. Required for Q5_K_M 23 GB / Q6_K 28 GB
+                     *       on 16 GB Mac — blanket would thrash swap.
+                     *
+                     * Auto-select by file size vs physical RAM. Override:
+                     *   TQ_FLAT_MADV=1  → force blanket
+                     *   TQ_SELECTIVE_MADV=1 → force selective. */
+                    size_t phys_ram = 0;
+#if defined(__APPLE__)
+                    {
+                        int64_t hw_memsize = 0;
+                        size_t sz = sizeof(hw_memsize);
+                        if (sysctlbyname("hw.memsize", &hw_memsize, &sz, NULL, 0) == 0)
+                            phys_ram = (size_t)hw_memsize;
+                    }
+#elif defined(_SC_PHYS_PAGES) && defined(_SC_PAGESIZE)
+                    {
+                        long pg = sysconf(_SC_PHYS_PAGES);
+                        long ps = sysconf(_SC_PAGESIZE);
+                        if (pg > 0 && ps > 0) phys_ram = (size_t)pg * (size_t)ps;
+                    }
+#endif
+                    int force_flat = getenv("TQ_FLAT_MADV") != NULL;
+                    int force_sel  = getenv("TQ_SELECTIVE_MADV") != NULL;
+                    int use_flat;
+                    if (force_flat) {
+                        use_flat = 1;
+                    } else if (force_sel) {
+                        use_flat = 0;
+                    } else if (phys_ram == 0) {
+                        use_flat = 1;  /* unknown RAM → conservative (old default) */
                     } else {
-                        /* mlock failed (insufficient privilege or ulimit) — use madvise */
-                        madvise(gctx->mmap_data, gctx->mmap_size, MADV_WILLNEED);
-                        fprintf(stderr, "tq_load_gguf: mlock failed (errno=%d), using MADV_WILLNEED for %.1f GB\n",
-                                errno, (double)gctx->mmap_size / (1024.0 * 1024.0 * 1024.0));
+                        /* Fit threshold: 75% of physical RAM. OS + app + KV
+                         * cache + scratch eats ~20-25%. */
+                        size_t fit_budget = phys_ram - (phys_ram / 4);
+                        use_flat = (gctx->mmap_size <= fit_budget);
+                    }
+                    int mlock_ok = 0;
+                    if (!getenv("TQ_NO_MLOCK")) {
+                        if (mlock(gctx->mmap_data, gctx->mmap_size) == 0) {
+                            mlock_ok = 1;
+                            fprintf(stderr, "tq_load_gguf: mlock(%.1f GB) — expert weights pinned in RAM\n",
+                                    (double)gctx->mmap_size / (1024.0 * 1024.0 * 1024.0));
+                        }
+                    }
+                    if (!mlock_ok) {
+                        if (use_flat) {
+                            madvise(gctx->mmap_data, gctx->mmap_size, MADV_WILLNEED);
+                            fprintf(stderr, "tq_load_gguf: TQ_FLAT_MADV — blanket MADV_WILLNEED for %.1f GB\n",
+                                    (double)gctx->mmap_size / (1024.0 * 1024.0 * 1024.0));
+                        } else {
+                            /* Selective WILLNEED: force-load only non-expert
+                             * tensors. Routed expert FFN tensors get NO madvise
+                             * call — left at the OS default (NORMAL on macOS
+                             * with read-ahead). This preserves read-ahead
+                             * locality when an expert is touched, while
+                             * avoiding the blanket pre-fault of the whole
+                             * 14-30 GB file.
+                             *
+                             * Rationale: blanket WILLNEED on Q5_K_M (23 GB)
+                             * or Q6_K (28 GB) thrashes swap on 16 GB Mac.
+                             * Selective WILLNEED keeps the critical 2-4 GB
+                             * of attn/norm/embed/shared-expert data hot, and
+                             * lets OS page cache manage the remaining 20+ GB
+                             * of routed experts via natural MoE sparsity
+                             * (K=8 of 256 active → ~3% of experts hot).
+                             *
+                             * Why no MADV_RANDOM on experts: it kills
+                             * read-ahead on the pages that *do* get faulted,
+                             * turning one 4 MB expert load into hundreds of
+                             * synchronous page faults. Measured 5× slowdown
+                             * during development. Default NORMAL is correct.
+                             */
+                            const long pagesize = sysconf(_SC_PAGESIZE);
+                            uintptr_t mmap_base = (uintptr_t)gctx->mmap_data;
+                            uintptr_t mmap_end  = mmap_base + gctx->mmap_size;
+                            size_t n_wn = 0, n_skip = 0;
+                            size_t bytes_wn = 0, bytes_skip = 0;
+                            for (uint64_t i = 0; i < gctx->n_tensors; i++) {
+                                const tq_gguf_tensor_t* t = &gctx->tensors[i];
+                                if (!t->data || t->size_bytes == 0) continue;
+                                const char* nm = t->name;
+                                int is_routed = (strstr(nm, "ffn_gate_exps") != NULL) ||
+                                                (strstr(nm, "ffn_up_exps")   != NULL) ||
+                                                (strstr(nm, "ffn_down_exps") != NULL);
+                                if (is_routed) {
+                                    n_skip++;
+                                    bytes_skip += t->size_bytes;
+                                    continue;  /* leave at OS default */
+                                }
+                                uintptr_t s = (uintptr_t)t->data;
+                                uintptr_t e = s + t->size_bytes;
+                                uintptr_t sa = s & ~(uintptr_t)(pagesize - 1);
+                                uintptr_t ea = (e + pagesize - 1) & ~(uintptr_t)(pagesize - 1);
+                                if (sa < mmap_base) sa = mmap_base;
+                                if (ea > mmap_end)  ea = mmap_end;
+                                if (ea > sa) {
+                                    madvise((void*)sa, (size_t)(ea - sa), MADV_WILLNEED);
+                                    n_wn++;
+                                    bytes_wn += (size_t)(ea - sa);
+                                }
+                            }
+                            fprintf(stderr, "tq_load_gguf: selective MADV — %zu non-expert WILLNEED (%.2f GB), "
+                                    "%zu routed-expert at OS default (%.2f GB, read-ahead preserved)\n",
+                                    n_wn, (double)bytes_wn / (1024.0*1024.0*1024.0),
+                                    n_skip, (double)bytes_skip / (1024.0*1024.0*1024.0));
+                        }
                     }
                 } else {
                     /* Non-MoE: release mmap pages after Q4 conversion */

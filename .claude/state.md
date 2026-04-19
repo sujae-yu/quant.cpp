@@ -1,8 +1,36 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-19 (Round 11)
+**Last updated**: 2026-04-19 (Round 12)
 **Score**: **0.9946 / 1.0000 (99.5%)** — score.sh --quick, correctness 100%, warnings 0, 12/12 regression PASS
-**Session HEAD**: Round 11 — state.md refresh + decode profile snapshot. 11 /grow rounds complete this session.
+**Session HEAD**: Round 12 — auto-policy MADV (per-tensor for large GGUF). 12 /grow rounds complete this session.
+
+## Round 12 — Higher-bpw headroom via auto-policy MADV (flash-moe trust-OS)
+
+`tq_model.c`: MoE GGUF loading now auto-selects madvise strategy by
+`file_size vs physical_RAM`:
+- File ≤ 75% RAM → blanket `MADV_WILLNEED` (old behavior, optimal
+  read-ahead for fits-in-RAM case).
+- File > 75% RAM → selective `MADV_WILLNEED` on non-expert tensors
+  only (`attn_*`, `norm_*`, `token_embd`, `output.weight`,
+  `ffn_*_shared_exp`); routed `ffn_{gate,up,down}_exps` left at OS
+  default so natural MoE sparsity (K=8/N=256 active) keeps working
+  set small. Prevents swap thrash on Q5_K_M 23 GB / Q6_K 28 GB.
+
+Override envs: `TQ_FLAT_MADV=1`, `TQ_SELECTIVE_MADV=1`.
+
+Measured (Qwen3.6-UD-Q3_K_S 14.3 GB on 16 GB M1 Pro):
+| | blanket (`TQ_FLAT_MADV`) | **auto = selective** |
+|---|---:|---:|
+| Decode (30 tok, cold) | 11.1 t/s | **11.0 t/s** (within noise) |
+| RSS | 7.01 GB | **6.99 GB** |
+
+IQ4_XS 16.5 GB (auto = selective): 9.2 t/s warm, 7.57 GB RSS.
+Pre-Round-12 this file required `TQ_NO_MLOCK` to avoid mlock fail +
+still thrashed under blanket WILLNEED at 16 GB RAM.
+
+Round 12 deliverable: **Q5_K_M / Q6_K loading is now technically
+possible on 16 GB Mac** — blanket WILLNEED would previously force
+swap-load all 23-28 GB. Next round: actually test Q5_K_M.
 
 ## What Works
 
