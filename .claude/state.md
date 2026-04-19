@@ -1,6 +1,58 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-19 (Round 32)
+**Last updated**: 2026-04-19 (Round 34)
+**Session HEAD**: Round 34 — **Qwen NEOX RoPE 근본 원인 수정 🎯**
+
+## Round 34 — Mission C ROOT CAUSE SOLVED
+
+### 발견 경로
+Round 31: llama.cpp reference diff 시도 → IMROPE 언급 발견
+Round 32: Qwen-common drift 확인 (DeltaNet 전용 아님)
+Round 33: QK-norm isolate (contributes, 단독 원인 아님)
+**Round 34: `refs/llama.cpp/src/llama-model.cpp:9298-9300` →
+`LLM_ARCH_QWEN35/QWEN35MOE → LLAMA_ROPE_TYPE_IMROPE`**
+
+### 핵심 발견
+`refs/llama.cpp/ggml/include/ggml.h:1826`:
+> "NEOX ordering is automatically applied and cannot be disabled
+> for MROPE and VISION"
+
+IMROPE는 MROPE 패밀리 → **NEOX-ordering 강제**.
+
+우리 코드 (`tq_transformer.c:1248-1269`):
+```c
+// WRONG (LLaMA-style paired rotation)
+qh[2*i]     = q0 * cos - q1 * sin;
+qh[2*i + 1] = q0 * sin + q1 * cos;
+```
+
+수정 (NEOX half-split):
+```c
+qh[i]              = q0 * cos - q1 * sin;
+qh[i + rope_pairs] = q0 * sin + q1 * cos;  // i + half
+```
+
+### 결과 (동일 프롬프트, 동일 quant)
+| 테스트 | Round 33 (paired) | **Round 34 (NEOX)** |
+|---|---|---|
+| Qwen3.5-4B "Once upon a time" n=40 | coherent (좋음) | **"Kuro, carpenter..." 40 토큰 완전 coherent** |
+| Qwen3.6 "Once upon a time" n=40 | "a small5" (4 토큰 drift) | **"Jack... parents did." 21 토큰 coherent EOS** |
+| Qwen3.6 "quick brown fox" n=30 | "quicck bbrrown" char doubling | 부분 coherent + 약한 doubling (추가 이슈) |
+| regression | 13/13 PASS | **13/13 PASS** |
+
+### 옵트아웃
+`TQ_ROPE_PAIRS=1` — 레거시 Qwen (Qwen2 이전) 호환용 LLaMA-style
+복귀 환경변수. 기본은 NEOX (올바른 경로).
+
+### 세션 돌파 요약
+- Round 26: L2-norm eps (partial fix)
+- Round 27-29: fast_expf → expf cleanup
+- **Round 34: NEOX RoPE — 세션의 진짜 root-cause 수정**
+
+30+ 라운드 엔진 세부 최적화보다 이 **한 줄 구조 수정이 가장 큰
+임팩트**. 사용자 지시 "refs/ 힌트 획득"이 결정적 단서 공급.
+
+## Round 32 — Drift는 Qwen-common (이전 분석)
 
 ## Round 32 — Mission C: Qwen-common 드리프트 (DeltaNet 전용 아님)
 

@@ -1245,26 +1245,71 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
             tls_base = c->rope_freq_base;
             tls_dim = rope_dim;
         }
-        for (int h = 0; h < n_heads; h++) {
-            float* qh = s->q + h * head_dim;
-            for (int i = 0; i < rope_pairs; i++) {
-                float cos_t = tls_cos[i];
-                float sin_t = tls_sin[i];
-                float q0 = qh[2 * i];
-                float q1 = qh[2 * i + 1];
-                qh[2 * i]     = q0 * cos_t - q1 * sin_t;
-                qh[2 * i + 1] = q0 * sin_t + q1 * cos_t;
+        /* Round 34: NEOX-style rotation for Qwen3.5/Qwen3.6 (IMROPE
+         * family). llama.cpp maps LLM_ARCH_QWEN35/QWEN35MOE to
+         * LLAMA_ROPE_TYPE_IMROPE which forces NEOX ordering
+         * (per ggml.h: "NEOX ordering is automatically applied and
+         * cannot be disabled for MROPE/VISION/IMROPE").
+         *
+         * NEOX pairs dims i and i+rope_pairs (half-split), NOT
+         * [2i, 2i+1] (LLaMA pairs). Wrong layout → prompt-sensitive
+         * drift previously observed as "quicck bbrrown" char doubling
+         * and "12345" digit spam on Qwen models.
+         *
+         * Detection: arch check via delta_n_heads (Qwen3.6 hybrid) or
+         * arch string "qwen3.5"/"qwen35". For legacy Qwen 2 and
+         * earlier, keep LLaMA-style pairs (TQ_ROPE_PAIRS=1 opt-out).
+         *
+         * Gemma/Llama: continue LLaMA-style via separate branches. */
+        int use_neox = 1;  /* partial-rotary path → always Qwen3.x */
+        if (getenv("TQ_ROPE_PAIRS")) use_neox = 0;
+
+        if (use_neox) {
+            for (int h = 0; h < n_heads; h++) {
+                float* qh = s->q + h * head_dim;
+                for (int i = 0; i < rope_pairs; i++) {
+                    float cos_t = tls_cos[i];
+                    float sin_t = tls_sin[i];
+                    float q0 = qh[i];
+                    float q1 = qh[i + rope_pairs];
+                    qh[i]             = q0 * cos_t - q1 * sin_t;
+                    qh[i + rope_pairs]= q0 * sin_t + q1 * cos_t;
+                }
             }
-        }
-        for (int h = 0; h < n_kv_heads; h++) {
-            float* kh = s->k + h * head_dim;
-            for (int i = 0; i < rope_pairs; i++) {
-                float cos_t = tls_cos[i];
-                float sin_t = tls_sin[i];
-                float k0 = kh[2 * i];
-                float k1 = kh[2 * i + 1];
-                kh[2 * i]     = k0 * cos_t - k1 * sin_t;
-                kh[2 * i + 1] = k0 * sin_t + k1 * cos_t;
+            for (int h = 0; h < n_kv_heads; h++) {
+                float* kh = s->k + h * head_dim;
+                for (int i = 0; i < rope_pairs; i++) {
+                    float cos_t = tls_cos[i];
+                    float sin_t = tls_sin[i];
+                    float k0 = kh[i];
+                    float k1 = kh[i + rope_pairs];
+                    kh[i]             = k0 * cos_t - k1 * sin_t;
+                    kh[i + rope_pairs]= k0 * sin_t + k1 * cos_t;
+                }
+            }
+        } else {
+            /* Legacy LLaMA-style pairs — kept for pre-Qwen3.5 compat */
+            for (int h = 0; h < n_heads; h++) {
+                float* qh = s->q + h * head_dim;
+                for (int i = 0; i < rope_pairs; i++) {
+                    float cos_t = tls_cos[i];
+                    float sin_t = tls_sin[i];
+                    float q0 = qh[2 * i];
+                    float q1 = qh[2 * i + 1];
+                    qh[2 * i]     = q0 * cos_t - q1 * sin_t;
+                    qh[2 * i + 1] = q0 * sin_t + q1 * cos_t;
+                }
+            }
+            for (int h = 0; h < n_kv_heads; h++) {
+                float* kh = s->k + h * head_dim;
+                for (int i = 0; i < rope_pairs; i++) {
+                    float cos_t = tls_cos[i];
+                    float sin_t = tls_sin[i];
+                    float k0 = kh[2 * i];
+                    float k1 = kh[2 * i + 1];
+                    kh[2 * i]     = k0 * cos_t - k1 * sin_t;
+                    kh[2 * i + 1] = k0 * sin_t + k1 * cos_t;
+                }
             }
         }
     } else if (model->rope_freqs && model->rope_freqs_len > 0 &&
