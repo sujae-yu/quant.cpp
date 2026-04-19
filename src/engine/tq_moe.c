@@ -157,243 +157,26 @@ static void geglu_fused(float* restrict hb, const float* restrict hb2, int n) {
 #endif
 
 /* ============================================================
- * Runtime Expert Q8_0 LRU Cache
+ * Runtime Expert Q8_0 LRU Cache — REMOVED (Round 13, 2026-04-19)
  *
- * MoE models with 256 experts x 40 layers would need ~19 GB
- * if all experts were pre-converted. Instead, we cache only the
- * EXPERT_CACHE_SIZE most-recently-used experts per layer in Q8_0
- * block format (34 bytes per 32 elements = ~1.06 bytes/elem).
- *
- * Q8_0 fused dot is ~3-5x faster than IQ2_XXS fused dot because
- * it avoids E8 lattice codebook lookups — just int8*float FMA.
- * On cache miss, we dequant IQ2_XXS → FP32 → Q8_0 blocks once.
- * On cache hit, tq_matmul_gguf dispatches to fused_dot_q8_0.
- *
- * Memory: 34 bytes/32 elems ≈ 1.0625 B/elem. For expert with
- * 3M params (gate+up+down), that's ~3.2 MB per cached expert.
- * 32 slots/layer × 3.2 MB ≈ 102 MB/layer. For 30 layers: ~3 GB.
+ * A per-layer Q8_0 LRU (dequant IQ2_XXS → FP32 → Q8_0 blocks, hot
+ * slots dispatched through fused_dot_q8_0) was prototyped earlier.
+ * Empirically, the dequant cost on cache miss exceeded the direct
+ * fused_dot_iq2_xxs_neon cost when expert reuse rate is low (typical
+ * for Qwen3.6 K=8/N=256 routing). The LRU was left behind an always-
+ * false `if (0 &&` guard for months; removing both the dead dispatch
+ * site and its supporting infrastructure eliminates ~200 LOC of dead
+ * code and silences a drift vs quant.h (which already had no-op
+ * stubs). See git history of this file for the prior implementation.
  * ============================================================ */
-
-#define EXPERT_CACHE_SIZE 4   /* per layer — 4 × 3.2MB × 40 = 512 MB max */
-
-/* FP32 → FP16 conversion for Q8_0 block scale fields */
-static inline uint16_t fp32_to_fp16(float f) {
-    uint32_t bits;
-    memcpy(&bits, &f, 4);
-    uint32_t sign = (bits >> 16) & 0x8000;
-    int32_t  exp  = ((bits >> 23) & 0xFF) - 127 + 15;
-    uint32_t mant = (bits >> 13) & 0x3FF;
-
-    if (exp <= 0) {
-        /* Underflow to zero */
-        return (uint16_t)sign;
-    } else if (exp >= 31) {
-        /* Overflow to infinity */
-        return (uint16_t)(sign | 0x7C00);
-    }
-    return (uint16_t)(sign | ((uint32_t)exp << 10) | mant);
-}
-
-/* Quantize FP32 array to Q8_0 block format in-place.
- * Q8_0 block: 2-byte fp16 scale + 32 int8 values = 34 bytes per 32 elements.
- * dst must have room for (n/32) * 34 bytes. n must be a multiple of 32. */
-static void quantize_fp32_to_q8_0(const float* src, void* dst, int n) {
-    const int nb = n / 32;
-    uint8_t* out = (uint8_t*)dst;
-
-    for (int b = 0; b < nb; b++) {
-        const float* block = src + b * 32;
-
-        /* Find max absolute value */
-        float amax = 0.0f;
-        for (int j = 0; j < 32; j++) {
-            float a = block[j] < 0 ? -block[j] : block[j];
-            if (a > amax) amax = a;
-        }
-
-        /* Scale: map [-amax, amax] to [-127, 127] */
-        float d = amax / 127.0f;
-        float id = (d > 0.0f) ? 127.0f / amax : 0.0f;
-
-        /* Write fp16 scale */
-        uint16_t d_fp16 = fp32_to_fp16(d);
-        memcpy(out + b * 34, &d_fp16, 2);
-
-        /* Write quantized int8 values */
-        int8_t* qs = (int8_t*)(out + b * 34 + 2);
-        for (int j = 0; j < 32; j++) {
-            float v = block[j] * id;
-            int32_t vi = (int32_t)(v + (v >= 0 ? 0.5f : -0.5f));
-            if (vi > 127) vi = 127;
-            if (vi < -127) vi = -127;
-            qs[j] = (int8_t)vi;
-        }
-    }
-}
-
-typedef struct {
-    int      expert_id;       /* -1 = empty slot */
-    void*    gate_q8;         /* Q8_0 block data for gate [inter*dim elems] */
-    void*    up_q8;           /* Q8_0 block data for up [inter*dim elems] */
-    void*    down_q8;         /* Q8_0 block data for down [dim*inter elems] */
-    int      last_used;       /* token counter for LRU eviction */
-} expert_cache_entry_t;
-
-typedef struct {
-    expert_cache_entry_t entries[EXPERT_CACHE_SIZE];
-    int count;                /* number of occupied slots */
-} expert_layer_cache_t;
-
-static expert_layer_cache_t* g_expert_cache = NULL; /* [n_layers] */
-static int    g_cache_n_layers   = 0;
-static int    g_cache_hidden_dim = 0;
-static int    g_cache_exp_inter  = 0;
-static int    g_token_counter    = 0;
-static float* g_cache_fp32_temp  = NULL;  /* reusable dequant buffer */
 
 void tq_moe_cache_init(int n_layers, const tq_moe_config_t* config, int hidden_dim)
 {
-    if (g_expert_cache) return; /* already initialized */
-    if (!config) return;
-
-    g_cache_n_layers   = n_layers;
-    g_cache_hidden_dim = hidden_dim;
-    g_cache_exp_inter  = config->expert_intermediate_dim;
-    g_token_counter    = 0;
-
-    g_expert_cache = (expert_layer_cache_t*)calloc(
-        (size_t)n_layers, sizeof(expert_layer_cache_t));
-    if (!g_expert_cache) {
-        fprintf(stderr, "tq_moe_cache_init: allocation failed\n");
-        return;
-    }
-
-    /* Mark all slots empty */
-    for (int l = 0; l < n_layers; l++) {
-        for (int s = 0; s < EXPERT_CACHE_SIZE; s++) {
-            g_expert_cache[l].entries[s].expert_id = -1;
-        }
-    }
-
-    /* Allocate reusable FP32 temp buffer (max of gate/up and down sizes) */
-    size_t gate_up_elems = (size_t)g_cache_exp_inter * hidden_dim;
-    size_t down_elems    = (size_t)hidden_dim * g_cache_exp_inter;
-    size_t max_elems     = gate_up_elems > down_elems ? gate_up_elems : down_elems;
-    g_cache_fp32_temp = (float*)malloc(max_elems * sizeof(float));
-
-    /* Q8_0: 34 bytes per 32 elements = 1.0625 bytes/elem
-     * Per expert: 3 matrices × (inter*dim) elems × 1.0625 ≈ 3.2 MB (for 1024×512) */
-    float cache_mb = (float)(n_layers * EXPERT_CACHE_SIZE) *
-                     (3.0f * (float)gate_up_elems * 34.0f / 32.0f) /
-                     (1024.0f * 1024.0f);
-    fprintf(stderr, "tq_moe_cache_init: Q8 LRU cache for %d layers x %d slots "
-            "(max %.0f MB)\n", n_layers, EXPERT_CACHE_SIZE, (double)cache_mb);
-}
-
-static void free_cache_entry(expert_cache_entry_t* e)
-{
-    free(e->gate_q8);  e->gate_q8 = NULL;
-    free(e->up_q8);    e->up_q8 = NULL;
-    free(e->down_q8);  e->down_q8 = NULL;
-    e->expert_id = -1;
+    (void)n_layers; (void)config; (void)hidden_dim;
 }
 
 void tq_moe_cache_free(void)
 {
-    if (!g_expert_cache) return;
-    for (int l = 0; l < g_cache_n_layers; l++) {
-        for (int s = 0; s < EXPERT_CACHE_SIZE; s++) {
-            free_cache_entry(&g_expert_cache[l].entries[s]);
-        }
-    }
-    free(g_expert_cache);
-    g_expert_cache = NULL;
-    free(g_cache_fp32_temp);
-    g_cache_fp32_temp = NULL;
-    g_cache_n_layers = 0;
-}
-
-/* Q8_0 block byte size for n elements (n must be multiple of 32) */
-static inline size_t q8_0_bytes(int n) {
-    return (size_t)(n / 32) * 34;
-}
-
-/* Find a cached entry for expert_id in layer, or evict LRU and create one.
- * Returns the entry with Q8_0 data populated, or NULL on allocation failure. */
-static expert_cache_entry_t* cache_get_or_create(
-    int layer_idx, int expert_id, const tq_expert_weights_t* exp)
-{
-    expert_layer_cache_t* lc = &g_expert_cache[layer_idx];
-
-    /* Search for existing entry (cache hit) */
-    for (int s = 0; s < EXPERT_CACHE_SIZE; s++) {
-        if (lc->entries[s].expert_id == expert_id) {
-            lc->entries[s].last_used = g_token_counter;
-            return &lc->entries[s];
-        }
-    }
-
-    /* Cache miss: find an empty slot or evict LRU */
-    int target = -1;
-    if (lc->count < EXPERT_CACHE_SIZE) {
-        /* Find first empty slot */
-        for (int s = 0; s < EXPERT_CACHE_SIZE; s++) {
-            if (lc->entries[s].expert_id < 0) {
-                target = s;
-                break;
-            }
-        }
-        lc->count++;
-    } else {
-        /* Evict least-recently-used */
-        int oldest_time = g_token_counter + 1;
-        for (int s = 0; s < EXPERT_CACHE_SIZE; s++) {
-            if (lc->entries[s].last_used < oldest_time) {
-                oldest_time = lc->entries[s].last_used;
-                target = s;
-            }
-        }
-        free_cache_entry(&lc->entries[target]);
-    }
-
-    expert_cache_entry_t* ce = &lc->entries[target];
-    ce->expert_id = expert_id;
-    ce->last_used = g_token_counter;
-
-    int dim = g_cache_hidden_dim;
-    int inter = g_cache_exp_inter;
-
-    /* Convert gate: [inter, dim] — dequant IQ2_XXS → FP32 → Q8_0 blocks */
-    {
-        int n = inter * dim;
-        ce->gate_q8 = malloc(q8_0_bytes(n));
-        if (ce->gate_q8) {
-            tq_dequant_row_gguf(exp->gate_type, exp->w_gate, g_cache_fp32_temp, n);
-            quantize_fp32_to_q8_0(g_cache_fp32_temp, ce->gate_q8, n);
-        }
-    }
-
-    /* Convert up: [inter, dim] */
-    {
-        int n = inter * dim;
-        ce->up_q8 = malloc(q8_0_bytes(n));
-        if (ce->up_q8) {
-            tq_dequant_row_gguf(exp->up_type, exp->w_up, g_cache_fp32_temp, n);
-            quantize_fp32_to_q8_0(g_cache_fp32_temp, ce->up_q8, n);
-        }
-    }
-
-    /* Convert down: [dim, inter] */
-    {
-        int n = dim * inter;
-        ce->down_q8 = malloc(q8_0_bytes(n));
-        if (ce->down_q8) {
-            tq_dequant_row_gguf(exp->down_type, exp->w_down, g_cache_fp32_temp, n);
-            quantize_fp32_to_q8_0(g_cache_fp32_temp, ce->down_q8, n);
-        }
-    }
-
-    return ce;
 }
 
 /* ============================================================
@@ -862,8 +645,6 @@ void tq_moe_forward(const tq_moe_layer_t* layer,
     /* Step 2: Zero the output accumulator */
     memset(output, 0, (size_t)hidden_dim * sizeof(float));
 
-    /* Advance the global token counter for LRU tracking */
-    g_token_counter++;
 #ifdef TQ_HAS_ACCELERATE
     g_cblas_token++;
 #endif
@@ -1138,34 +919,13 @@ moe_cpu_fallback: ;
         }
 #endif /* TQ_HAS_ACCELERATE */
 
-        /* Q8 LRU cache DISABLED: cache miss conversion cost (IQ2->FP32->Q8)
-         * exceeds fused IQ2 dot cost. Direct fused_dot_iq2_xxs_neon is faster
-         * than any cache scheme when expert reuse rate is low. */
-        if (0 && g_expert_cache && layer_idx >= 0 && layer_idx < g_cache_n_layers
-            && exp->w_gate && !exp->q4_converted) {
-            expert_cache_entry_t* ce = cache_get_or_create(layer_idx, eid, exp);
-            if (ce && ce->gate_q8 && ce->up_q8 && ce->down_q8) {
-                /* Fast Q8_0 matmul path — dispatches to fused_dot_q8_0 (NEON) */
-                tq_matmul_gguf(state->expert_hb, input,
-                               ce->gate_q8, TQ_GGML_TYPE_Q8_0,
-                               expert_dim, hidden_dim);
-                tq_matmul_gguf(state->expert_hb2, input,
-                               ce->up_q8, TQ_GGML_TYPE_Q8_0,
-                               expert_dim, hidden_dim);
-
-                /* Gated activation: GeGLU (Gemma4) or SwiGLU (Qwen) */
-                activation_fn(state->expert_hb, state->expert_hb2, expert_dim);
-
-                tq_matmul_gguf(state->expert_out, state->expert_hb,
-                               ce->down_q8, TQ_GGML_TYPE_Q8_0,
-                               hidden_dim, expert_dim);
-
-                /* Weighted accumulation: output += weight * down_proj */
-                for (int i = 0; i < hidden_dim; i++)
-                    output[i] += w * state->expert_out[i];
-                continue;
-            }
-        }
+        /* Historical note: a Q8 LRU cache for IQ2 experts (IQ2→FP32→Q8
+         * on miss, fused_dot_q8_0 on hit) was prototyped here but
+         * empirically lost to direct fused_dot_iq2_xxs_neon — the
+         * cache miss conversion cost exceeds the direct-path compute
+         * cost when expert reuse rate is low. Round 13 (2026-04-19)
+         * removed the dead dispatch site. See git history of this
+         * file for the prior implementation. */
 
         if (exp->q4_converted) {
             /* Fast Q4 matmul path — pre-converted expert weights (shared expert)
@@ -2080,8 +1840,6 @@ void tq_moe_forward_batch(const tq_moe_layer_t* layer,
     free(top_experts_all);
     free(expert_weights_all);
 
-    /* Advance token counter for LRU tracking */
-    g_token_counter += N;
 #ifdef TQ_HAS_ACCELERATE
     g_cblas_token += N;
 #endif

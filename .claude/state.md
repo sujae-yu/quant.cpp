@@ -1,8 +1,31 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-19 (Round 12)
+**Last updated**: 2026-04-19 (Round 13)
 **Score**: **0.9946 / 1.0000 (99.5%)** — score.sh --quick, correctness 100%, warnings 0, 12/12 regression PASS
-**Session HEAD**: Round 12 — auto-policy MADV (per-tensor for large GGUF). 12 /grow rounds complete this session.
+**Session HEAD**: Round 13 — dead Q8 LRU infrastructure removed (~200 LOC). 13 /grow rounds complete this session.
+
+## Round 13 — Dead LRU cleanup + split-source/quant.h drift fix
+
+`src/engine/tq_moe.c`: removed the `if (0 && g_expert_cache ...)`
+dispatch site (25 LOC dead code in the per-expert hot loop) and
+its supporting chain:
+- `cache_get_or_create`, `free_cache_entry`, `quantize_fp32_to_q8_0`,
+  `fp32_to_fp16`, `q8_0_bytes` (all only reached via the dead site)
+- `expert_cache_entry_t`, `expert_layer_cache_t` structs
+- `g_expert_cache`, `g_cache_*`, `g_token_counter` globals
+- `tq_moe_cache_init` / `tq_moe_cache_free` reduced to empty no-op
+  stubs (matching what `quant.h` already shipped — this eliminates
+  a split-source vs single-header drift that had existed since
+  the Q8 LRU was prototyped and then guarded out).
+
+Dead call-site investigation documented the "historical note" comment
+so future readers see *why* the path was abandoned:
+`fused_dot_iq2_xxs_neon` direct dispatch was faster than
+(IQ2→FP32→Q8_0 on miss + fused_dot_q8_0 on hit) whenever expert reuse
+rate is low — always the case for Qwen3.6's K=8/N=256 routing.
+
+No behavior change (dead code was unreachable). Build clean, 12/12
+regression PASS, score 0.9946 preserved. ~200 LOC net reduction.
 
 ## Round 12 — Higher-bpw headroom via auto-policy MADV (flash-moe trust-OS)
 
