@@ -1,8 +1,15 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-19 (Round 27)
+**Last updated**: 2026-04-19 (Round 28)
 **Score**: **0.9979 / 1.0000 (99.8%)** — unchanged
-**Session HEAD**: Round 27 — DeltaNet exact expf numerical cleanup.
+**Session HEAD**: Round 28 — conv1d silu exact expf (245K 호출/토큰).
+
+## Round 28 — conv1d silu exact expf
+
+causal_conv1d_silu_batch의 fast_expf 전부 expf 교체 (245K/토큰).
+Gravity 50-tok clean prefix **15 → 18 토큰**. 12/12 regression PASS.
+
+## Round 27 — DeltaNet exact expf numerical cleanup.
 
 ## Round 27 — DeltaNet exact expf (softplus + decay + silu gate)
 

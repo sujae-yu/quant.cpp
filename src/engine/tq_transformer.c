@@ -537,21 +537,14 @@ static void causal_conv1d_silu_batch(float* data, float* conv_st,
                 buf[2] = data[idx];
                 results[c] = out;
             }
-            /* SiLU on 4 values at once: x / (1 + exp(-x)) */
-            float32x4_t vx = vld1q_f32(results);
-            float32x4_t vneg = vnegq_f32(vx);
-            /* Use fast exp for SiLU since exact precision is not critical here */
-            float exp_vals[4];
-            vst1q_f32(exp_vals, vneg);
-            exp_vals[0] = fast_expf(exp_vals[0]);
-            exp_vals[1] = fast_expf(exp_vals[1]);
-            exp_vals[2] = fast_expf(exp_vals[2]);
-            exp_vals[3] = fast_expf(exp_vals[3]);
-            float32x4_t vexp = vld1q_f32(exp_vals);
-            float32x4_t vone = vdupq_n_f32(1.0f);
-            float32x4_t vdenom = vaddq_f32(vone, vexp);
-            float32x4_t vresult = vdivq_f32(vx, vdenom);
-            vst1q_f32(data + ch, vresult);
+            /* SiLU on 4 values at once: x / (1 + exp(-x)).
+             * Round 28: exact expf (was fast_expf). ~8192 channels × 30
+             * DeltaNet layers = 245K silu calls per token — Schraudolph
+             * ~2% error compounds materially across long gen. */
+            for (int c = 0; c < 4; c++) {
+                results[c] = results[c] / (1.0f + expf(-results[c]));
+            }
+            vst1q_f32(data + ch, vld1q_f32(results));
         }
         /* Scalar tail */
         for (; ch < n_channels; ch++) {
@@ -561,7 +554,7 @@ static void causal_conv1d_silu_batch(float* data, float* conv_st,
             buf[0] = buf[1];
             buf[1] = buf[2];
             buf[2] = data[ch];
-            data[ch] = out / (1.0f + fast_expf(-out));
+            data[ch] = out / (1.0f + expf(-out));
         }
     } else
 #endif
@@ -572,9 +565,9 @@ static void causal_conv1d_silu_batch(float* data, float* conv_st,
             const float* ch_weight = conv_weights + ch * conv_width;
             data[ch] = causal_conv1d_step(data[ch], ch_conv_buf, ch_weight, conv_width);
         }
-        /* SiLU */
+        /* SiLU — Round 28: exact expf for long-gen coherence */
         for (int i = 0; i < n_channels; i++) {
-            data[i] = data[i] / (1.0f + fast_expf(-data[i]));
+            data[i] = data[i] / (1.0f + expf(-data[i]));
         }
     }
 }
