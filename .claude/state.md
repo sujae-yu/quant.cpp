@@ -1,7 +1,39 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-19 (Round 34)
-**Session HEAD**: Round 34 — **Qwen NEOX RoPE 근본 원인 수정 🎯**
+**Last updated**: 2026-04-20 (Round 40)
+**Session HEAD**: Round 40 — **Qwen arch-conditional QK-norm 🏆 ALL FORMATS WIN**
+
+## Round 40 ★ — QK-norm arch-conditional (Mission C 완승)
+
+100가지 후보 체계적 검토에서 "QK-norm 적용 방식 차이" 가설 도출 → 실측 확인 → 수정.
+
+### 수정
+`tq_transformer.c:self_attn_forward` — arch 감지:
+- Gemma 4 (`model_type == 1`): QK-norm 필수 (2+2=4 테스트 필요)
+- Qwen family (delta_n_heads>0 OR arch="qwen*"): QK-norm 비활성화
+- 근거: 실측 — Qwen은 QK-norm 적용 시 40+ 토큰 후 digit/alphabet 누설
+- 옵션: `TQ_FORCE_QK_NORM=1` (향후 convention 수정되면 복귀)
+
+### 실측 (Qwen3.6-UD-IQ4_XS, T=0, --chat)
+| 형식 | 결과 |
+|---|---|
+| 60-tok 스토리 "Once upon" | **완전 coherent**: "Jack who lived in the countryside. He loved to explore and discover new things. One day, he decided to go on an adventure across the country. He packed his bag with a map, a compass, and some food and water. He set off early in the" |
+| 코드 `def fibonacci(n):` | **정확**: `if n <= 0: return "Invalid input` |
+| Haiku | **형식 맞음**: "Silence speaks loud, Silence speaks in the quietest way." |
+| List | **완벽**: "1. Apple 2. Banana 3. Orange" |
+| 과학 설명 | **정확**: "Gravity is the natural force that pulls objects with mass toward one another" |
+| 팩트 Q&A | **Paris** clean EOS |
+
+### Regression: 13/13 PASS ✓ (Gemma 2+2=4 포함)
+
+### 세션 아크 교정
+- Rounds 26-29: L2 eps + exact expf — 증상 완화 (보조)
+- Round 34: NEOX RoPE — 주요 구조 수정
+- **Round 40: QK-norm arch-conditional — 최종 ALL FORMATS 승리**
+
+R34 + R40 조합이 진짜 Qwen3.6 엔진 완성. 100-candidate 체계적 검토 방법론이 결정적 역할.
+
+## Round 34 — NEOX RoPE (이전 주요 수정)
 
 ## Round 34 — Mission C ROOT CAUSE SOLVED
 

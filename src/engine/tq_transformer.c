@@ -1183,15 +1183,40 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
     }
     /* Apply QK-norm if present (per-head RMSNorm).
      * For KV-shared layers: only Q-norm is applied (no K/V to normalize).
-     * Round 33: TQ_NO_QK_NORM=1 for Mission C drift isolation. */
+     *
+     * Round 40: Arch-conditional. Gemma 4 REQUIRES QK-norm for
+     * correctness ("2+2=4" test fails without). Qwen family DEGRADES
+     * with QK-norm applied (causes 40+ tok drift + alphabet/digit
+     * leak + char doubling as measured in R25-39). Empirical:
+     *   Qwen3.6 "Once upon a time" n=60 w/ QK-norm:  drift at ~20
+     *                                w/o QK-norm: perfect 60 tok
+     *   Qwen3.6 "def fibonacci(n):" w/o QK-norm: correct Python code
+     *   Gemma-4 "2+2=" w/o QK-norm: "** ```python" FAIL
+     *
+     * Hypothesis for why Qwen fails: the q_norm/k_norm weights from
+     * GGUF may follow a different convention than we apply (raw vs
+     * 1+w), but the exact mismatch is not yet root-caused. Disabling
+     * empirically gives 60+ tok coherent output.
+     *
+     * TQ_NO_QK_NORM=1 forces off (diagnostic).
+     * TQ_FORCE_QK_NORM=1 forces on (Gemma fallback for Qwen if ever
+     * the convention is fixed). */
     int _qknorm_disabled = (getenv("TQ_NO_QK_NORM") != NULL);
-    if (layer->q_norm && !_qknorm_disabled) {
+    int _is_qwen = (c->delta_n_heads > 0);  /* Qwen hybrid: always */
+    if (model->gguf_ctx) {
+        tq_gguf_ctx_t* gctx = (tq_gguf_ctx_t*)model->gguf_ctx;
+        if (strstr(gctx->arch, "qwen") != NULL) _is_qwen = 1;
+    }
+    int _apply_qknorm = !_qknorm_disabled;
+    if (_is_qwen && !getenv("TQ_FORCE_QK_NORM")) _apply_qknorm = 0;
+
+    if (layer->q_norm && _apply_qknorm) {
         for (int h = 0; h < n_heads; h++) {
             tq_rmsnorm(s->q + h * head_dim, s->q + h * head_dim,
                        layer->q_norm, head_dim, c->rms_norm_eps);
         }
     }
-    if (layer->k_norm && !is_kv_shared && !_qknorm_disabled) {
+    if (layer->k_norm && !is_kv_shared && _apply_qknorm) {
         for (int h = 0; h < n_kv_heads; h++) {
             tq_rmsnorm(s->k + h * head_dim, s->k + h * head_dim,
                        layer->k_norm, head_dim, c->rms_norm_eps);
