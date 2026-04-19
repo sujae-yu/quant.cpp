@@ -81,11 +81,23 @@ Sanity: `TQ_MOE_BATCH_SELFTEST=1` max_abs_diff 1.2e-7. First-20-token
 match with per-token reference under `TQ_MOE_BATCH_SANITY=1`.
 
 ### P0 Remaining (small incremental gains)
-**Step 3g: dynamic work queue for expert stragglers** (still pending)
-Current wave-based `tq_tp_run` has long tails when one expert gets
-600+ tokens and others 30. First-come-first-served atomic dispatch
-would flatten. ~100-200 LOC in `tq_ops.c` `tq_tp_run` or a new
-`tq_tp_dynamic`. Expected +5-10% additional.
+**Step 3g: ✅ DONE** (tq_tp_run_dynamic FCFS queue)
+Added `tq_tp_run_dynamic` in `tq_ops.c` with atomic-counter FCFS
+dispatch (workers + main grab next task idx, no wave boundaries).
+Added `__thread int tq_tls_worker_id` for per-worker slab lookup.
+Wired into `tq_moe_forward_batch` Phase 3 behind env
+`TQ_MOE_BATCH_DYNAMIC=1` (default OFF for safety).
+
+Measurement (Qwen3.6-UD-Q3_K_S, 450-word prompt, N=5 decode, warm,
+j=8, median of 3):
+| | 3h baseline (wave) | **3g (dynamic)** | Δ |
+|---|---:|---:|---:|
+| Wall time | 84.5s | **71.7s** | **-15%** |
+| Prefill rate | 11.4 t/s | **13.4 t/s** | **+17%** |
+
+12/12 regression PASS. No decode change (N=1 path doesn't hit
+Phase 3). Dynamic is opt-in; flipping to default-on is a separate
+follow-up once broader coverage is confirmed.
 
 **Step 3h: ✅ DONE (3a34cbf)**
 Batched shared expert dispatch. Extra +8% vs Step 3f measured

@@ -106,10 +106,38 @@ static struct {
 
 static int g_n_threads = 1;
 
+/* TLS worker id: 0 for main, 1..n_workers-1 for pool workers.
+ * Set by tp_worker on each wake and by tp_run just before main runs
+ * its slice. Readable from worker bodies (e.g., MoE Step 3g dynamic
+ * dispatch to pick a private output buffer). */
+__thread int tq_tls_worker_id = 0;
+
+/* ------------------------------------------------------------------
+ * Step 3g: FCFS dynamic dispatch — atomic counter shared by all
+ * workers + main. Tasks can exceed n_workers; worker grabs next idx.
+ * State is set up under g_tp.mtx then read-only during parallel
+ * section (tp_run is not re-entered).
+ * ------------------------------------------------------------------ */
+static atomic_int g_dyn_counter;
+static tp_fn      g_dyn_fn_real;
+static void**     g_dyn_args_real;
+static int        g_dyn_n_real;
+
+static void* tp_dynamic_worker_wrapper(void* unused) {
+    (void)unused;
+    for (;;) {
+        int idx = atomic_fetch_add(&g_dyn_counter, 1);
+        if (idx >= g_dyn_n_real) break;
+        void* a = g_dyn_args_real[idx];
+        if (a) g_dyn_fn_real(a);
+    }
+    return NULL;
+}
 
 static void* tp_worker(void* arg) {
     int id = (int)(intptr_t)arg;
     int my_gen = 0;
+    tq_tls_worker_id = id;
 #ifdef __APPLE__
     /* M1 Pro = 8 P-cores + 2 E-cores. Without QoS hint the macOS scheduler
      * may place compute workers on E-cores (~3-4× lower bandwidth per core),
@@ -226,6 +254,58 @@ void tq_tp_run(void* (*fn)(void*), void** args, int n_tasks) {
         for (int t = 0; t < n_tasks; t++)
             pthread_join(threads[t], NULL);
     }
+}
+
+/* ============================================================
+ * Step 3g: FCFS dynamic dispatch.
+ * n_tasks can exceed n_workers. All workers (and main) grab the
+ * next task index via an atomic counter. Flattens straggler tails
+ * when task workloads are skewed (e.g., MoE expert token counts).
+ * ============================================================ */
+void tq_tp_run_dynamic(void* (*fn)(void*), void** args, int n_tasks) {
+    if (n_tasks <= 0) return;
+    if (n_tasks == 1) { if (args[0]) fn(args[0]); return; }
+    if (!g_tp.active || g_tp.n_workers < 2) {
+        /* Serial fallback */
+        for (int i = 0; i < n_tasks; i++)
+            if (args[i]) fn(args[i]);
+        return;
+    }
+
+    /* Set up shared dynamic state, then redirect pool workers to the
+     * dynamic wrapper. Wrapper ignores g_tp.args[id] — it pulls from
+     * g_dyn_args_real via the atomic counter. We still set
+     * g_tp.args[i] to a non-null sentinel so each worker enters the
+     * wrapper once. */
+    pthread_mutex_lock(&g_tp.mtx);
+    g_dyn_fn_real   = fn;
+    g_dyn_args_real = args;
+    g_dyn_n_real    = n_tasks;
+    atomic_store(&g_dyn_counter, 0);
+    g_tp.fn = tp_dynamic_worker_wrapper;
+    for (int i = 0; i < g_tp.n_workers; i++)
+        g_tp.args[i] = (void*)(intptr_t)1;  /* non-null sentinel */
+    atomic_store(&g_tp.done, 0);
+    g_tp.generation++;
+    pthread_cond_broadcast(&g_tp.wake);
+    pthread_mutex_unlock(&g_tp.mtx);
+
+    /* Main thread participates in the queue via the same wrapper.
+     * Main's TLS worker id is 0 (zero-initialized; reset defensively
+     * in case a prior recursion changed it). */
+    tq_tls_worker_id = 0;
+    tp_dynamic_worker_wrapper(NULL);
+
+    /* Main's completion bookkeeping — same protocol as tp_run.
+     * Pool has g_tp.n_workers including main, so after main +1 the
+     * count must reach g_tp.n_workers for all to be done. */
+    if (atomic_fetch_add(&g_tp.done, 1) + 1 >= g_tp.n_workers) {
+        return;
+    }
+    pthread_mutex_lock(&g_tp.mtx);
+    while (atomic_load(&g_tp.done) < g_tp.n_workers)
+        pthread_cond_wait(&g_tp.done_cv, &g_tp.mtx);
+    pthread_mutex_unlock(&g_tp.mtx);
 }
 
 /* ============================================================

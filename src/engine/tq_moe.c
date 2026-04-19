@@ -1442,12 +1442,22 @@ typedef struct {
     const float*                tokens_w;        /* [M_e] routing weights */
     float                       exp_scale;       /* per-expert output scale (Gemma 4) */
     void (*activation_fn)(float* restrict, const float* restrict, int);
-    /* Per-worker private scratch — caller-provided, sized for max_M_cap=64 */
+    /* Wave mode: per-task pre-baked pointers (output_private != NULL).
+     * Dynamic (Step 3g) mode: output_private == NULL → worker picks its
+     * own scratch slab + private output from scratch_all using
+     * tq_tls_worker_id. shared_output is the single destination of
+     * worker id 0 (replaces its private slab). */
     float*                      X_sub;           /* [64, hidden_dim] */
     float*                      gate_out;        /* [64, expert_dim] */
     float*                      up_out;          /* [64, expert_dim] */
     float*                      down_out;        /* [64, hidden_dim] */
-    float*                      output_private;  /* [N_total, hidden_dim] — this worker's accumulator */
+    float*                      output_private;  /* [N_total, hidden_dim] — this worker's accumulator (wave mode) */
+    /* Dynamic-mode shared slabs (only read when output_private == NULL) */
+    float*                      scratch_all;     /* n_workers × per_worker_total */
+    float*                      shared_output;   /* == `output`, used by worker id 0 */
+    size_t                      per_worker_total;
+    int                         max_M_cap;
+    int                         n_workers;       /* bound for TLS id clamp */
 } moe_batch_expert_task_t;
 
 static void* moe_batch_expert_worker(void* arg) {
@@ -1457,6 +1467,38 @@ static void* moe_batch_expert_worker(void* arg) {
     int expert_dim = t->expert_dim;
     int M_e = t->M_e;
     if (M_e <= 0) return NULL;
+
+    /* Resolve scratch + output buffers.
+     *   Wave mode: t->output_private is pre-baked, use t->X_sub/gate_out/etc.
+     *   Dynamic mode (Step 3g): output_private == NULL → pick per-worker
+     *   slab by TLS worker id. Worker id 0 writes through to shared_output
+     *   (== outer `output`), others use their private slab inside scratch_all. */
+    float* X_sub; float* gate_out; float* up_out; float* down_out; float* output_private;
+    if (t->output_private) {
+        X_sub          = t->X_sub;
+        gate_out       = t->gate_out;
+        up_out         = t->up_out;
+        down_out       = t->down_out;
+        output_private = t->output_private;
+    } else {
+        int wid = tq_tls_worker_id;
+        if (wid < 0) wid = 0;
+        if (wid >= t->n_workers) wid = t->n_workers - 1;
+        int max_M_cap = t->max_M_cap;
+        float* base = t->scratch_all + (size_t)wid * t->per_worker_total;
+        X_sub    = base + 0;
+        gate_out = base + (size_t)max_M_cap * hidden_dim;
+        up_out   = base + (size_t)max_M_cap * hidden_dim
+                        + (size_t)max_M_cap * expert_dim;
+        down_out = base + (size_t)max_M_cap * hidden_dim
+                        + 2 * (size_t)max_M_cap * expert_dim;
+        size_t per_worker_scratch =
+            (size_t)max_M_cap * hidden_dim
+          + (size_t)max_M_cap * expert_dim
+          + (size_t)max_M_cap * expert_dim
+          + (size_t)max_M_cap * hidden_dim;
+        output_private = (wid == 0) ? t->shared_output : (base + per_worker_scratch);
+    }
 
     /* Force inner matmuls to run single-threaded (outer pool is busy) */
     int prev_flag = tq_tls_force_serial_matmul;
@@ -1473,40 +1515,40 @@ static void* moe_batch_expert_worker(void* arg) {
         /* Gather X_sub rows for this chunk */
         for (int m = 0; m < M_c; m++) {
             int tok = t->tokens_idx[chunk_start + m];
-            memcpy(t->X_sub + (size_t)m * hidden_dim,
+            memcpy(X_sub + (size_t)m * hidden_dim,
                    t->hidden + (size_t)tok * hidden_dim,
                    (size_t)hidden_dim * sizeof(float));
         }
 
         /* Gate + up projections */
-        int rc_gate = moe_batched_dispatch(t->gate_out, exp, 0,
-                                            t->X_sub, expert_dim, hidden_dim, M_c);
-        int rc_up   = moe_batched_dispatch(t->up_out, exp, 1,
-                                            t->X_sub, expert_dim, hidden_dim, M_c);
+        int rc_gate = moe_batched_dispatch(gate_out, exp, 0,
+                                            X_sub, expert_dim, hidden_dim, M_c);
+        int rc_up   = moe_batched_dispatch(up_out, exp, 1,
+                                            X_sub, expert_dim, hidden_dim, M_c);
         if (rc_gate != 0 || rc_up != 0) {
             for (int m = 0; m < M_c; m++) {
-                tq_matmul_gguf(t->gate_out + (size_t)m * expert_dim,
-                               t->X_sub + (size_t)m * hidden_dim,
+                tq_matmul_gguf(gate_out + (size_t)m * expert_dim,
+                               X_sub + (size_t)m * hidden_dim,
                                exp->w_gate, exp->gate_type, expert_dim, hidden_dim);
-                tq_matmul_gguf(t->up_out + (size_t)m * expert_dim,
-                               t->X_sub + (size_t)m * hidden_dim,
+                tq_matmul_gguf(up_out + (size_t)m * expert_dim,
+                               X_sub + (size_t)m * hidden_dim,
                                exp->w_up, exp->up_type, expert_dim, hidden_dim);
             }
         }
 
         /* Activation (SwiGLU/GeGLU) per row */
         for (int m = 0; m < M_c; m++) {
-            t->activation_fn(t->gate_out + (size_t)m * expert_dim,
-                             t->up_out + (size_t)m * expert_dim, expert_dim);
+            t->activation_fn(gate_out + (size_t)m * expert_dim,
+                             up_out + (size_t)m * expert_dim, expert_dim);
         }
 
         /* Down projection */
-        int rc_down = moe_batched_dispatch(t->down_out, exp, 2,
-                                            t->gate_out, hidden_dim, expert_dim, M_c);
+        int rc_down = moe_batched_dispatch(down_out, exp, 2,
+                                            gate_out, hidden_dim, expert_dim, M_c);
         if (rc_down != 0) {
             for (int m = 0; m < M_c; m++) {
-                tq_matmul_gguf(t->down_out + (size_t)m * hidden_dim,
-                               t->gate_out + (size_t)m * expert_dim,
+                tq_matmul_gguf(down_out + (size_t)m * hidden_dim,
+                               gate_out + (size_t)m * expert_dim,
                                exp->w_down, exp->down_type, hidden_dim, expert_dim);
             }
         }
@@ -1516,8 +1558,8 @@ static void* moe_batch_expert_worker(void* arg) {
         for (int m = 0; m < M_c; m++) {
             int tok = t->tokens_idx[chunk_start + m];
             float w = t->tokens_w[chunk_start + m] * exp_scale;
-            float* out_row = t->output_private + (size_t)tok * hidden_dim;
-            const float* dout = t->down_out + (size_t)m * hidden_dim;
+            float* out_row = output_private + (size_t)tok * hidden_dim;
+            const float* dout = down_out + (size_t)m * hidden_dim;
 #if TQ_MOE_HAS_NEON
             int i = 0;
             float32x4_t vw = vdupq_n_f32(w);
@@ -1698,6 +1740,7 @@ void tq_moe_forward_batch(const tq_moe_layer_t* layer,
 
     /* Thread/worker count: cap by active experts count, hw threads, TQ_TP_MAX */
     extern void tq_tp_run(void* (*fn)(void*), void** args, int n_tasks);
+    extern void tq_tp_run_dynamic(void* (*fn)(void*), void** args, int n_tasks);
     int n_threads = tq_get_threads();
     if (n_threads > TQ_TP_MAX) n_threads = TQ_TP_MAX;
     if (n_threads < 1) n_threads = 1;
@@ -1707,6 +1750,15 @@ void tq_moe_forward_batch(const tq_moe_layer_t* layer,
     if (n_workers < 1) n_workers = 1;
     /* Already holding the pool (nested call)? Fall back to serial. */
     if (tq_tls_force_serial_matmul) n_workers = 1;
+
+    /* Step 3g: FCFS dynamic dispatch — all active experts queued at once,
+     * workers grab via atomic counter. Default OFF; opt-in via env.
+     * Serial fallback (n_workers==1) always uses the wave path. */
+    int use_dynamic = 0;
+    if (n_workers > 1 && n_active_experts > n_workers) {
+        const char* env = getenv("TQ_MOE_BATCH_DYNAMIC");
+        use_dynamic = (env && env[0] && env[0] != '0');
+    }
 
     /* Per-worker scratch: X_sub [64 × hidden_dim] + gate_out/up_out [64 × expert_dim]
      * + down_out [64 × hidden_dim] + private output [N × hidden_dim].
@@ -1746,47 +1798,108 @@ void tq_moe_forward_batch(const tq_moe_layer_t* layer,
         }
     }
 
-    /* Process active experts in waves of n_workers. Each worker owns one
-     * expert per wave and scatters into its private output buffer. */
-    moe_batch_expert_task_t tasks[TQ_TP_MAX];
-    void* task_ptrs[TQ_TP_MAX];
-
-    for (int wave_start = 0; wave_start < n_active_experts; wave_start += n_workers) {
-        int wave_end = wave_start + n_workers;
-        if (wave_end > n_active_experts) wave_end = n_active_experts;
-        int wave_count = wave_end - wave_start;
-
-        for (int w = 0; w < wave_count; w++) {
-            int eid = active_eids[wave_start + w];
-            float* base = scratch_all + (size_t)w * per_worker_total;
-            tasks[w].layer = layer;
-            tasks[w].config = config;
-            tasks[w].hidden = hidden;
-            tasks[w].N_total = N;
-            tasks[w].hidden_dim = hidden_dim;
-            tasks[w].expert_dim = expert_dim;
-            tasks[w].eid = eid;
-            tasks[w].M_e = tokens_per_expert_count[eid];
-            tasks[w].tokens_idx = tokens_per_expert_idx[eid];
-            tasks[w].tokens_w = tokens_per_expert_w[eid];
-            tasks[w].exp_scale = (layer->expert_scale) ? layer->expert_scale[eid] : 1.0f;
-            tasks[w].activation_fn = activation_fn;
-            tasks[w].X_sub    = base + 0;
-            tasks[w].gate_out = base + (size_t)max_M_cap * hidden_dim;
-            tasks[w].up_out   = base + (size_t)max_M_cap * hidden_dim
-                                     + (size_t)max_M_cap * expert_dim;
-            tasks[w].down_out = base + (size_t)max_M_cap * hidden_dim
-                                     + 2 * (size_t)max_M_cap * expert_dim;
-            /* Worker 0 scatters directly into shared output (skip memset+reduce). */
-            tasks[w].output_private = (w == 0) ? output : (base + per_worker_scratch);
-            task_ptrs[w] = &tasks[w];
+    if (use_dynamic) {
+        if (debug) {
+            fprintf(stderr, "[moe_batch L%d] DYNAMIC n_active=%d n_workers=%d tp_n=%d\n",
+                    layer_idx, n_active_experts, n_workers, tq_get_threads());
         }
-
-        if (wave_count == 1) {
-            /* Serial: run directly on this thread. */
-            moe_batch_expert_worker(task_ptrs[0]);
+        /* Step 3g dynamic path: one task per active expert, all queued
+         * at once. Workers grab tasks via FCFS atomic counter; each
+         * worker resolves its private scratch/output from scratch_all
+         * using tq_tls_worker_id. Long-M_e experts no longer block the
+         * wave boundary. */
+        moe_batch_expert_task_t* tasks_d =
+            (moe_batch_expert_task_t*)malloc(
+                (size_t)n_active_experts * sizeof(moe_batch_expert_task_t));
+        void** task_ptrs_d = (void**)malloc((size_t)n_active_experts * sizeof(void*));
+        if (!tasks_d || !task_ptrs_d) {
+            free(tasks_d); free(task_ptrs_d);
+            /* Fall back to wave path below */
+            use_dynamic = 0;
         } else {
-            tq_tp_run(moe_batch_expert_worker, task_ptrs, wave_count);
+            for (int i = 0; i < n_active_experts; i++) {
+                int eid = active_eids[i];
+                tasks_d[i].layer = layer;
+                tasks_d[i].config = config;
+                tasks_d[i].hidden = hidden;
+                tasks_d[i].N_total = N;
+                tasks_d[i].hidden_dim = hidden_dim;
+                tasks_d[i].expert_dim = expert_dim;
+                tasks_d[i].eid = eid;
+                tasks_d[i].M_e = tokens_per_expert_count[eid];
+                tasks_d[i].tokens_idx = tokens_per_expert_idx[eid];
+                tasks_d[i].tokens_w = tokens_per_expert_w[eid];
+                tasks_d[i].exp_scale = (layer->expert_scale) ? layer->expert_scale[eid] : 1.0f;
+                tasks_d[i].activation_fn = activation_fn;
+                /* Dynamic-mode: worker resolves scratch via TLS id. */
+                tasks_d[i].X_sub          = NULL;
+                tasks_d[i].gate_out       = NULL;
+                tasks_d[i].up_out         = NULL;
+                tasks_d[i].down_out       = NULL;
+                tasks_d[i].output_private = NULL;  /* sentinel for dynamic mode */
+                tasks_d[i].scratch_all      = scratch_all;
+                tasks_d[i].shared_output    = output;
+                tasks_d[i].per_worker_total = per_worker_total;
+                tasks_d[i].max_M_cap        = max_M_cap;
+                tasks_d[i].n_workers        = n_workers;
+                task_ptrs_d[i] = &tasks_d[i];
+            }
+            tq_tp_run_dynamic(moe_batch_expert_worker, task_ptrs_d, n_active_experts);
+            free(tasks_d);
+            free(task_ptrs_d);
+        }
+    }
+
+    if (!use_dynamic) {
+        /* Wave path (default): process active experts in waves of n_workers.
+         * Each worker owns one expert per wave and scatters into its
+         * private output buffer (pre-baked per-task). */
+        moe_batch_expert_task_t tasks[TQ_TP_MAX];
+        void* task_ptrs[TQ_TP_MAX];
+
+        for (int wave_start = 0; wave_start < n_active_experts; wave_start += n_workers) {
+            int wave_end = wave_start + n_workers;
+            if (wave_end > n_active_experts) wave_end = n_active_experts;
+            int wave_count = wave_end - wave_start;
+
+            for (int w = 0; w < wave_count; w++) {
+                int eid = active_eids[wave_start + w];
+                float* base = scratch_all + (size_t)w * per_worker_total;
+                tasks[w].layer = layer;
+                tasks[w].config = config;
+                tasks[w].hidden = hidden;
+                tasks[w].N_total = N;
+                tasks[w].hidden_dim = hidden_dim;
+                tasks[w].expert_dim = expert_dim;
+                tasks[w].eid = eid;
+                tasks[w].M_e = tokens_per_expert_count[eid];
+                tasks[w].tokens_idx = tokens_per_expert_idx[eid];
+                tasks[w].tokens_w = tokens_per_expert_w[eid];
+                tasks[w].exp_scale = (layer->expert_scale) ? layer->expert_scale[eid] : 1.0f;
+                tasks[w].activation_fn = activation_fn;
+                tasks[w].X_sub    = base + 0;
+                tasks[w].gate_out = base + (size_t)max_M_cap * hidden_dim;
+                tasks[w].up_out   = base + (size_t)max_M_cap * hidden_dim
+                                         + (size_t)max_M_cap * expert_dim;
+                tasks[w].down_out = base + (size_t)max_M_cap * hidden_dim
+                                         + 2 * (size_t)max_M_cap * expert_dim;
+                /* Worker 0 scatters directly into shared output (skip memset+reduce). */
+                tasks[w].output_private = (w == 0) ? output : (base + per_worker_scratch);
+                /* Dynamic-mode fields unused in wave path */
+                tasks[w].scratch_all = NULL;
+                tasks[w].shared_output = NULL;
+                tasks[w].per_worker_total = 0;
+                tasks[w].max_M_cap = 0;
+                tasks[w].n_workers = 0;
+                task_ptrs[w] = &tasks[w];
+            }
+
+            if (wave_count == 1) {
+                /* Serial: run directly on this thread. */
+                moe_batch_expert_worker(task_ptrs[0]);
+            } else {
+                tq_tp_run(moe_batch_expert_worker, task_ptrs, wave_count);
+            }
         }
     }
 

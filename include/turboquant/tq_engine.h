@@ -707,6 +707,21 @@ int tq_get_threads(void);
  * Falls back to serial execution if pool not active or n_tasks <= 1. */
 void tq_tp_run(void* (*fn)(void*), void** args, int n_tasks);
 
+/* FCFS dynamic-queue dispatch — n_tasks can exceed n_workers.
+ * All workers (and main) grab the next task via an atomic counter,
+ * flattening straggler tails for workloads with skewed task cost.
+ * Used by MoE Phase 3 expert dispatch (Step 3g). */
+void tq_tp_run_dynamic(void* (*fn)(void*), void** args, int n_tasks);
+
+/* TLS worker id: 0 for main, 1..N-1 for pool workers. Readable from
+ * any worker body; set by the pool on each wake. Used by MoE dynamic
+ * dispatch to pick a per-worker private output buffer. */
+#if defined(_MSC_VER)
+extern __declspec(thread) int tq_tls_worker_id;
+#else
+extern __thread int tq_tls_worker_id;
+#endif
+
 /* Max threads supported by thread pool */
 #define TQ_TP_MAX 16
 
