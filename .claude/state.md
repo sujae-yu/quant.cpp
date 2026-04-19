@@ -1,8 +1,50 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-19 (Round 17)
+**Last updated**: 2026-04-19 (Round 18)
 **Score**: **0.9979 / 1.0000 (99.8%)** — full `score.sh`, 5/6 dimensions at 100%, structure 98.7%, regression PASS (0 FAIL)
-**Session HEAD**: Round 17 — Q5_K NEON qh 추출 최적화 (+40% decode). 17 /grow rounds complete this session.
+**Session HEAD**: Round 18 — Q5_K 2-row attempted, rolled back (register pressure). 18 /grow rounds complete.
+
+## Round 18 — Q5_K 2-row parallel: ATTEMPTED, ROLLED BACK
+
+Implemented `q5k_int_dot_two_rows` mirroring Q4_K's successful 2-row
+pattern (share activation loads across 2 weight rows, dispatch in
+pairs with single-row tail).
+
+**Result**: regression. Q5_K_M decode 2.1 → 1.8 t/s (-14%),
+MoE per-tok 283 → 345 ms.
+
+**Root cause (hypothesis)**: Q5_K has more per-row state than Q4_K
+(extra qh load + 4 extra vshlq_u8 per iteration × 2 rows = 8 shifts
+vs Q4_K's 0 shifts). Doubling the register set pushes past M1 Pro
+NEON's 32 × 128-bit register budget → compiler spills to stack.
+Measured slowdown consistent with 3-5 stack spills per inner loop.
+
+Git-reverted `src/engine/tq_gguf_quants.c`. No commit.
+
+**Lesson**: 2-row isn't a free template — it depends on per-row
+working-set fitting in NEON register file. Q4_K (lo/hi pairs × 2 rows
+= 8 weight registers + 4 activation + 4 acc = 16 of 32) fits; Q5_K
+(lo/hi pairs + qh-derived 5th bit × 2 rows = 12 weight regs + ...)
+exceeds the budget.
+
+### Warm vs cold measurement honesty check
+
+Round 16's "1.5 t/s" was worst-case cold on the very first prompt
+after fresh load. Warm measurements (subsequent queries on same
+prompt) show **5.7-10.3 t/s** on Q5_K_M — practical for interactive
+chat. New-prompt (different expert subset) cold dips back to ~1.8 t/s
+as OS page-faults cold experts.
+
+Realistic performance matrix:
+| Scenario | Q5_K_M t/s | Notes |
+|---|---:|---|
+| Fresh-load cold | 1.5-2 | First query after `./build/quant` start |
+| New-topic cold | 1.8-2.5 | Unfamiliar expert subset |
+| Same-topic warm | 6-10 | Expert subset resident in page cache |
+| Typical chat avg | ~4 | Mix of cold/warm across turns |
+
+Q3_K_S remains the **speed leader at ~14 t/s consistent**. Q5_K_M is
+the **quality leader at ~4-10 t/s interactive**.
 
 ## Round 17 — Q5_K NEON qh extraction SHL-based (+40% Q5_K_M decode)
 
