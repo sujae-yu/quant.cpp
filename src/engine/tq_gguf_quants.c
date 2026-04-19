@@ -4156,6 +4156,7 @@ void* q5k_int_dot_worker(void* arg) {
             const uint8_t* qh = blk->qh;   /* 32 bytes of high bits */
             int sub_base = sb * 8;
             int is = 0;
+            uint8_t u1 = 1, u2 = 2;
 
             for (int j = 0; j < 256; j += 64) {
                 int sub_idx_a = sub_base + is;
@@ -4169,26 +4170,29 @@ void* q5k_int_dot_worker(void* arg) {
                 uint8x16_t hi_a = vshrq_n_u8(qa, 4);
                 uint8x16_t hi_b = vshrq_n_u8(qb, 4);
 
-                /* 5th bit from qh: move target bit to position 4 via vshlq_u8.
-                 * For iteration `is` (0,2,4,6): sub-block A bit is at position
-                 * `is`, sub-block B bit at `is+1`. Required shift to land on
-                 * bit 4: shift_a = 4 - is, shift_b = 3 - is (negative=right).
-                 * Replaces (AND + CEQ + AND) chain with (SHL + AND) — saves
-                 * one instruction per qh extraction × 4 per iteration × 4
-                 * iterations per super-block. */
+                /* 5th bit from qh: extract bit u1 (sub-block A) and u2 (B).
+                 * qh[0..15] covers elements 0..15, qh[16..31] covers 16..31.
+                 * For sub-block A (low nibbles), bit position = log2(u1).
+                 * Convert "bit set" → byte value 16 by shifting to bit 4. */
                 uint8x16_t qh_a = vld1q_u8(qh);
                 uint8x16_t qh_b = vld1q_u8(qh + 16);
-                const uint8x16_t v16 = vdupq_n_u8(16);
-                const int8x16_t shva = vdupq_n_s8((int8_t)(4 - is));
-                const int8x16_t shvb = vdupq_n_s8((int8_t)(3 - is));
-                uint8x16_t bit_a_lo = vandq_u8(vshlq_u8(qh_a, shva), v16);
-                uint8x16_t bit_a_hi = vandq_u8(vshlq_u8(qh_b, shva), v16);
-                uint8x16_t bit_b_lo = vandq_u8(vshlq_u8(qh_a, shvb), v16);
-                uint8x16_t bit_b_hi = vandq_u8(vshlq_u8(qh_b, shvb), v16);
-                lo_a = vorrq_u8(lo_a, bit_a_lo);
-                lo_b = vorrq_u8(lo_b, bit_a_hi);
-                hi_a = vorrq_u8(hi_a, bit_b_lo);
-                hi_b = vorrq_u8(hi_b, bit_b_hi);
+                uint8x16_t u1v = vdupq_n_u8(u1);
+                uint8x16_t u2v = vdupq_n_u8(u2);
+                /* Test bit, then convert to 0 or 16:
+                 *   masked_a = qh & u1  →  0 or u1 (in {1,4,16,64})
+                 *   want bit 4 set when u1 bit set → multiply masked_a by (16/u1)
+                 * For u1 in {1,4,16,64}: 16/u1 in {16,4,1,1/4}.
+                 * Easier: vceqq + select between 0 and 16. */
+                uint8x16_t bit_a_lo = vceqq_u8(vandq_u8(qh_a, u1v), u1v);  /* 0xFF or 0x00 */
+                uint8x16_t bit_a_hi = vceqq_u8(vandq_u8(qh_b, u1v), u1v);
+                uint8x16_t bit_b_lo = vceqq_u8(vandq_u8(qh_a, u2v), u2v);
+                uint8x16_t bit_b_hi = vceqq_u8(vandq_u8(qh_b, u2v), u2v);
+                uint8x16_t v16 = vdupq_n_u8(16);
+                /* And with 16 to get 0 or 16 */
+                lo_a = vorrq_u8(lo_a, vandq_u8(bit_a_lo, v16));
+                lo_b = vorrq_u8(lo_b, vandq_u8(bit_a_hi, v16));
+                hi_a = vorrq_u8(hi_a, vandq_u8(bit_b_lo, v16));
+                hi_b = vorrq_u8(hi_b, vandq_u8(bit_b_hi, v16));
 
                 int8x16_t wa_lo = vreinterpretq_s8_u8(lo_a);
                 int8x16_t wa_hi = vreinterpretq_s8_u8(lo_b);
@@ -4236,6 +4240,8 @@ void* q5k_int_dot_worker(void* arg) {
 
                 ql += 32;
                 is += 2;
+                u1 <<= 2;
+                u2 <<= 2;
             }
         }
         t->out[d] = row_sum;

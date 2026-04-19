@@ -1,8 +1,70 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-19 (Round 24)
-**Score**: **0.9979 / 1.0000 (99.8%)** — full `score.sh`, 5/6 dimensions at 100%, structure 98.7%, **13/13 regression PASS**
-**Session HEAD**: Round 24 — README.ko.md v3.9 동기화. 24 /grow rounds complete.
+**Last updated**: 2026-04-19 (Round 25)
+**Score**: **0.9979 / 1.0000 (99.8%)** — unchanged (drift bug escapes `-n 10` regression)
+**Session HEAD**: Round 25 — Qwen3.6 long-gen drift uncovered. Prior claims downgraded.
+
+## Round 25 — Mission B preflight uncovered Qwen3.6 MoE drift bug
+
+Attempting Goal A (Q5_K_M × long-context) revealed that **Qwen3.6
+MoE generations drift into garbage after ~10 output tokens** on our
+engine, across all weight quants tested.
+
+### Reproduction
+```bash
+TQ_NO_MLOCK=1 ./build/quant models/Qwen3.6-35B-A3B-UD-Q5_K_M.gguf \
+  -p "What is the capital of France?" -n 25 -T 0 --chat
+# → "The capital of France is **Paris**. The. It. J. K. L.M.N.O"
+```
+
+### Diagnostic matrix
+| Setup | Result | Conclusion |
+|---|---|---|
+| Q5_K_M default turbo_kv_4b | drift >10 tok | bug |
+| IQ4_XS same prompt | same drift | not Q5-specific |
+| Round 17 SHL revert | still drift | SHL innocent |
+| Llama-3.2-3B Q8_0 same prompt | clean | architecture-specific |
+| `-k fp32` on Q5_K_M | clean, proper EOS | KV quant contributes |
+| `--k-window 128` | helps some prompts, not all | partial mitigation |
+
+### Likely root cause
+**DeltaNet recurrent state numerical error accumulation**. Qwen3.6
+is hybrid: 10 self-attn + 30 DeltaNet layers. DeltaNet state matrix
+carries per-token info; small per-step error blows up around token
+10-15. Self-attn-only Llama lacks this recurrent path → doesn't
+drift.
+
+### Why regression missed it
+`test_models.sh` uses `-n 10` + "Hi" → EOS before drift surfaces.
+Bug existed throughout the session, undetected.
+
+### Claims requiring downgrade
+- **Round 16 "Q5_K_M on 16 GB Mac 실증 돌파"**:
+  - ✓ Loads on 16 GB (auto-MADV works)
+  - ✓ Short coherent answer (≤8 tokens)
+  - ✗ Long coherent generation (drifts >10)
+- v3.9 README blurb + v0.16.0 release notes overstate the
+  capability. NEEDS CORRECTION next session.
+
+### Mission B status
+BLOCKED by this bug + model-level working memory cliff.
+Viable pivot: demonstrate KV compression + long-ctx on Llama-3.2-3B
+(where coherence holds) at realistic context within the cliff.
+
+### Memories added
+- `feedback_qwen36_long_gen_drift.md` — full drift characterization
+  with reproducer. To be addressed in a future correctness-focused
+  session with Python reference comparison on DeltaNet forward.
+
+### Session 25-round honest assessment
+- Rounds 1-15: genuine technical landings.
+- Rounds 16-17: load PASS, long-gen FAIL (missed).
+- Rounds 18-19: correct rollback on attempts.
+- Rounds 20-24: docs — inadvertently overstated capability.
+- Round 25: preflight uncovered correctness gap. **More valuable
+  than 5 more rounds of optimization on an unverified claim.**
+
+## Round 24 — Korean README sync
 
 ## Round 24 — Korean README sync
 
