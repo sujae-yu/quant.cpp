@@ -6,6 +6,71 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v0.17.0] — 2026-04-20 (Qwen3.x Correctness — ALL FORMATS WIN)
+
+### Headline
+
+**Qwen3.5 / Qwen3.6 long-form generation restored across all formats.**
+Two structural fixes (R34 NEOX RoPE + R40 arch-conditional QK-norm)
+eliminate prompt-sensitive drift that manifested as "quicck bbrrown"
+char doubling, digit/alphabet spam, and incoherent output past ~20 tokens.
+
+### Fix 1 — NEOX partial RoPE (R34)
+
+`refs/llama.cpp/src/llama-model.cpp:9298` maps
+`LLM_ARCH_QWEN35/QWEN35MOE → LLAMA_ROPE_TYPE_IMROPE`. `ggml.h:1826`:
+"NEOX ordering cannot be disabled for MROPE/VISION" (IMROPE is MROPE
+family). Our partial-rotary path used LLaMA-style `(q[2i], q[2i+1])`;
+Qwen3.x requires NEOX half-split `(q[i], q[i+rope_pairs])`. Opt-out:
+`TQ_ROPE_PAIRS=1`.
+
+### Fix 2 — arch-conditional QK-norm (R40)
+
+Gemma 4 REQUIRES QK-norm (2+2=4 test breaks without). Qwen family
+DEGRADES with QK-norm applied (40+ token drift). Empirical:
+`Qwen3.6 "Once upon a time" n=60` → drift WITH, perfect story WITHOUT.
+Fix: arch detection gates QK-norm; Gemma keeps, Qwen skips.
+Opt-in: `TQ_FORCE_QK_NORM=1`.
+
+### Measured (Qwen3.6-UD-IQ4_XS, T=0, --chat)
+
+| Format | v0.16 | **v0.17** |
+|---|---|---|
+| "Once upon a time" n=60 | drift at ~20 tok | **60 tok Jack/compass/map story** |
+| `def fibonacci(n):` | garbled | **`if n <= 0: return "Invalid input"`** |
+| Haiku | char doubling | **"Silence speaks loud, Silence speaks in the quietest way."** |
+| List 5 items | partial | **"1. Apple 2. Banana 3. Orange"** |
+| Factual | ✓ | **"Paris"**, "12", "1945" |
+
+### Numerical cleanup (R26-29)
+
+Supporting fixes now complete: `l2_normalize` epsilon; DeltaNet
+softplus/decay/silu + attention sigmoid + conv1d silu all use exact
+`expf()` (was Schraudolph `fast_expf` with ~2% error, compounding
+across 30 DeltaNet layers).
+
+### Regression 15/15 PASS
+
+Added R41 long-form guards: "Once upon a time" n=40 + "def fibonacci"
+n=30 strict substring checks. Gemma/Llama/Phi unchanged.
+
+### Impact
+
+Qwen3.6-35B-A3B on 16 GB M1 Pro: v0.16 loaded Q5_K_M, v0.17 sustains
+coherent long generation across story/code/poem/list/explanation/Q&A.
+
+### Session arc (40 rounds → v0.17)
+
+- R1-15 Mission A (MoE batched +39%)
+- R16-17 Q5_K_M 16 GB load
+- R25-33 drift discovery + partial fixes
+- **R34 NEOX RoPE structural fix**
+- **R40 arch-conditional QK-norm — ALL FORMATS WIN**
+- R41 long-form regression
+- R42 v0.17.0 release
+
+---
+
 ## [v0.16.0] — 2026-04-19 (Q5_K_M on 16 GB Mac + auto-policy MADV)
 
 ### Headline

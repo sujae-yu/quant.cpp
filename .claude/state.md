@@ -1,7 +1,30 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-20 (Round 40)
-**Session HEAD**: Round 40 — **Qwen arch-conditional QK-norm 🏆 ALL FORMATS WIN**
+**Last updated**: 2026-04-20 (Round 44)
+**Session HEAD**: Round 44 — **v0.17.0 안정화 릴리즈 준비 완료**
+
+## Round 41-44 — 안정화 + 배포 준비
+
+### R41: Long-form regression 강화
+`scripts/test_models.sh`:
+- Qwen3.6 "Once upon a time" n=40 COHERENT + "young man" 포함
+- Qwen3.6 `def fibonacci(n):` n=30 COHERENT + "return" 포함
+→ **15/15 PASS** (기존 13 + 장문/코드 2)
+
+### R42: v0.17.0 버전 bump + 릴리즈 노트
+- `bindings/python/pyproject.toml`: 0.13.0 → 0.17.0
+- `bindings/python/quantcpp/__init__.py` fallback 0.13→0.17
+- `docs/RELEASE_NOTES.md` v0.17.0 상세 entry (R34 NEOX + R40 QK-norm + R26-29 numerical + 측정 매트릭스)
+
+### R43: README v3.10 blurb (en + ko)
+- "Qwen3.x correctness — ALL FORMATS WIN" 헤드라인
+- R34 + R40 fix 요약
+- 실측 6개 형식 결과 (story/code/haiku/list/fact)
+- 15/15 regression PASS
+
+### R44: 최종 검증 + 세션 정리 (이 커밋)
+
+## Round 40 ★ — QK-norm arch-conditional (Mission C 완승)
 
 ## Round 40 ★ — QK-norm arch-conditional (Mission C 완승)
 

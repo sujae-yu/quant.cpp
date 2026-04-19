@@ -105,6 +105,14 @@ run_test "Qwen3.6-35B-A3B-UD-IQ2_XXS.gguf"     "Hi" "" COHERENT "TQ_NO_METAL=1" 
 # survive ≥20 tokens without falling into digit/punctuation spam.
 run_test "Qwen3.6-35B-A3B-UD-Q5_K_M.gguf"      "Hi" "" COHERENT "TQ_NO_METAL=1 TQ_NO_MLOCK=1" "--chat"
 run_test "Qwen3.6-35B-A3B-UD-Q5_K_M.gguf"      "What is the capital of France?" "Paris" STRICT "TQ_NO_METAL=1 TQ_NO_MLOCK=1" "--chat" 25
+# Round 41: long-form coherence guard — catches the Round 25 drift +
+# Round 34 NEOX + Round 40 QK-norm bugs if ever reintroduced. Needs
+# IQ4_XS (smaller than Q5_K_M, so test runs faster). Validates the
+# 60-token Narnia story from Round 40 success measurement.
+run_test "Qwen3.6-35B-A3B-UD-IQ4_XS.gguf"      "Once upon a time" "young man" COHERENT "TQ_NO_METAL=1 TQ_NO_MLOCK=1" "--chat" 40
+# Round 41: code generation guard — Python `def` completion. R40 QK-norm
+# fix made this pass ("if n <= 0: return").
+run_test "Qwen3.6-35B-A3B-UD-IQ4_XS.gguf"      "def fibonacci(n):" "return" COHERENT "TQ_NO_METAL=1 TQ_NO_MLOCK=1" "" 30
 
 echo ""
 echo "--- Metal-ON tier (default build must also produce coherent output) ---"
