@@ -1,8 +1,49 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-19 (Round 16)
-**Score**: **0.9979 / 1.0000 (99.8%)** — full `score.sh`, 5/6 dimensions at 100%, structure 98.7%, 12/12 regression PASS
-**Session HEAD**: Round 16 — Qwen3.6 Q5_K_M on 16 GB Mac 실증 돌파. 16 /grow rounds complete this session.
+**Last updated**: 2026-04-19 (Round 17)
+**Score**: **0.9979 / 1.0000 (99.8%)** — full `score.sh`, 5/6 dimensions at 100%, structure 98.7%, regression PASS (0 FAIL)
+**Session HEAD**: Round 17 — Q5_K NEON qh 추출 최적화 (+40% decode). 17 /grow rounds complete this session.
+
+## Round 17 — Q5_K NEON qh extraction SHL-based (+40% Q5_K_M decode)
+
+`tq_gguf_quants.c:q5k_int_dot_worker` — 5번째 비트 추출 체인 단축.
+
+Before: `(qh & u_mask) == u_mask ? 0xFF : 0x00` via `vceqq_u8`, then
+`& 16` for the bit-4 byte value. 3 ops per extraction × 4 extractions
+per iteration × 4 iterations per super-block = 48 ops just for qh
+bit shuffle.
+
+After: `vshlq_u8(qh, shift_vec) & 16` — variable-shift NEON intrinsic
+brings target bit directly to position 4. 2 ops per extraction.
+Eliminates the mask broadcast (`u1v`, `u2v`) and the compare. Also
+removes the `u1 <<= 2; u2 <<= 2;` loop state carrier — `is` index
+directly drives the shift amount.
+
+Shift computation: iteration `is` in {0,2,4,6} → sub-block A bit at
+position `is`, sub-block B at `is+1`. Required shift (pos 4 −
+bit_pos): A = 4−is ∈ {4,2,0,−2}, B = 3−is ∈ {3,1,−1,−3}. Negative
+shift = logical right shift (vshlq_u8 semantics).
+
+### Measured (Qwen3.6-UD-Q5_K_M 26 GB on 16 GB M1 Pro, T=0, warm)
+
+| | Round 16 | **Round 17** | Δ |
+|---|---:|---:|---:|
+| Decode | 1.3-1.5 t/s | **2.1 t/s** | **+40-62%** |
+| MoE per-tok | 453 ms | **283 ms** | **-37%** |
+| Total per-tok | 501 ms | 320 ms | -36% |
+
+### Regression
+- All coherent tests PASS (0 FAIL); 2 SKIP due to model availability.
+- Q3_K_S / IQ4_XS / Phi-3.5 / Llama / Gemma-4 verified unchanged.
+- Q5_K kernel is also used by non-MoE Q5 models (pure Q5_K weights)
+  — not in regression suite but shift semantics identical to old
+  `vceqq` branch so numerically equivalent.
+
+### 실용성 변화
+- Q5_K_M 2.1 t/s: 여전히 장기 대화에는 느리지만 **단문 응답 실용권 진입**
+  (10자 응답 ~5초, 이전 ~10초).
+- Q3_K_S 14 t/s가 여전히 속도 최적점.
+- Q5_K_M은 고품질 single-shot 추론 (JSON/coding/math one-shot) 용도.
 
 ## Round 16 — Q5_K_M Breakthrough on 16 GB Mac ✅ (품질) ⚠️ (속도)
 
