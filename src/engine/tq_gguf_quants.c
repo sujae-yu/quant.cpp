@@ -1927,7 +1927,6 @@ static float fused_dot_iq2_xxs_int8(const void* row, const int8_t* x_qs,
     const int nb = n / 256;
     const uint8_t* base = (const uint8_t*)row;
     const uint8x8_t vbit_masks = vld1_u8(iq2_sign_bit_masks);
-    const int8x8_t vone = vdup_n_s8(1);
 
     float sumf = 0.0f;
 
@@ -1954,7 +1953,11 @@ static float fused_dot_iq2_xxs_int8(const void* row, const int8_t* x_qs,
             const uint8_t* aux8 = (const uint8_t*)aux32;
 
             /* Build 4 groups × 8 int8 = 32 signed int8 weights.
-             * Each group: grid[aux8[g]] × sign(aux32[1] bits). */
+             * Each group: grid[aux8[g]] × sign(aux32[1] bits).
+             * GNU statement-expression macro: suppress the clang pedantic
+             * warning because we compile with extensions enabled. */
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Wgnu-statement-expression-from-macro-expansion"
             #define BUILD_GROUP(g, shift) ({ \
                 uint8x8_t vg = vld1_u8((const uint8_t*)(iq2xxs_grid + aux8[g])); \
                 uint8_t signs = ksigns_iq2xs[(aux32[1] >> (shift)) & 127]; \
@@ -1969,6 +1972,7 @@ static float fused_dot_iq2_xxs_int8(const void* row, const int8_t* x_qs,
             int8x8_t vs2 = BUILD_GROUP(2, 14);
             int8x8_t vs3 = BUILD_GROUP(3, 21);
             #undef BUILD_GROUP
+            #pragma clang diagnostic pop
 
             int8x16_t vw_lo = vcombine_s8(vs0, vs1);
             int8x16_t vw_hi = vcombine_s8(vs2, vs3);

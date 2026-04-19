@@ -1,8 +1,8 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-19
-**Score**: 12/12 regression PASS, 0 build warnings (core)
-**Session HEAD**: `(Round 6)` — Step 3i default-on flip. Session cumulative: 5 grow rounds, Mission A Step 3 complete.
+**Last updated**: 2026-04-19 (Round 9)
+**Score**: **0.9946 / 1.0000 (99.5%)** — score.sh --quick, correctness 100%, warnings 0, 12/12 regression PASS
+**Session HEAD**: Round 9 — warnings elimination. 9 /grow rounds complete this session.
 
 ## What Works
 
