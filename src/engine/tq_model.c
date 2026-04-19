@@ -2949,9 +2949,12 @@ tq_model_t* tq_load_gguf(const char* path) {
     }
 
     /* Cap context for memory safety on small machines.
-     * GGUF models often claim 262K context but we cap at 4096 by default.
-     * Users can override with --ctx flag in quant. */
-    if (c->max_seq_len > 4096) c->max_seq_len = 4096;
+     * Round 46: raised default cap from 4096 to 16384. GGUF models often
+     * claim 262K context; we default to 16K to balance safety (KV cache
+     * RAM budget) with utility (long-document / agentic tasks).
+     * Users can override with --ctx flag in quant. The cap applies ONLY
+     * as default; --ctx N bypasses it at CLI level. */
+    if (c->max_seq_len > 16384) c->max_seq_len = 16384;
 
     /* Compute head_dim — prefer explicit key_length from metadata.
      * For Gemma 4: key_length=512 is for full attention layers,
