@@ -1,8 +1,54 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-19 (Round 25)
-**Score**: **0.9979 / 1.0000 (99.8%)** — unchanged (drift bug escapes `-n 10` regression)
-**Session HEAD**: Round 25 — Qwen3.6 long-gen drift uncovered. Prior claims downgraded.
+**Last updated**: 2026-04-19 (Round 26)
+**Score**: **0.9979 / 1.0000 (99.8%)** — unchanged (regression short, drift fix partial)
+**Session HEAD**: Round 26 — DeltaNet L2 norm epsilon fix, Qwen3.6 드리프트 대폭 완화.
+
+## Round 26 — Root cause found via llama.cpp reference diff
+
+사용자 지시로 `refs/llama.cpp/src/models/qwen35moe.cpp`와
+`refs/llama.cpp/src/models/delta-net-base.cpp` 비교.
+
+**발견**: llama.cpp는 `ggml_l2_norm(q, eps_norm)` 사용 — `eps_norm
+= hparams.f_norm_rms_eps` (~1e-6). 우리 `l2_normalize`는 eps 없이
+`1/sqrt(sum_sq)`. 작은 sum_sq에서 huge inverse → DeltaNet 30개 층에
+걸쳐 수치 오류 누적 → Round 25에서 관측한 10+ tok drift.
+
+```c
+/* Before (Round 25 bug) */
+if (ss > 0.0f) {
+    float inv = 1.0f / sqrtf(ss);   /* no eps */
+}
+
+/* After (Round 26 fix) */
+const float eps = 1e-6f;
+float inv = 1.0f / sqrtf(ss + eps);  /* matches llama.cpp */
+```
+
+파일: `src/engine/tq_transformer.c:l2_normalize`.
+
+### 수정 후 결과 (Qwen3.6-UD-Q5_K_M --chat)
+| 테스트 | Round 25 (before) | **Round 26 (after)** |
+|---|---|---|
+| "What is the capital of France?" (25 tok) | "Paris. The. It. J. K. L.M.N.O" garbage | **"The capital of France is Paris."** 클린 EOS ✓ |
+| "Write a short poem about a cat" (40 tok) | "!5! Assisttaant234!" pure garbage | **"a cat in the shorting play.. playing with a ball of yarn5"** 대부분 정상 |
+| "Explain gravity" (50 tok) | garbage | 초반 "Of course! Here is the explanation..." 정상, 30+ tok에서 "simply5.as56.assistant78" 잔여 artifact |
+
+### 잔여 이슈
+50+ tok generation에서 여전히 artifact. eps 외에도 추가 수치 안정성
+issue 존재 가능성 (fast_expf의 Schraudolph 정밀도, DeltaNet state
+장기 축적, 또는 ssm_norm gated 적용 순서). 향후 조사.
+
+### 검증
+- 12/12 regression PASS 유지
+- 짧은 프롬프트: 완벽
+- 중간 길이: 크게 개선 (garbage → 대부분 정상)
+- 장문: 부분 개선 (pure garbage → 30 tok까지 정상 + artifact)
+
+### 영향
+- Round 16 Q5_K_M 주장 부분 복원 — 짧은 실용 응답은 진짜 작동.
+- Mission B 실증 경로 재개 가능.
+- 이 eps 1줄 수정이 세션 최대 영향 산출.
 
 ## Round 25 — Mission B preflight uncovered Qwen3.6 MoE drift bug
 

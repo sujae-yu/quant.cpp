@@ -434,6 +434,13 @@ void tq_free_state(tq_state_t* state) {
  * Helper: L2 normalize a vector in-place (NEON-optimized)
  * ============================================================ */
 static void l2_normalize(float* v, int n) {
+    /* Round 26: epsilon fix.
+     * llama.cpp's ggml_l2_norm uses eps_norm = f_norm_rms_eps
+     * (typically 1e-6). Without eps, tiny ss → huge inv → numerical
+     * blowup that accumulates across DeltaNet's 30 recurrent layers,
+     * producing coherence drift after ~10 tokens on Qwen3.6 MoE.
+     * Missing eps was the likely root cause of Round 25's drift. */
+    const float eps = 1e-6f;
 #ifdef __ARM_NEON
     float32x4_t vss = vdupq_n_f32(0.0f);
     int i = 0;
@@ -443,8 +450,8 @@ static void l2_normalize(float* v, int n) {
     }
     float ss = vaddvq_f32(vss);
     for (; i < n; i++) ss += v[i] * v[i];
-    if (ss > 0.0f) {
-        float inv = 1.0f / sqrtf(ss);
+    {
+        float inv = 1.0f / sqrtf(ss + eps);
         float32x4_t vinv = vdupq_n_f32(inv);
         i = 0;
         for (; i + 3 < n; i += 4) {
@@ -456,8 +463,8 @@ static void l2_normalize(float* v, int n) {
 #else
     float ss = 0.0f;
     for (int i = 0; i < n; i++) ss += v[i] * v[i];
-    if (ss > 0.0f) {
-        float inv = 1.0f / sqrtf(ss);
+    {
+        float inv = 1.0f / sqrtf(ss + eps);
         for (int i = 0; i < n; i++) v[i] *= inv;
     }
 #endif
