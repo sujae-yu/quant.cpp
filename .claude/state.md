@@ -1,7 +1,28 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-20 (Round 54)
-**Session HEAD**: Round 54 — **v0.18.0 release 준비 (TTFT UX)**
+**Last updated**: 2026-04-20 (Round 55)
+**Session HEAD**: Round 55 — **bench_my_mac.sh 1-command readiness**
+
+## Round 55 — scripts/bench_my_mac.sh (1-command readiness check)
+
+개인 개발자가 `bash scripts/bench_my_mac.sh` 한 번으로 자기 Mac의
+예상 TTFT + decode 속도를 즉시 확인. models/에 있는 GGUF 파일
+자동 탐지, 네트워크/다운로드 없음.
+
+실측 (16 GB M1 Pro, 같은 session 내 hot-caches):
+| 모델 | Warm TTFT | Warm decode |
+|---|---:|---:|
+| Llama-3.2-1B Q8 | 0.11s | **57.3 t/s** |
+| Llama-3.2-3B Q8→Q4 | 1.14s | **26.7 t/s** |
+| Gemma-4-e2b Q8 | 0.46s | 24.9 t/s |
+| Qwen3.5-4B Q4_K_M | 1.24s | 22.6 t/s |
+| Phi-3.5 Q4_K_M | 0.95s | 14.7 t/s |
+| **Qwen3.6-35B IQ4_XS** | **0.47s** | **13.7 t/s** |
+| **Qwen3.6-35B Q5_K_M** | **0.52s** | **10.3 t/s** |
+
+주목할 점: Qwen3.6-35B **Q5_K_M이 10.3 t/s warm 달성** (R20 기록 7.9
+대비 +30%). 반복 실행에서 페이지 캐시가 routed expert subset을
+완전히 hot으로 유지 → OS-level paging 오버헤드 제거.
 
 ## Round 54 — v0.18.0 release hygiene
 
