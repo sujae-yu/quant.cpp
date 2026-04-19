@@ -1,8 +1,35 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-19 (Round 19)
+**Last updated**: 2026-04-19 (Round 20)
 **Score**: **0.9979 / 1.0000 (99.8%)** — full `score.sh`, 5/6 dimensions at 100%, structure 98.7%, regression PASS (0 FAIL)
-**Session HEAD**: Round 19 — per-dispatch madvise attempted, rolled back (3× regression). 19 /grow rounds complete.
+**Session HEAD**: Round 20 — Qwen3.6 full quant matrix 벤치 문서화. 20 /grow rounds complete.
+
+## Round 20 — Quant matrix bench consolidation
+
+`bench/results/2026-04-19_qwen36_quant_matrix_16gb.md` — 5-tier
+quant comparison on 16 GB M1 Pro:
+
+| Quant | File | RSS | Decode (warm) |
+|---|---:|---:|---:|
+| IQ2_XXS | 10.0 GB | ~6.5 GB | 16.1 t/s† |
+| IQ3_XXS | 12.3 GB | ~6.5 GB | 14.6 t/s† |
+| Q3_K_S | 14.3 GB | 5.24 GB† | 14.3 t/s† |
+| **IQ4_XS** | 16.5 GB | **7.25 GB** | **10.6 t/s** |
+| **Q5_K_M** | 24.6 GB | **9.65 GB** | **7.9 t/s** |
+
+† 이전 세션 기록 (IQ2/IQ3/Q3_K_S 파일은 Q5_K_M 다운로드 과정에서
+삭제됨). 굵은 값은 Round 20 재측정.
+
+Doc includes: Round 16-17 Q5_K_M 돌파 의의, Round 18-19 실패 교훈
+(2-row register, madvise trap), 용도별 quant 추천, llama.cpp 비교.
+
+### Session complete arc
+- Rounds 1-17: 모두 landed (Mission A + infra + Q5_K_M + SHL 최적화)
+- Rounds 18-19: 시도 후 롤백 (교훈 획득)
+- Round 20: 문서화 + 세션 정리
+
+**총 20 /grow 라운드. Score 0.9946 → 0.9979. Qwen3.6 5 tier 모두 16 GB
+Mac에서 검증. Q5_K_M 실용권 진입 (7.9 t/s warm).**
 
 ## Round 19 — Per-dispatch `madvise(WILLNEED)`: ATTEMPTED, ROLLED BACK
 
