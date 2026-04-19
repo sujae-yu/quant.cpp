@@ -1182,14 +1182,16 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
             sqrtf((float)(ks/kv_dim)), sqrtf((float)(vs/kv_dim)), kv_dim, has_v_weights, is_kv_shared);
     }
     /* Apply QK-norm if present (per-head RMSNorm).
-     * For KV-shared layers: only Q-norm is applied (no K/V to normalize). */
-    if (layer->q_norm) {
+     * For KV-shared layers: only Q-norm is applied (no K/V to normalize).
+     * Round 33: TQ_NO_QK_NORM=1 for Mission C drift isolation. */
+    int _qknorm_disabled = (getenv("TQ_NO_QK_NORM") != NULL);
+    if (layer->q_norm && !_qknorm_disabled) {
         for (int h = 0; h < n_heads; h++) {
             tq_rmsnorm(s->q + h * head_dim, s->q + h * head_dim,
                        layer->q_norm, head_dim, c->rms_norm_eps);
         }
     }
-    if (layer->k_norm && !is_kv_shared) {
+    if (layer->k_norm && !is_kv_shared && !_qknorm_disabled) {
         for (int h = 0; h < n_kv_heads; h++) {
             tq_rmsnorm(s->k + h * head_dim, s->k + h * head_dim,
                        layer->k_norm, head_dim, c->rms_norm_eps);
