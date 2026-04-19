@@ -1,8 +1,13 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-19 (Round 23)
+**Last updated**: 2026-04-19 (Round 24)
 **Score**: **0.9979 / 1.0000 (99.8%)** — full `score.sh`, 5/6 dimensions at 100%, structure 98.7%, **13/13 regression PASS**
-**Session HEAD**: Round 23 — README v3.9 blurb. 23 /grow rounds complete.
+**Session HEAD**: Round 24 — README.ko.md v3.9 동기화. 24 /grow rounds complete.
+
+## Round 24 — Korean README sync
+
+`README.ko.md`: v3.8 위에 v3.9 한국어 블럽 추가. 영문 README와 동일
+구조 + 동일 링크. ko/en 드리프트 방지.
 
 ## Round 23 — README v3.9 Q5_K_M 홍보
 
