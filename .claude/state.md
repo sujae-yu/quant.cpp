@@ -1,8 +1,17 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-19 (Round 22)
+**Last updated**: 2026-04-19 (Round 23)
 **Score**: **0.9979 / 1.0000 (99.8%)** — full `score.sh`, 5/6 dimensions at 100%, structure 98.7%, **13/13 regression PASS**
-**Session HEAD**: Round 22 — v0.16.0 release notes. 22 /grow rounds complete.
+**Session HEAD**: Round 23 — README v3.9 blurb. 23 /grow rounds complete.
+
+## Round 23 — README v3.9 Q5_K_M 홍보
+
+`README.md`: v3.8 위에 v3.9 블럽 추가. "First engine to run Qwen3.6
+Q5_K_M on 16 GB Mac" 헤드라인 + 핵심 수치 (RSS 9.65 GB, decode 7.9 t/s)
++ auto-policy MADV 메커니즘 설명. v0.16.0 RELEASE_NOTES + bench matrix
+파일 링크.
+
+공개 외부 문서 (README) 채널까지 돌파 홍보 완료.
 
 ## Round 22 — v0.16.0 release notes consolidation
 
