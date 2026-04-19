@@ -31,6 +31,7 @@ run_test() {
     local tier="$4"
     local extra_env="${5:-}"
     local extra_args="${6:-}"
+    local n_tokens="${7:-10}"  # Round 30: overridable to catch long-gen drift
 
     if [[ ! -f "$MODELS_DIR/$model" ]]; then
         printf "  %-50s [SKIP] not found\n" "$model"
@@ -39,9 +40,7 @@ run_test() {
     fi
 
     local out
-    # Capture full output (replace newlines with space) — avoids missing
-    # output when first line is empty (newline-prefixed generation).
-    out=$(env $extra_env "$QUANT_BIN" "$MODELS_DIR/$model" $extra_args -p "$prompt" -n 10 -T 0 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g')
+    out=$(env $extra_env "$QUANT_BIN" "$MODELS_DIR/$model" $extra_args -p "$prompt" -n "$n_tokens" -T 0 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g')
 
     case "$tier" in
         STRICT)
@@ -100,9 +99,12 @@ run_test "Qwen3.5-4B-Q4_K_M.gguf"              "Hi" "Hello" STRICT "TQ_NO_METAL=
 # Regression guard: without <think>\n\n</think>\n\n close, model emits
 # immediate <|im_end|> (0 tokens). 2026-04-17.
 run_test "Qwen3.6-35B-A3B-UD-IQ2_XXS.gguf"     "Hi" "" COHERENT "TQ_NO_METAL=1" "--chat"
-# Q5_K_M — higher-bpw MoE path, requires Round 12 selective MADV + Round 17
-# SHL qh extraction. Regression guard for future Q5_K kernel changes.
+# Q5_K_M — higher-bpw MoE path. Round 30 adds n=25 long-gen guard that
+# would have caught the Round 25-discovered DeltaNet drift (fixed in
+# R26 L2-norm eps + R27-29 exact expf cleanup). Coherent prefix must
+# survive ≥20 tokens without falling into digit/punctuation spam.
 run_test "Qwen3.6-35B-A3B-UD-Q5_K_M.gguf"      "Hi" "" COHERENT "TQ_NO_METAL=1 TQ_NO_MLOCK=1" "--chat"
+run_test "Qwen3.6-35B-A3B-UD-Q5_K_M.gguf"      "What is the capital of France?" "Paris" STRICT "TQ_NO_METAL=1 TQ_NO_MLOCK=1" "--chat" 25
 
 echo ""
 echo "--- Metal-ON tier (default build must also produce coherent output) ---"

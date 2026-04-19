@@ -1,8 +1,38 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-19 (Round 29)
+**Last updated**: 2026-04-19 (Round 30)
 **Score**: **0.9979 / 1.0000 (99.8%)** — unchanged
-**Session HEAD**: Round 29 — fast_expf cleanup complete (beta + attn_output_gate).
+**Session HEAD**: Round 30 — Long-gen regression guard. **30 라운드 세션 완료**.
+
+## Round 30 — Long-gen regression guard
+
+`scripts/test_models.sh` `run_test()`에 7번째 파라미터 `n_tokens`
+(기본 10) 추가. Qwen3.6 Q5_K_M에 새 테스트:
+```bash
+run_test "Qwen3.6-35B-A3B-UD-Q5_K_M.gguf" \
+  "What is the capital of France?" "Paris" STRICT \
+  "TQ_NO_METAL=1 TQ_NO_MLOCK=1" "--chat" 25
+```
+
+이 guard는 Round 25에서 발견한 DeltaNet drift를 n=10에선 놓쳤지만
+n=25에서는 Paris 정답이 프리픽스에 포함되는지 STRICT 체크.
+
+**13/13 PASS** (이전 12 + 새 long-gen guard).
+
+## 30 라운드 세션 종합
+- Rounds 1-15: Mission A + 인프라
+- Rounds 16-17: Q5_K_M 로드 경로 + Round 17 (혼동)
+- Rounds 18-19: 롤백 교훈
+- Rounds 20-24: 문서화 (일부 과장)
+- **Round 25: drift 발견** (n=10 regression 맹점)
+- **Round 26: L2 eps 1줄 fix (refs/ 비교)** ← 세션 최대 영향
+- **Round 27-29: DeltaNet/self-attn fast_expf 전체 제거**
+- **Round 30: 장기 생성 regression guard** (drift 재발 방지)
+
+Score 0.9946 → 0.9979 유지, regression 12 → 13, 경고 0.
+Qwen3.6 MoE 장기 생성 25 토큰까지 정답 유지 확인.
+
+## Round 29 — 잔여 fast_expf 제거
 
 ## Round 29 — 잔여 fast_expf 제거 (beta, attn_output_gate)
 
