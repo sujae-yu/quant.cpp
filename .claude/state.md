@@ -1,8 +1,20 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-19 (Round 21)
+**Last updated**: 2026-04-19 (Round 22)
 **Score**: **0.9979 / 1.0000 (99.8%)** — full `score.sh`, 5/6 dimensions at 100%, structure 98.7%, **13/13 regression PASS**
-**Session HEAD**: Round 21 — Q5_K_M added to regression suite. 21 /grow rounds complete.
+**Session HEAD**: Round 22 — v0.16.0 release notes. 22 /grow rounds complete.
+
+## Round 22 — v0.16.0 release notes consolidation
+
+`docs/RELEASE_NOTES.md` — new v0.16.0 entry above v0.15.0:
+- Headline: Q5_K_M on 16 GB Mac (엔진 차원 최초)
+- Round 12 auto-policy MADV 상세 (file size vs RAM)
+- Round 17 NEON qh SHL 최적화
+- 5-tier quant matrix 재게시
+- Round 18/19 rollback 기록
+- 세션 metrics: -180 LOC, score 0.9946→0.9979
+
+이것으로 세션 아크 공식 문서화 완료.
 
 ## Round 21 — Q5_K_M in regression suite (future-proofing)
 

@@ -6,6 +6,96 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v0.16.0] — 2026-04-19 (Q5_K_M on 16 GB Mac + auto-policy MADV)
+
+### Headline
+
+**Qwen3.6-35B-A3B at Q5 quality (5.5 bpw) on 16 GB M1 Pro** — first
+engine to load the 26.5 GB Q5_K_M GGUF and produce coherent decode
+at 7.9 t/s warm steady-state on a 16 GB Mac. Previously impossible
+(llama.cpp + Q5_K_M OOMs on the same hardware).
+
+### The key mechanism — auto-policy MADV (Round 12)
+
+`tq_model.c` MoE GGUF loader now selects madvise strategy by
+`file_size vs hw.memsize`:
+
+- **File ≤ 75% RAM**: blanket `MADV_WILLNEED` (previous behavior;
+  optimal read-ahead, no swap risk).
+- **File > 75% RAM**: selective `MADV_WILLNEED` on non-expert tensors
+  only (`attn_*`, `norm_*`, `token_embd`, `output.weight`,
+  `ffn_*_shared_exp`). Routed `ffn_{gate,up,down}_exps` left at OS
+  default (NORMAL with read-ahead). MoE sparsity (K=8/N=256 active)
+  keeps working set bounded.
+
+Result for Qwen3.6-UD-Q5_K_M (24.6 GB):
+- Non-expert WILLNEED: 2.50 GB
+- Routed-expert OS-managed: 22.13 GB
+- **RSS: 9.65 GB** (36.7% of file) on 16 GB M1 Pro
+- Decode warm steady-state: **7.9 t/s** (interactive range)
+
+Override envs: `TQ_FLAT_MADV=1`, `TQ_SELECTIVE_MADV=1`.
+
+### Q5_K NEON kernel optimization (Round 17)
+
+`q5k_int_dot_worker`: 5th-bit extraction chain shortened from
+(AND + CEQ + AND + OR) to (SHL + AND + OR) using variable-shift
+`vshlq_u8` with runtime shift vector. Target bit moved directly to
+position 4 via single shift — saves one instruction per qh
+extraction.
+
+- Before: 1.5 t/s cold (Round 16)
+- After: **2.1 t/s cold (+40%)**, 7.9 t/s warm (+5-10× after cache warm)
+
+### Full Qwen3.6-35B-A3B quant matrix on 16 GB Mac
+
+| Quant | File | RSS | Decode (warm) |
+|---|---:|---:|---:|
+| IQ2_XXS | 10.0 GB | ~6.5 GB | 16.1 t/s |
+| IQ3_XXS | 12.3 GB | ~6.5 GB | 14.6 t/s |
+| Q3_K_S | 14.3 GB | 5.24 GB | 14.3 t/s |
+| IQ4_XS | 16.5 GB | 7.25 GB | 10.6 t/s |
+| **Q5_K_M** | **24.6 GB** | **9.65 GB** | **7.9 t/s** |
+
+vs llama.cpp CPU 5.1 t/s (Q3_K_S): **2.8-3.2× faster** across tiers.
+llama.cpp can't load Q5_K_M on 16 GB Mac at all.
+
+### Other improvements
+
+- **Layer prefetch pipelining** (Round 15): `__builtin_prefetch` on
+  next-layer non-expert weights during current MoE compute. Neutral
+  on fits-in-RAM quants (Q3_K_S), positive on Q5_K_M page-cache
+  pressure. TLB priming benefit.
+- **Dead LRU infrastructure removed** (Round 13): −219 LOC of
+  unreachable Q8 cache code and its support chain. Eliminated
+  split-source vs `quant.h` drift (quant.h already shipped as
+  no-op stubs).
+- **Full score.sh** first run this session: 0.9979 / 1.0000 (99.8%) —
+  new all-time high. Previously `--quick` hid quality/performance
+  /integration dimensions (all actually at 100%).
+
+### Regression
+
+**13/13 test_models.sh PASS** (added Q5_K_M tier in Round 21).
+Rounds 18 (2-row register pressure, −14%) and 19 (per-dispatch
+madvise, −70%) attempted and rolled back — both would now be
+auto-caught by the regression suite.
+
+### Memories added
+
+- `feedback_madvise_willneed_per_call.md`: per-dispatch madvise on
+  Apple Silicon is a trap (VM contention on resident pages). Only
+  use at load time.
+
+### Session metrics
+
+- 21 /grow rounds completed
+- Net code change: −180 LOC (Round 13 cleanup vs Round 12/17/21 adds)
+- Score: 0.9946 → **0.9979**
+- 5-tier Qwen3.6 coverage on 16 GB Mac (IQ2/IQ3/Q3/IQ4/**Q5**)
+
+---
+
 ## [v0.15.0] — 2026-04-19 (Mission A: MoE Batched Prefill complete)
 
 ### Headline
