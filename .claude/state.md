@@ -1,8 +1,45 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-19 (Round 18)
+**Last updated**: 2026-04-19 (Round 19)
 **Score**: **0.9979 / 1.0000 (99.8%)** — full `score.sh`, 5/6 dimensions at 100%, structure 98.7%, regression PASS (0 FAIL)
-**Session HEAD**: Round 18 — Q5_K 2-row attempted, rolled back (register pressure). 18 /grow rounds complete.
+**Session HEAD**: Round 19 — per-dispatch madvise attempted, rolled back (3× regression). 19 /grow rounds complete.
+
+## Round 19 — Per-dispatch `madvise(WILLNEED)`: ATTEMPTED, ROLLED BACK
+
+Hypothesis: after routing decides K=8 active experts, issue
+`madvise(MADV_WILLNEED)` on each expert's weight region so SSD
+page-in runs async during compute → reduce Q5_K_M new-topic cold
+penalty (1.5 → target 3-4 t/s).
+
+**Result**: **Q5_K_M 7.3 → 2.2 t/s (-70%)** on same-prompt warm A/B.
+Catastrophic regression — prefetch made warm path 3× slower.
+
+**Why it failed**:
+- macOS madvise per call walks VMA tree + touches all page
+  descriptors in range; for 40 layers × 8 experts × ~700 KB = 680 MB
+  of advice per token → VM subsystem contention.
+- For already-resident pages, macOS may still synchronously validate
+  against backing store (not async like Linux).
+- Unified memory: competes with NEON matmul for memory controller —
+  exactly flash-moe's F_RDADVISE lesson (-73% GPU throughput
+  observed in their experiment #7).
+
+Git-reverted `src/engine/tq_moe.c`. Saved `feedback_madvise_willneed_per_call.md`
+memory to prevent future attempts.
+
+**Generalized lesson** (cross-session durable):
+- `madvise` is for LOAD time only on Apple Silicon (Round 12 pattern).
+- Never call from per-token / per-layer / per-expert hot path.
+- SSD DMA and compute cannot be overlapped on unified memory
+  architecture — flash-moe proved it for GPU, we just confirmed it
+  for CPU.
+- `__builtin_prefetch` (single instruction, L2/L3 hint) remains safe.
+
+### Session running tally
+- Rounds 1-15 landed (Mission A + infra + cleanup + prefetch).
+- Round 16-17 landed (Q5_K_M on 16 GB + NEON SHL +40%).
+- **Round 18 & 19 rolled back** (2-row register pressure, madvise trap).
+- Still 0.9979 all-time-high score, 0 FAIL regression.
 
 ## Round 18 — Q5_K 2-row parallel: ATTEMPTED, ROLLED BACK
 
