@@ -1,8 +1,8 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-19 (Round 10)
+**Last updated**: 2026-04-19 (Round 11)
 **Score**: **0.9946 / 1.0000 (99.5%)** — score.sh --quick, correctness 100%, warnings 0, 12/12 regression PASS
-**Session HEAD**: Round 10 — TQ_MOE_BATCH_DYNAMIC default-on flip. 10 /grow rounds complete this session.
+**Session HEAD**: Round 11 — state.md refresh + decode profile snapshot. 11 /grow rounds complete this session.
 
 ## What Works
 
@@ -136,8 +136,10 @@ Success criteria unchanged:
 - 12/12 regression pass
 - `TQ_MOE_BATCH=1` opt-in; sanity env compares vs per-token.
 
-### P1 Mission A Step 2: Self-attn batched polish
-After P0, wire `tq_batched_matmul_q8_0` into self-attn Q/K/V/O projections for additional 5-10%. Qwen3.6 has fused QKV attn_qkv + attn_output_gate, so split/combine logic needs care.
+### ~~P1 Mission A Step 2: Self-attn batched polish~~ — SKIP
+Profile (Round 11): self-attn is 0.0% of decode and ~0.26% of prefill
+compute post-Mission A. Even a 50% kernel speedup would be below
+measurement noise. De-prioritized permanently.
 
 ### P2 Long-prompt drift on 35B × 3-4 bpw
 **Confirmed intrinsic**: llama.cpp reproduces garbage on same Q3_K_S 40-word prompt. Not an engine bug. Only fix path is higher bpw, which doesn't fit 16 GB Mac.
@@ -160,17 +162,27 @@ sanity numbers, known limitations, and cumulative session arc
 
 ## Next `/grow` round entry point
 
-**Step 3d implementation**. Delegate to `general-purpose` agent due to size (800+ LOC).
+Mission A fully landed (Steps 3d/e/f/g/h/i/j + release notes + warnings).
+Score 0.9946 with full regression 12/12 PASS. Small-round P0-P3 items
+all closed as of Round 10.
 
-Clear deliverable:
-- `src/engine/tq_moe.c`: new function `tq_moe_forward_batch(...)` — 3-phase dispatch
-- `src/engine/tq_transformer.c`: wire into `tq_forward_batch` Qwen3.6 hybrid path
-- Env toggle `TQ_MOE_BATCH=1` (opt-in initially)
-- Sanity mode `TQ_MOE_BATCH_SANITY=1` → per-token equivalence check
-- Regression 12/12 must pass
-- Measurement: Qwen3.6 Q3_K_S / IQ4_XS prefill pp500 before/after
+Post-Mission A decode profile (Qwen3.6-UD-Q3_K_S, warm, per-token):
+- MoE: 63.5% (192.3 ms) — per-token expert dispatch, already NEON int8
+- Matmul: 34.2% (103.6 ms) — QKV / O / shared FFN / lm_head
+- Recurrent: 1.8%, conv: 0.2%, attn: 0.0%, other: 0.3%
+- Total: 302.7 ms/token (cold-ish during ramp; state.md claims 14 t/s warm)
 
-Success criteria:
-- Numerical equivalence vs per-token (within 1e-3 tolerance on output)
-- Prefill pp500 ≥ 10 t/s (2× from 5 t/s baseline) — stretch 15 t/s
-- No decode regression (warm peak ≥ 11 t/s)
+**Candidate Round 11+ targets** (pick by impact × risk):
+1. **Mission B #142 (big)**: Long-context 실증 harness — turbo_kv_4b
+   on Llama 3.2 3B at 16K-128K ctx, needle-in-haystack + PPL-over-ctx.
+   Validates KV compression claim at scale. ~400-600 LOC harness +
+   1-2 runs. Delegate to agent.
+2. **Decode MoE expert-parallel polish**: 63.5% of decode is MoE; check
+   if per-token 8-expert dispatch in `tq_moe.c` is fully tp_run-parallel.
+3. **P4 Metal MoE** (ambitious, multi-session): llama.cpp also hangs on
+   qwen35moe — a working Metal MoE would be genuinely novel. High risk.
+4. **`build_cpu/` gitignore + release cadence**: trivial housekeeping.
+
+**Do NOT** pursue P1 Step 2 self-attn batched polish — profile shows
+attn is 0.0% of decode and ~0.26% of prefill compute post-Mission A.
+ROI is below measurement noise. Remove from serious backlog.
