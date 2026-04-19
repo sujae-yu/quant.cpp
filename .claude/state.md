@@ -3,6 +3,21 @@
 **Last updated**: 2026-04-20 (Round 55)
 **Session HEAD**: Round 55 — **bench_my_mac.sh 1-command readiness**
 
+## Round 57 — tq_matmul_q8 int8 path ATTEMPTED, rolled back (dormant)
+
+Added vdotq_s32 fast path to `tq_matmul_q8` (internal .q8 weight format,
+not GGUF Q8_0 blocks). Theory: 2.5-3× speedup for deltanet Q/K/V/A/B
+on Qwen3.6 by replacing vfmaq_f32 with vdotq_s32.
+
+**실측**: 중립 (13.1 → 12.2 t/s 노이즈 범위). 원인 확인:
+- Qwen3.6 deltanet은 `gguf_delta_qkv` 경로 사용 (tq_matmul_gguf 호출)
+- `tq_matmul_q8`는 내부 `.q8` 형식일 때만 호출 — Qwen3.6/Phi-3.5/Llama
+  모두 GGUF 경로 사용하므로 **dormant**
+- 내부 `.q8` 경로는 TQM 변환 시나리오에서만 활성화
+
+Reverted. 15/15 regression (dormant = safe, but no benefit = don't ship).
+학습: 최적화하려는 함수가 실제 hot path인지 확인하고 착수.
+
 ## Round 56 — IQ4_XS 2-row ATTEMPTED, ROLLED BACK
 
 2-row unroll on `fused_dot_iq4_xs_int8` (activation sharing). Same failure mode
