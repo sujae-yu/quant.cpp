@@ -2,7 +2,7 @@
 
 **Last updated**: 2026-04-19
 **Score**: 12/12 regression PASS, 0 build warnings (core)
-**Session HEAD**: `3a34cbf` (Step 3h: batched shared expert)
+**Session HEAD**: `(Round 6)` — Step 3i default-on flip. Session cumulative: 5 grow rounds, Mission A Step 3 complete.
 
 ## What Works
 
@@ -106,12 +106,14 @@ Batched shared expert dispatch. Extra +8% vs Step 3f measured
 Limitation: GGUF-native shared expert still per-token fallback
 (dormant for Q4-converted Qwen3.6 UD quants, so no impact there).
 
-**Step 3i: make TQ_MOE_BATCH=1 default-on**
-Sanity now clean under N=1 + 2e-4 under N=7. Greedy decoding
-sensitivity issue (1e-5 noise flips top-1) needs either:
-(a) higher-precision FMA chains in batched kernels, or
-(b) accepting non-deterministic top-1 under temperature sampling.
-Not urgent; env opt-in remains safe.
+**Step 3i: ✅ DONE (Round 6)** — MoE batched default-ON
+`tq_generate.c`: `getenv("TQ_MOE_BATCH")` → `!getenv("TQ_NO_MOE_BATCH")`.
+Regression 12/12 PASS unchanged (greedy coherence robust enough).
+"Paris" factual probe identical with/without opt-out.
+
+Users now get prefill speedup automatically on Qwen3.6 MoE. Opt-out
+via `TQ_NO_MOE_BATCH=1` for A/B testing. Dynamic queue still opt-in
+(`TQ_MOE_BATCH_DYNAMIC=1`) pending broader model coverage.
 
 `tq_moe_forward_batch` is implemented + validated (1.2e-7 diff). Calling it with N>1 requires a new `tq_forward_batch_moe_hybrid` driver because existing `tq_forward_batch` is Llama-shaped and bails on `is_moe || has_fused_qkv || delta_kv_enabled`.
 
