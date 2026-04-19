@@ -1752,12 +1752,13 @@ void tq_moe_forward_batch(const tq_moe_layer_t* layer,
     if (tq_tls_force_serial_matmul) n_workers = 1;
 
     /* Step 3g: FCFS dynamic dispatch — all active experts queued at once,
-     * workers grab via atomic counter. Default OFF; opt-in via env.
-     * Serial fallback (n_workers==1) always uses the wave path. */
+     * workers grab via atomic counter. Default ON (Round 10: 12/12 regression
+     * PASS, +17% prefill measured on Qwen3.6-UD-Q3_K_S); opt-out via
+     * TQ_NO_MOE_BATCH_DYNAMIC. Serial fallback (n_workers==1) always uses
+     * the wave path. */
     int use_dynamic = 0;
     if (n_workers > 1 && n_active_experts > n_workers) {
-        const char* env = getenv("TQ_MOE_BATCH_DYNAMIC");
-        use_dynamic = (env && env[0] && env[0] != '0');
+        use_dynamic = !getenv("TQ_NO_MOE_BATCH_DYNAMIC");
     }
 
     /* Per-worker scratch: X_sub [64 × hidden_dim] + gate_out/up_out [64 × expert_dim]

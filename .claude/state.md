@@ -1,8 +1,8 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-19 (Round 9)
+**Last updated**: 2026-04-19 (Round 10)
 **Score**: **0.9946 / 1.0000 (99.5%)** — score.sh --quick, correctness 100%, warnings 0, 12/12 regression PASS
-**Session HEAD**: Round 9 — warnings elimination. 9 /grow rounds complete this session.
+**Session HEAD**: Round 10 — TQ_MOE_BATCH_DYNAMIC default-on flip. 10 /grow rounds complete this session.
 
 ## What Works
 
@@ -112,8 +112,13 @@ Regression 12/12 PASS unchanged (greedy coherence robust enough).
 "Paris" factual probe identical with/without opt-out.
 
 Users now get prefill speedup automatically on Qwen3.6 MoE. Opt-out
-via `TQ_NO_MOE_BATCH=1` for A/B testing. Dynamic queue still opt-in
-(`TQ_MOE_BATCH_DYNAMIC=1`) pending broader model coverage.
+via `TQ_NO_MOE_BATCH=1` for A/B testing.
+
+**Step 3j: ✅ DONE (Round 10)** — Dynamic FCFS default-ON
+`tq_moe.c` line 1757-1764: getenv("TQ_MOE_BATCH_DYNAMIC") → !getenv("TQ_NO_MOE_BATCH_DYNAMIC").
+Regression 12/12 PASS with dynamic enabled. Wave path still reachable
+via `TQ_NO_MOE_BATCH_DYNAMIC=1` opt-out. Users now get combined
++17% on top of Step 3f/3h prefill gains by default.
 
 `tq_moe_forward_batch` is implemented + validated (1.2e-7 diff). Calling it with N>1 requires a new `tq_forward_batch_moe_hybrid` driver because existing `tq_forward_batch` is Llama-shaped and bails on `is_moe || has_fused_qkv || delta_kv_enabled`.
 
@@ -138,8 +143,10 @@ After P0, wire `tq_batched_matmul_q8_0` into self-attn Q/K/V/O projections for a
 **Confirmed intrinsic**: llama.cpp reproduces garbage on same Q3_K_S 40-word prompt. Not an engine bug. Only fix path is higher bpw, which doesn't fit 16 GB Mac.
 Mitigation exposed: `--rep-penalty 1.3-1.5` CLI (c3a54f4) extends coherence ~40→75 tok.
 
-### P3 Full Qwen3 Q5_K support
-Q5_K int8 kernel likely scalar (not profiled yet). If users adopt Q5_K_M for mid-tier quality, this would matter.
+### ~~P3 Full Qwen3 Q5_K support~~ — Already DONE
+`q5k_int_dot_worker` at `tq_gguf_quants.c:4119` is NEON int8 + vdotq_s32
+(DOTPROD), 2-way low/high nibble + 5th-bit-from-qh via vceqq_u8 mask,
+dispatched at line 5181. Not scalar — performance-on-par with Q4_K.
 
 ### P4 Metal MoE (ambitious, low-urgency)
 Current `qwen35moe` forces CPU (a4120d8) because Metal path hangs. llama.cpp also hangs on same model. A working Metal MoE would be unique.
