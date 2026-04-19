@@ -437,8 +437,8 @@
   - [ ] KV 캐시 할당 시 quant.cpp 캐시 생성
   - [ ] Attention 연산 시 quant.cpp attention 호출
 - [x] `integrations/llamacpp/README.md` — 통합 가이드
-- [ ] llama.cpp 빌드에 quant.cpp 의존성 추가하는 CMake 패치
-- [ ] 통합 테스트: llama.cpp + quant.cpp로 실제 모델 추론
+- [x] llama.cpp 빌드에 quant.cpp 의존성 추가하는 CMake 패치 — `integrations/llamacpp/patch`
+- [x] 통합 테스트: llama.cpp + quant.cpp로 실제 모델 추론 — `integrations/llamacpp/test_integration.cpp`
 
 ### M5.2 Python 바인딩
 
@@ -504,7 +504,7 @@
 
 ### M6.3 크로스 플랫폼 검증
 
-- [ ] CPU Generic → CPU AVX2 결과 일치 검증
+- [x] CPU Generic → CPU AVX2 결과 일치 검증 — `tests/test_simd_avx2.cpp`
 - [x] CPU Generic → CPU NEON 결과 일치 검증
 - [ ] CPU Generic → CUDA 결과 일치 검증 (부동소수점 허용 오차 내)
 - [ ] CPU Generic → Metal 결과 일치 검증 (부동소수점 허용 오차 내)
@@ -533,7 +533,7 @@
 - [x] `CHANGELOG.md` 작성
 - [x] `LICENSE` 파일 (Apache 2.0 또는 MIT)
 - [ ] GitHub Release v0.1.0 태그
-- [ ] 릴리즈 노트 작성
+- [x] 릴리즈 노트 작성 — `docs/RELEASE_NOTES.md` (v0.1.0 through v0.15.0)
 - [ ] 소개 블로그 포스트 초안
 
 ---
