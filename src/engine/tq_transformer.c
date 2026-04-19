@@ -475,8 +475,12 @@ static void l2_normalize(float* v, int n) {
  * ~6x faster than expf(), accuracy within ~1% for |x| < 10
  * Used for decay gates where exact precision is not critical.
  * ============================================================ */
+/* Round 29: fast_expf removed from tq_transformer.c — all DeltaNet +
+ * self-attn gate call sites replaced with exact expf (Rounds 26-29)
+ * for long-gen coherence. tq_moe.c keeps its own fast_expf_moe for
+ * MoE router (less precision-sensitive there). */
+static inline float fast_expf(float x) __attribute__((unused));
 static inline float fast_expf(float x) {
-    /* Clamp to avoid overflow/underflow */
     if (x < -20.0f) return 0.0f;
     if (x > 20.0f) return expf(x);
     union { float f; int32_t i; } v;
@@ -669,7 +673,11 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
     else
         tq_matmul(s->delta_ab + dn, s->xb, layer->delta_in_proj_b, dn, dim);
     for (int h = 0; h < dn; h++) {
-        s->delta_ab[dn + h] = 1.0f / (1.0f + fast_expf(-s->delta_ab[dn + h]));
+        /* Round 29: exact expf for beta sigmoid. beta gates the entire
+         * delta rule update — any precision loss scales the whole
+         * state increment. fast_expf here was particularly insidious
+         * because it's in an FMA-critical path. */
+        s->delta_ab[dn + h] = 1.0f / (1.0f + expf(-s->delta_ab[dn + h]));
     }
 
     TQ_PROF_STOP(_tp, matmul_ns);
@@ -2320,36 +2328,17 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
 
     TQ_PROF_STOP(_tp, attn_ns);
 
-    /* Apply output gate if enabled: attn_out *= sigmoid(gate_q) */
+    /* Apply output gate if enabled: attn_out *= sigmoid(gate_q).
+     * Round 29: exact expf. Qwen3.6 attn_output_gate applies per
+     * (n_heads × head_dim) = 4K elements × 10 self-attn layers =
+     * 40K sigmoid/token. Schraudolph error compounds through the
+     * o_proj back into the residual stream. */
     if (c->attn_output_gate && gate_q) {
         int total = n_heads * head_dim;
-#ifdef __ARM_NEON
-        int i = 0;
-        for (; i + 3 < total; i += 4) {
-            float32x4_t vg = vld1q_f32(gate_q + i);
-            float32x4_t vx = vld1q_f32(s->xb + i);
-            float32x4_t vneg = vnegq_f32(vg);
-            float neg_vals[4];
-            vst1q_f32(neg_vals, vneg);
-            float exp_vals[4] = {
-                fast_expf(neg_vals[0]), fast_expf(neg_vals[1]),
-                fast_expf(neg_vals[2]), fast_expf(neg_vals[3])
-            };
-            float32x4_t vexp = vld1q_f32(exp_vals);
-            float32x4_t vone = vdupq_n_f32(1.0f);
-            float32x4_t vsig = vdivq_f32(vone, vaddq_f32(vone, vexp));
-            vst1q_f32(s->xb + i, vmulq_f32(vx, vsig));
-        }
-        for (; i < total; i++) {
-            float g = 1.0f / (1.0f + fast_expf(-gate_q[i]));
-            s->xb[i] *= g;
-        }
-#else
         for (int i = 0; i < total; i++) {
-            float g = 1.0f / (1.0f + fast_expf(-gate_q[i]));
+            float g = 1.0f / (1.0f + expf(-gate_q[i]));
             s->xb[i] *= g;
         }
-#endif
     }
 
     /* Debug: check xb (attention output) before wo */

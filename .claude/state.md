@@ -1,8 +1,26 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-19 (Round 28)
+**Last updated**: 2026-04-19 (Round 29)
 **Score**: **0.9979 / 1.0000 (99.8%)** — unchanged
-**Session HEAD**: Round 28 — conv1d silu exact expf (245K 호출/토큰).
+**Session HEAD**: Round 29 — fast_expf cleanup complete (beta + attn_output_gate).
+
+## Round 29 — 잔여 fast_expf 제거 (beta, attn_output_gate)
+
+마지막 2곳 fast_expf → expf:
+1. DeltaNet beta sigmoid (line 672) — delta update 게이팅
+2. Self-attn attn_output_gate (Qwen3.6 고유, 10 self-attn × 4K = 40K/tok)
+
+이것으로 tq_transformer.c 내 hot-path fast_expf 전부 제거.
+unused 함수는 `__attribute__((unused))` 태깅으로 경고 0 유지.
+12/12 regression PASS.
+
+Drift 진보:
+- Gravity 50-tok coherent prefix: 18 → ~25 토큰
+- Counting: 37 tok에서 `repetition loop detected` 가드 발동 (새 guard 정상 작동)
+
+근본 구조적 원인 잔여. 숫자/반복 패턴은 여전히 길어지면 발생.
+
+## Round 28 — conv1d silu exact expf
 
 ## Round 28 — conv1d silu exact expf
 
