@@ -3,6 +3,24 @@
 **Last updated**: 2026-04-20 (Round 55)
 **Session HEAD**: Round 55 — **bench_my_mac.sh 1-command readiness**
 
+## Round 56 — IQ4_XS 2-row ATTEMPTED, ROLLED BACK
+
+2-row unroll on `fused_dot_iq4_xs_int8` (activation sharing). Same failure mode
+as R18 Q5_K: **-29% decode** (13.3 t/s → 9.4 t/s, A/B on Qwen3.6 IQ4_XS,
+TQ_IQ4XS_NO2ROW toggle).
+
+**학습**: k-quant NEON kernel에 2-row unroll이 먹지 않는 패턴 확정.
+- Q5_K (R18): register pressure from qh 5-bit state → spill
+- IQ4_XS (R56): 4× vqtbl1q_s8 (3-cyc latency) serialized + weight mem 2×
+
+공통 원인: MoE 디코드는 memory-bound (expert weight pages cold).
+ILP 이득은 compute이 bottleneck일 때만. 메모리-bound는 activation 재사용
+정도 ≈ 노이즈.
+
+**향후 2-row 시도 금지** (k-quant inner + MoE decode).
+Path forward: activation pre-quant sharing, prefetch 파이프라인, 
+대형 matmul (lm_head, QKV) 쪽.
+
 ## Round 55 — scripts/bench_my_mac.sh (1-command readiness check)
 
 개인 개발자가 `bash scripts/bench_my_mac.sh` 한 번으로 자기 Mac의
