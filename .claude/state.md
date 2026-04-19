@@ -1,8 +1,15 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-19 (Round 26)
-**Score**: **0.9979 / 1.0000 (99.8%)** — unchanged (regression short, drift fix partial)
-**Session HEAD**: Round 26 — DeltaNet L2 norm epsilon fix, Qwen3.6 드리프트 대폭 완화.
+**Last updated**: 2026-04-19 (Round 27)
+**Score**: **0.9979 / 1.0000 (99.8%)** — unchanged
+**Session HEAD**: Round 27 — DeltaNet exact expf numerical cleanup.
+
+## Round 27 — DeltaNet exact expf (softplus + decay + silu gate)
+
+3곳 `fast_expf` → `expf` 교체 (llama.cpp ggml_silu 정확도 매칭).
+비용 <1% per-token. Drift 효과 혼합 — 구조적 원인 별도.
+
+12/12 regression PASS.
 
 ## Round 26 — Root cause found via llama.cpp reference diff
 

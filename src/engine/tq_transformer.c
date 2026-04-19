@@ -690,16 +690,22 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
     float* decay_vals = s->decay_vals;
     for (int h = 0; h < dn; h++) {
         float alpha_biased = s->delta_ab[h] + layer->delta_dt_bias[h];
-        /* softplus: log(1 + exp(x)). For large x, softplus(x) ~ x */
+        /* softplus: log(1 + exp(x)). For large x, softplus(x) ~ x.
+         * Round 27: exact expf (was fast_expf). softplus is computed
+         * per-head per-token — ~2% Schraudolph error at this stage
+         * propagates into decay which gates the entire recurrent state. */
         float alpha_sp;
         if (alpha_biased > 15.0f) {
-            alpha_sp = alpha_biased; /* softplus saturates to identity */
+            alpha_sp = alpha_biased;
         } else {
-            alpha_sp = logf(1.0f + fast_expf(alpha_biased));
+            alpha_sp = logf(1.0f + expf(alpha_biased));
         }
-        float neg_exp_alog = -expf(layer->delta_a_log[h]); /* keep precise for model param */
+        float neg_exp_alog = -expf(layer->delta_a_log[h]);
         gate_vals[h] = alpha_sp * neg_exp_alog;
-        decay_vals[h] = fast_expf(gate_vals[h]); /* precompute decay */
+        /* Round 27: exact expf for decay (was fast_expf). decay is
+         * multiplied with the state matrix every token — any error
+         * accumulates geometrically across generation. */
+        decay_vals[h] = expf(gate_vals[h]);
     }
 
     /* Step 4: Causal conv1d on QKV + SiLU (batched, NEON-optimized) */
@@ -887,39 +893,17 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
             oh[j] = oh[j] * inv_rms * layer->delta_norm[j];
         }
 
-        /* Multiply by swish(z) for this head (NEON + fast_expf) */
+        /* Multiply by swish(z) for this head.
+         * Round 27: replaced Schraudolph fast_expf with exact expf. The
+         * ~2-4% Schraudolph error is harmless per-call but cascades
+         * across 30 DeltaNet layers × generated tokens → drift residual
+         * surviving Round 26's L2-norm eps fix. llama.cpp uses exact
+         * ggml_silu. Cost: silu gate is <1% of per-token time. */
         float* zh = s->delta_z + h * dv;
-#ifdef __ARM_NEON
-        {
-            int j = 0;
-            for (; j + 3 < dv; j += 4) {
-                float32x4_t vz = vld1q_f32(zh + j);
-                float32x4_t vo = vld1q_f32(oh + j);
-                float32x4_t vneg = vnegq_f32(vz);
-                /* Fast exp for 4 values */
-                float neg_vals[4];
-                vst1q_f32(neg_vals, vneg);
-                float exp_vals[4] = {
-                    fast_expf(neg_vals[0]), fast_expf(neg_vals[1]),
-                    fast_expf(neg_vals[2]), fast_expf(neg_vals[3])
-                };
-                float32x4_t vexp = vld1q_f32(exp_vals);
-                float32x4_t vone = vdupq_n_f32(1.0f);
-                float32x4_t vsilu = vdivq_f32(vz, vaddq_f32(vone, vexp));
-                vst1q_f32(oh + j, vmulq_f32(vo, vsilu));
-            }
-            for (; j < dv; j++) {
-                float z_val = zh[j];
-                oh[j] *= z_val / (1.0f + fast_expf(-z_val));
-            }
-        }
-#else
         for (int j = 0; j < dv; j++) {
             float z_val = zh[j];
-            float z_silu = z_val / (1.0f + fast_expf(-z_val));
-            oh[j] *= z_silu;
+            oh[j] *= z_val / (1.0f + expf(-z_val));
         }
-#endif
     }
 
     /* Output projection: [dim, z_dim] @ delta_out[z_dim] -> xb2[dim] */
