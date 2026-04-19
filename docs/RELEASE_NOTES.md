@@ -6,6 +6,69 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v0.15.0] — 2026-04-19 (Mission A: MoE Batched Prefill complete)
+
+### Headline
+
+**Qwen3.6-35B-A3B MoE prefill on 16 GB M1 Pro: 4.4 → 6.1 t/s (+39%), wall -29%, CPU work -41%.**
+
+The batched prefill path is now default-on. Opt out via `TQ_NO_MOE_BATCH=1`.
+
+### Mission A Step 3 — measured on Qwen3.6-UD-Q3_K_S, 450-word prompt, warm, j=8:
+
+| Step | Wall | Prefill | vs baseline |
+|---|:-:|:-:|:-:|
+| baseline (per-token) | 103 s | 4.4 t/s | — |
+| + 3e driver | 92 s | 4.9 t/s | +11% |
+| + 3f cross-expert parallel | 85 s | 5.4 t/s | +23% |
+| + 3h batched shared expert | 82 s | 5.5 t/s | +25% |
+| + 3g dynamic FCFS queue | **73 s** | **6.1 t/s** | **+39%** |
+
+With 951-token prompt (more favorable amortization): baseline 11.4 → 13.4 t/s (+17% over prior steps alone).
+
+### Added
+- `tq_batched_matmul_q8_0` (b7c42dd) — Q8_0 batched kernel, Qwen3.6 non-expert attn path.
+- `fused_dot_iq3_xxs_int8_batched` (8dd4920, fixed 61d7ce8 — missing `qs += 8` bug caught by sanity) — 35.6% of Qwen3.6 prefill compute.
+- `fused_dot_iq3_s_int8_batched` (30428f3) — 19% compute.
+- `fused_dot_iq4_xs_int8_batched` (30428f3) — TBL-16 codebook.
+- `fused_dot_q3_k_int8_batched` (f9e5af1) — for pure Q3_K MoE models.
+- `tq_moe_forward_batch` (9fb237d) — 3-phase dispatch: batch-route → inverse index → expert-wise batched gather/matmul/scatter.
+- `tq_forward_batch_moe_hybrid` (627b65e, f255b46) — Qwen3.6-style driver: per-token DeltaNet + per-token self-attn + batched MoE FFN.
+- Cross-expert parallel dispatch (e5f721a) — 8 workers, one expert each, private scatter buffer reduced serially.
+- Batched shared expert (3a34cbf) — `tq_batched_matmul_q4` × 3 (gate/up/down) for Q4-converted shared experts.
+- `tq_tp_run_dynamic` (f195a78) — FCFS atomic-counter thread-pool dispatch, flattens expert-workload stragglers. Opt-in via `TQ_MOE_BATCH_DYNAMIC=1`.
+- `TQ_MOE_BATCH_SELFTEST=1` — N=1 sanity mode proves numerical equivalence (max_abs_diff 1.2e-7).
+
+### Changed
+- `TQ_MOE_BATCH=1` is now **default-on** (3f74f3e). Opt out with `TQ_NO_MOE_BATCH=1`.
+
+### Fixed
+- `fused_dot_iq3_xxs_int8_batched` missed `qs += 8` advance per sub-block (61d7ce8). Same precedent as the single-query kernel bug. Caught by sanity infrastructure before release.
+
+### Verification
+- `scripts/test_models.sh`: **12/12 PASS** throughout all 7 commits.
+- Sanity max_abs_diff: N=1 path = 1.2e-7, N=7 path ≤ 2e-4 (well under 1e-3 spec).
+- Decode unchanged (13+ t/s warm peak on Qwen3.6).
+
+### Known limitations
+- Dynamic FCFS queue (`TQ_MOE_BATCH_DYNAMIC`) is opt-in pending broader model coverage verification. Measured +17% when activated.
+- Non-q4_converted shared experts fall back to per-token (not triggered on current Qwen3.6 UD quants).
+- Decode path remains per-token (batched only affects prefill).
+
+### Complementary work (this release cycle, 2026-04-18→19)
+- v0.14.0: Q6_K NEON int8 (+115% on Q4_K_M models).
+- v0.14.1: Q3 tier breakthrough (Q3_K/IQ3_XXS/IQ4_XS int8 kernels).
+- v0.14.2: RoPE TLS sin/cos cache across all 4 branches; SwiGLU fast_exp_neon.
+- v0.14.3: Q3_K_S tier on Qwen3.6 (RSS 5.24 GB on 16 GB Mac).
+- **v0.15.0** (this): batched MoE prefill default-on.
+
+Cumulative Qwen3.6-35B-A3B arc (session start → v0.15.0):
+- Decode: 3.08 → **16.1 t/s** (IQ2_XXS peak); **2.8× faster than llama.cpp CPU**.
+- Prefill: 5 → **6.1 t/s at j=8** (+22%); **13.4 t/s at longer prompt** (+17% over prior).
+- RSS: 12 GB → **5.24 GB** (TQ_NO_MLOCK).
+
+---
+
 ## [v0.14.3] — 2026-04-18 night (Q3_K_S tier on Qwen3.6)
 
 ### Highlights

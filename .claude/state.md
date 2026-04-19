@@ -144,12 +144,12 @@ Q5_K int8 kernel likely scalar (not profiled yet). If users adopt Q5_K_M for mid
 ### P4 Metal MoE (ambitious, low-urgency)
 Current `qwen35moe` forces CPU (a4120d8) because Metal path hangs. llama.cpp also hangs on same model. A working Metal MoE would be unique.
 
-### P5 README / v0.15.0 release notes
-After Step 3d lands, v0.15.0 release notes needed for:
-- Q8_0 재양자화 트랩 수정
-- 4-tier Qwen3.6 measurement matrix
-- Mission A progress
-- 3-way (MLX/llama.cpp/us) benchmark positioning
+### P5 ✅ DONE (Round 7) — v0.15.0 release notes
+Comprehensive entry documenting Mission A Step 3 complete in
+`docs/RELEASE_NOTES.md`. Covers all 7 commits (batched kernels +
+dispatcher + driver + default flip), measured +39% prefill table,
+sanity numbers, known limitations, and cumulative session arc
+(3.08 → 16.1 t/s decode, 5 → 6.1 t/s prefill).
 
 ## Next `/grow` round entry point
 
