@@ -1698,8 +1698,11 @@ void tq_rmsnorm(float* out, const float* x, const float* weight, int n, float ep
  * Rotary Positional Embedding (RoPE)
  *
  * Applies rotation to pairs (q[2i], q[2i+1]) based on position.
- * Compatible with LLaMA / Qwen RoPE convention.
- * ============================================================ */
+ * Compatible with LLaMA / Qwen2 RoPE convention.
+ *
+ * NOTE: Qwen3 family (pure Qwen3 AND hybrid Qwen3.5/3.6) uses
+ * LLAMA_ROPE_TYPE_NEOX / IMROPE — half-split pairs (q[i], q[i+half]).
+ * Use tq_rope_neox for those. ============================================================ */
 void tq_rope(float* q, float* k, int pos, int head_dim,
              int n_heads, int n_kv_heads, float freq_base) {
     /* TLS sin/cos cache keyed on (pos, freq_base, head_dim). Identical
@@ -1747,6 +1750,57 @@ void tq_rope(float* q, float* k, int pos, int head_dim,
             float k1 = kh[2 * i + 1];
             kh[2 * i]     = k0 * cos_t - k1 * sin_t;
             kh[2 * i + 1] = k0 * sin_t + k1 * cos_t;
+        }
+    }
+}
+
+/* ============================================================
+ * NEOX-style RoPE (Pillar 1.5 R3): half-split pairs (q[i], q[i+half]).
+ * llama.cpp maps Qwen3 / Qwen3MOE / Qwen35 / Qwen35MOE → NEOX/IMROPE.
+ * LLaMA 2 / Qwen2 use tq_rope (interleaved pairs).
+ * Missing this on batched prefill + full-rotary per-token path was
+ * root cause of Qwen3 long-prompt UTF-8 garbage (R7/R8 bug).
+ * ============================================================ */
+void tq_rope_neox(float* q, float* k, int pos, int head_dim,
+                  int n_heads, int n_kv_heads, float freq_base) {
+    int half = head_dim / 2;
+    static __thread float tls_cos[256];
+    static __thread float tls_sin[256];
+    static __thread int   tls_pos = -1;
+    static __thread float tls_base = 0.0f;
+    static __thread int   tls_dim = 0;
+    if (half <= 256 &&
+        (tls_pos != pos || tls_base != freq_base || tls_dim != head_dim)) {
+        for (int i = 0; i < half; i++) {
+            float freq = 1.0f / powf(freq_base, 2.0f * i / head_dim);
+            float theta = pos * freq;
+            tls_cos[i] = cosf(theta);
+            tls_sin[i] = sinf(theta);
+        }
+        tls_pos = pos;
+        tls_base = freq_base;
+        tls_dim = head_dim;
+    }
+    for (int h = 0; h < n_heads; h++) {
+        float* qh = q + h * head_dim;
+        for (int i = 0; i < half; i++) {
+            float cos_t = tls_cos[i];
+            float sin_t = tls_sin[i];
+            float q0 = qh[i];
+            float q1 = qh[i + half];
+            qh[i]        = q0 * cos_t - q1 * sin_t;
+            qh[i + half] = q0 * sin_t + q1 * cos_t;
+        }
+    }
+    for (int h = 0; h < n_kv_heads; h++) {
+        float* kh = k + h * head_dim;
+        for (int i = 0; i < half; i++) {
+            float cos_t = tls_cos[i];
+            float sin_t = tls_sin[i];
+            float k0 = kh[i];
+            float k1 = kh[i + half];
+            kh[i]        = k0 * cos_t - k1 * sin_t;
+            kh[i + half] = k0 * sin_t + k1 * cos_t;
         }
     }
 }

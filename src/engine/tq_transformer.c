@@ -1551,7 +1551,23 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
                 }
             }
         } else {
-            tq_rope(s->q, s->k, pos, head_dim, n_heads, n_kv_heads, rope_base);
+            /* Pillar 1.5 R3: Qwen3 / Qwen3MOE / Qwen3.5 / Qwen3.6 all use
+             * NEOX-ordering RoPE (llama.cpp: LLM_ARCH_QWEN3* → ROPE_NEOX).
+             * Detect via GGUF arch string or delta_n_heads (hybrid family).
+             * Opt-out: TQ_ROPE_PAIRS=1 reverts to LLaMA pairs for legacy. */
+            int use_neox = 0;
+            if (model->gguf_ctx) {
+                tq_gguf_ctx_t* gctx = (tq_gguf_ctx_t*)model->gguf_ctx;
+                if (strstr(gctx->arch, "qwen3") != NULL
+                    || strstr(gctx->arch, "qwen35") != NULL) use_neox = 1;
+            }
+            if (c->delta_n_heads > 0) use_neox = 1; /* Qwen3.5/3.6 hybrid */
+            if (getenv("TQ_ROPE_PAIRS")) use_neox = 0;
+            if (use_neox) {
+                tq_rope_neox(s->q, s->k, pos, head_dim, n_heads, n_kv_heads, rope_base);
+            } else {
+                tq_rope(s->q, s->k, pos, head_dim, n_heads, n_kv_heads, rope_base);
+            }
         }
     }
 
@@ -3613,6 +3629,10 @@ int tq_forward_batch(tq_model_t* model, tq_state_t* s,
                 for (int i = 0; i < kv_dim; i++) VB[(size_t)n * kv_dim + i] += layer->v_bias[i];
         }
         /* 2b. QK-norm (Qwen3 — NULL for Llama). */
+        if (l == 0 && pos_start == 0 && getenv("TQ_DEBUG_PREFILL")) {
+            fprintf(stderr, "[batch-qknorm] L0 q_norm=%p k_norm=%p\n",
+                    (void*)layer->q_norm, (void*)layer->k_norm);
+        }
         if (layer->q_norm) {
             for (int n = 0; n < N; n++) {
                 for (int h = 0; h < c->n_heads; h++) {
@@ -3633,7 +3653,19 @@ int tq_forward_batch(tq_model_t* model, tq_state_t* s,
         /* 3. RoPE + KV cache write (per-token).
          * Mirror tq_forward's RoPE selection: if model->rope_freqs is set
          * (Llama 3.x learned RoPE scaling, 64 freq factors), apply per-pair
-         * factor; otherwise plain interleaved RoPE. */
+         * factor; otherwise plain RoPE (NEOX for Qwen3, LLaMA pairs for others).
+         *
+         * Pillar 1.5 R3: Qwen3 family uses NEOX-ordering per llama.cpp
+         * (LLM_ARCH_QWEN3 -> ROPE_NEOX). Without this on batched prefill,
+         * long-prompt attention was corrupted -> UTF-8 garbage output. */
+        int batch_use_neox = 0;
+        if (model->gguf_ctx) {
+            tq_gguf_ctx_t* gctx = (tq_gguf_ctx_t*)model->gguf_ctx;
+            if (strstr(gctx->arch, "qwen3") != NULL
+                || strstr(gctx->arch, "qwen35") != NULL) batch_use_neox = 1;
+        }
+        if (c->delta_n_heads > 0) batch_use_neox = 1;
+        if (getenv("TQ_ROPE_PAIRS")) batch_use_neox = 0;
         for (int n = 0; n < N; n++) {
             float* qn = QB + (size_t)n * q_dim;
             float* kn = KB + (size_t)n * kv_dim;
@@ -3651,9 +3683,15 @@ int tq_forward_batch(tq_model_t* model, tq_state_t* s,
                         float freq = base / model->rope_freqs[i];
                         float theta = pos * freq;
                         float ct = cosf(theta), st = sinf(theta);
-                        float q0 = qh[2*i], q1 = qh[2*i+1];
-                        qh[2*i]   = q0 * ct - q1 * st;
-                        qh[2*i+1] = q0 * st + q1 * ct;
+                        if (batch_use_neox) {
+                            float q0 = qh[i], q1 = qh[i + rope_pairs];
+                            qh[i]              = q0 * ct - q1 * st;
+                            qh[i + rope_pairs] = q0 * st + q1 * ct;
+                        } else {
+                            float q0 = qh[2*i], q1 = qh[2*i+1];
+                            qh[2*i]   = q0 * ct - q1 * st;
+                            qh[2*i+1] = q0 * st + q1 * ct;
+                        }
                     }
                 }
                 for (int h = 0; h < c->n_kv_heads; h++) {
@@ -3663,14 +3701,25 @@ int tq_forward_batch(tq_model_t* model, tq_state_t* s,
                         float freq = base / model->rope_freqs[i];
                         float theta = pos * freq;
                         float ct = cosf(theta), st = sinf(theta);
-                        float k0 = kh[2*i], k1 = kh[2*i+1];
-                        kh[2*i]   = k0 * ct - k1 * st;
-                        kh[2*i+1] = k0 * st + k1 * ct;
+                        if (batch_use_neox) {
+                            float k0 = kh[i], k1 = kh[i + rope_pairs];
+                            kh[i]              = k0 * ct - k1 * st;
+                            kh[i + rope_pairs] = k0 * st + k1 * ct;
+                        } else {
+                            float k0 = kh[2*i], k1 = kh[2*i+1];
+                            kh[2*i]   = k0 * ct - k1 * st;
+                            kh[2*i+1] = k0 * st + k1 * ct;
+                        }
                     }
                 }
             } else {
-                tq_rope(qn, kn, pos, c->head_dim, c->n_heads, c->n_kv_heads,
-                        c->rope_freq_base);
+                if (batch_use_neox) {
+                    tq_rope_neox(qn, kn, pos, c->head_dim, c->n_heads, c->n_kv_heads,
+                                 c->rope_freq_base);
+                } else {
+                    tq_rope(qn, kn, pos, c->head_dim, c->n_heads, c->n_kv_heads,
+                            c->rope_freq_base);
+                }
             }
             if (n == 0 && l == 0 && dbg) {
                 fprintf(stderr, "[batch] L0 QB (post-RoPE) tok0 [0:8] = ");

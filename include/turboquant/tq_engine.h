@@ -652,6 +652,8 @@ void tq_matmul_rht_q4q2(float* out, const float* x,
 void tq_rmsnorm(float* out, const float* x, const float* weight, int n, float eps);
 void tq_rope(float* q, float* k, int pos, int head_dim,
              int n_heads, int n_kv_heads, float freq_base);
+void tq_rope_neox(float* q, float* k, int pos, int head_dim,
+                  int n_heads, int n_kv_heads, float freq_base);
 void tq_silu(float* x, int n);
 void tq_gelu_tanh(float* x, int n);
 void tq_softmax(float* x, int n);
