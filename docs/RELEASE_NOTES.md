@@ -6,6 +6,72 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v0.22.0] — 2026-04-20 (Qwen3.6 Chunked Batched Prefill — +30% TTFT)
+
+### Headline
+
+**Chunked batched prefill restores most of the batched-MoE speedup
+while keeping v0.21.0's correctness guarantee.** Qwen3.6-35B on a
+280-300 word document prefills in ~29s (vs ~38s per-token),
+producing the same correct summaries.
+
+### The idea
+
+v0.21.0 made `tq_forward_batch_moe_hybrid` opt-in because at N≥40
+the batched MoE kernel produced garbage. But dispatching the same
+driver in **small chunks** (CHUNK tokens at a time) stays within
+the safe N regime. State (KV cache, DeltaNet ssm, conv buffer) is
+already persistent across driver calls, so chunking is semantically
+correct.
+
+### Change
+
+`src/engine/tq_generate.c` — hybrid MoE prefill now loops over chunks
+of `TQ_MOE_BATCH_CHUNK` tokens (default 8). Each batched call
+satisfies the small-N safe region; chunks concatenate automatically
+via position accumulation.
+
+### Speed (Qwen3.6-35B IQ4_XS, CPU-only, TQ_NO_METAL=1)
+
+| Input | v0.21.0 (per-token) | v0.22.0 (chunk=8) | Speedup |
+|---|---:|---:|---:|
+| 44 words natural prose | 12.6s | **7.0s** | **+44%** |
+| 280 words natural prose | 38.0s | **29.4s** | **+29%** |
+| 294 words document Q&A | — | **29.4s** | — |
+
+### Correctness
+
+Default chunk=8 tested on:
+- Short (44w): "Artificial intelligence, powered by advanced algorithms and large-scale data, has transformed industries by enabling machines to learn and adapt like humans." ✓
+- Medium (280w): "The democratization of AI has been a major driver of the change in how we do things…" ✓
+- Long-medium (294w): "AI has become a ubiquitous technology, enabling billions of people to perform tasks previously impossible…" ✓
+
+Tunable: `TQ_MOE_BATCH_CHUNK=N` (default 8, safe up to ~300w doc).
+Chunk=32 shows degradation at long inputs; chunk=16 occasionally
+leaks minor UTF-8 noise; chunk=8 is the validated default.
+
+### Known limits
+
+- **500+ word inputs**: both per-token and chunked produce garbage
+  at ~560 words. This is a DIFFERENT bug from the batched-MoE N>>1
+  issue (both paths fail) — likely KV cache or DeltaNet state
+  accumulation at large token counts. Investigation deferred.
+- **Root cause of batched MoE N>>1 bug**: still unidentified
+  (sanity test only covers N=1). Chunked approach sidesteps it
+  rather than fixing.
+
+### Regression
+
+15/15 test_models + 4/4 test_tokenizer PASS.
+
+### Compatibility
+
+No API change. Existing `TQ_USE_MOE_BATCH`, `TQ_NO_MOE_BATCH`,
+`TQ_NO_BATCH_PREFILL` env vars unchanged. New `TQ_MOE_BATCH_CHUNK`
+env overrides chunk size.
+
+---
+
 ## [v0.21.0] — 2026-04-20 ★★★ (Qwen3.6-35B Practically Usable)
 
 ### Headline

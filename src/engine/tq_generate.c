@@ -312,22 +312,36 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
     int want_batched = (n_prompt >= 2) && !getenv("TQ_NO_BATCH_PREFILL");
     if (want_batched) {
         /* Qwen3.6 (MoE + DeltaNet hybrid) needs the dedicated MoE-batched
-         * driver — standard tq_forward_batch bails on is_moe. Was default
-         * ON after Step 3g (sanity 1.2e-7 at N=1, +39% prefill at j=8),
-         * but Pillar 1.5 R5 found that at N≥40 the batched path produces
-         * UTF-8 garbage on natural prose while per-token produces perfect
-         * coherent summaries on the same input. Root cause TBD (likely
-         * in tq_moe_forward_batch scatter path at N>>1; sanity tests only
-         * cover N=1). Default is now OFF for correctness — opt-in via
-         * TQ_USE_MOE_BATCH=1 once the bug is isolated. */
-        int use_moe_hybrid = model->config.is_moe &&
-                             !model->config.is_gemma4 &&
-                             model->layers[0].moe &&
-                             getenv("TQ_USE_MOE_BATCH") &&
-                             !getenv("TQ_NO_MOE_BATCH");
+         * driver — standard tq_forward_batch bails on is_moe. Pillar 1.5
+         * R5 isolated a bug inside tq_moe_forward_batch at N≥40 that
+         * produces UTF-8 garbage on natural prose; per-token forward is
+         * correct. Pillar 1.5 R6 mitigation: **chunked batched dispatch**
+         * — call the batched driver in chunks of CHUNK tokens each, where
+         * each individual call satisfies the small-N safe region. State
+         * (KV cache, DeltaNet state) is persistent across driver calls so
+         * chunking is semantically correct. Gives most of the speed-up
+         * while avoiding the N>>1 garbage regime. TQ_MOE_BATCH_CHUNK=N
+         * overrides the default chunk size; 0 = one big call (unsafe).
+         * TQ_NO_MOE_BATCH=1 forces per-token fallback. */
+        int is_moe_hybrid = model->config.is_moe &&
+                            !model->config.is_gemma4 &&
+                            model->layers[0].moe;
+        int use_moe_hybrid = is_moe_hybrid && !getenv("TQ_NO_MOE_BATCH");
         int rc;
         if (use_moe_hybrid) {
-            rc = tq_forward_batch_moe_hybrid(model, state, prompt_tokens, n_prompt, prefill_start);
+            const char* chunk_env = getenv("TQ_MOE_BATCH_CHUNK");
+            int chunk = chunk_env ? atoi(chunk_env) : 8;  /* 8 is safe + fast */
+            if (chunk <= 0) chunk = n_prompt; /* one big call (legacy) */
+            if (chunk > n_prompt) chunk = n_prompt;
+            rc = prefill_start;
+            for (int start = 0; start < n_prompt; start += chunk) {
+                int n_chunk = n_prompt - start;
+                if (n_chunk > chunk) n_chunk = chunk;
+                int chunk_rc = tq_forward_batch_moe_hybrid(
+                    model, state, prompt_tokens + start, n_chunk, rc);
+                if (chunk_rc != rc + n_chunk) { rc = chunk_rc; break; }
+                rc = chunk_rc;
+            }
         } else {
             rc = tq_forward_batch(model, state, prompt_tokens, n_prompt, prefill_start);
         }
