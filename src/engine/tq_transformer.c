@@ -2489,11 +2489,23 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
  * Dumps only at pos=0 (first token of prefill/generation) to avoid
  * overwriting across prefill tokens. */
 static void tq_dump_hidden(const char* name, const float* data, int n, int pos) {
-    if (pos != 0) return;
     const char* dir = getenv("TQ_DUMP_HIDDEN");
     if (!dir) return;
+    /* TQ_DUMP_POS=N selects a single position; default 0 preserves old
+     * behavior. TQ_DUMP_POS=all dumps every position (expensive: 28 × N
+     * files per forward pass). */
+    const char* pos_env = getenv("TQ_DUMP_POS");
+    if (pos_env && strcmp(pos_env, "all") == 0) {
+        /* dump all — append position to filename */
+    } else {
+        int target = pos_env ? atoi(pos_env) : 0;
+        if (pos != target) return;
+    }
     char path[512];
-    snprintf(path, sizeof(path), "%s/%s.bin", dir, name);
+    if (pos_env && strcmp(pos_env, "all") == 0)
+        snprintf(path, sizeof(path), "%s/%s_p%d.bin", dir, name, pos);
+    else
+        snprintf(path, sizeof(path), "%s/%s.bin", dir, name);
     FILE* f = fopen(path, "wb");
     if (!f) return;
     fwrite(data, sizeof(float), (size_t)n, f);

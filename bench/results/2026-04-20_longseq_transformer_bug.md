@@ -56,6 +56,28 @@ Confirmed: our Qwen3-0.6B produces token 9707 for "Hello" (matching HF).
 4. **Attention dispatch branch at seq_len > 128 / > 256**
    - Some kernels have special-case paths for long sequences.
 
+## R8 partial isolation: batched prefill is the primary offender
+
+A/B on Qwen3-0.6B with 50-synthetic-word prompt (144 tokens):
+
+| Path | Output |
+|---|---|
+| Batched (`tq_forward_batch`, default) | `alyticsÐ°Ð½cieaâ��à¹�...` (UTF-8 garbage) |
+| Per-token (`TQ_NO_BATCH_PREFILL=1`) | `" =, on up = a,="` (ASCII, broken but less) |
+| KV fp32 + batched | `ä¸�ä½�å�»isonswana...` (still garbage, KV quant not root cause) |
+| KV fp32 + per-token | same as per-token above |
+
+Interpretation:
+- Batched path is definitively broken — produces pure UTF-8 byte garbage.
+- Per-token path is also producing wrong output on natural prose, but
+  with ASCII characters rather than byte-level chaos. Some subtle
+  accumulation issue separate from the batched bug.
+- KV compression is NOT the cause; fp32 KV shows identical pattern.
+
+Primary target for follow-on: `tq_forward_batch` for non-MoE models.
+Secondary: per-token path on natural prose (may be RoPE / attention
+accumulation at larger pos).
+
 ## Next steps (methodology)
 
 Apply Pillar 1 methodology to transformer forward:
