@@ -6,6 +6,111 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v0.20.0] — 2026-04-20 ★★ (NEOX RoPE ROOT-CAUSE — Qwen3 Long-Prompt Fix)
+
+### Headline
+
+**Two transformer-level bugs that blocked Qwen3 family long-prompt
+coherence are fixed.** Combined with v0.19.0's BPE tokenizer fix,
+all three root causes of the 30+ round "Qwen3 drift" investigation
+(R26-R50) are now closed. Discovered via HF reference diff
+methodology (`tools/pillar1/`) after `refs/OpenMythos` analysis
+crystallized the principle: compare to ground truth FIRST.
+
+### Two fixes
+
+**Fix 1 — Pure-Qwen3 QK-norm restored** (`tq_transformer.c:1204`):
+
+R40 had disabled QK-norm for ALL GGUF arch strings matching "qwen".
+That was correct for Qwen3.5/3.6 HYBRID (DeltaNet + self-attn,
+`delta_n_heads > 0`) — those degrade with QK-norm applied. But
+pure Qwen3 (0.6B..32B) REQUIRES q_norm/k_norm per HF config. Without
+them, the residual stream explodes at layer 2 (norm ~5400 vs HF ~10).
+
+Fix: restrict the QK-norm disable to `delta_n_heads > 0` only.
+Pure Qwen3 now applies QK-norm as HF does.
+
+**Fix 2 — NEOX-ordering RoPE** (`tq_ops.c` + two sites in
+`tq_transformer.c`):
+
+llama.cpp maps `LLM_ARCH_QWEN3 / QWEN3MOE / QWEN35 / QWEN35MOE` to
+`LLAMA_ROPE_TYPE_NEOX / IMROPE` — half-split pairs `(q[i],
+q[i+head_dim/2])`. Our engine used LLaMA-style interleaved pairs
+`(q[2i], q[2i+1])`. R34 had fixed this for the partial-rotary path
+(Qwen3.5/3.6 hybrid) but pure Qwen3 (full rotary) and
+`tq_forward_batch` were never converted.
+
+Fix: new `tq_rope_neox` function + arch-detection at all three
+relevant call sites. Per-token full-rotary, batched learned-freq,
+batched fallback. TQ_ROPE_PAIRS=1 opt-out for legacy LLaMA/Qwen2.
+
+### Symptom (before/after, Qwen3-0.6B Q4, 50-word synthetic input)
+
+| Path | Before | After |
+|---|---|---|
+| Batched prefill | `alyticsÐ°Ð½cieaâ��à¹�…` UTF-8 garbage | `" Let me try to understand this"` |
+| Per-token prefill | `lenameuously…catchØ�` | `" ... and so on… So, the problem is to find the number of possible ways"` |
+
+### Natural prose — 31 words, "Summary:" continuation
+
+| Model | Output (first 20 tok) |
+|---|---|
+| Qwen3-0.6B | `"The main features of AI technology are that it has the ability to process information…"` ✓ |
+| Qwen3.5-4B | `"Artificial intelligence is a field of computer science that focuses on the development of intelligent machines…"` ✓ |
+
+### Qwen3.6-35B broad validation (8-prompt matrix, 40+ words max)
+
+- Zero UTF-8 garbage outputs (was 100% on 40+ words before v0.19.0).
+- Short story, long essay, tech explanation, factual Q&A all coherent.
+- Remaining weak spots are chat-template-induced early EOS (0 tokens
+  on some raw-completion prompts) — model behavior, not engine bug.
+
+### Methodology — OpenMythos insights applied
+
+`refs/OpenMythos` (RDT / MLA / ACT architecture reconstruction)
+crystallized the principle that ENABLED this session's breakthroughs:
+
+> Compare to ground truth (HF reference diff) BEFORE guessing at
+> kernels or recurrence state. 30+ rounds R26-R50 had all been
+> empirical; Pillar 1 R1-R3 + Pillar 1.5 R1-R3 solved three distinct
+> root causes in 6 rounds by diffing against HF output.
+
+Saved as `memory/project_openmythos_insights.md` for future sessions.
+
+### Files changed
+
+- `src/engine/tq_tokenizer.c` — BPE stale-entry check (v0.19.0 fix retained)
+- `src/engine/tq_transformer.c` — QK-norm scope + NEOX in 2 call sites
+- `src/engine/tq_ops.c` — new `tq_rope_neox` function
+- `include/turboquant/tq_engine.h` — export `tq_rope_neox`
+- `scripts/test_models.sh` + `scripts/test_tokenizer.sh` — regression expanded
+- `tools/pillar1/` — HF reference diff toolchain retained for follow-on
+- `bench/results/2026-04-20_bpe_fix_proof.md` — before/after evidence
+- `bench/results/2026-04-20_longseq_transformer_bug.md` — R7/R8 discovery trail
+
+### Regression
+
+- `test_models.sh`: **15/15 PASS** (unchanged through both fixes)
+- `test_tokenizer.sh`: 4/4 PASS
+
+### Known remaining
+
+- **Qwen3.6-35B DeltaNet state accumulation** on 40+ word natural
+  prose can sometimes trigger repetition-loop detection. This is
+  separate from the RoPE/QK-norm bugs and needs OpenMythos Insight
+  #2 (spectral-radius monitoring of recurrent state) applied as
+  diagnostic. Short-medium prompts fully coherent.
+- Chat-template interactions producing 0-token responses on some
+  coding prompts (Qwen3.6's thinking-mode prefix consuming the tokens).
+
+### Compatibility
+
+No API change. Existing code using `tq_rope` continues to work for
+LLaMA/Qwen2. New `tq_rope_neox` opt-in for Qwen3 family (auto-
+detected via GGUF arch string).
+
+---
+
 ## [v0.19.0] — 2026-04-20 ★ (BPE Stale-Entry ROOT-CAUSE Fix)
 
 ### Headline
