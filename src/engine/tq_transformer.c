@@ -2482,6 +2482,24 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
  *      (skip if neither)
  *   3. RMSNorm -> SwiGLU FFN -> residual
  * ============================================================ */
+/* Pillar 1: per-layer hidden state dump for reference-diff debugging.
+ * Set TQ_DUMP_HIDDEN=/path/to/dir; one file per slot:
+ *   emb.bin, h0.bin, ..., h{n-1}.bin, post_norm.bin, logits.bin
+ * Each file is raw FP32 little-endian, shape implied by model config.
+ * Dumps only at pos=0 (first token of prefill/generation) to avoid
+ * overwriting across prefill tokens. */
+static void tq_dump_hidden(const char* name, const float* data, int n, int pos) {
+    if (pos != 0) return;
+    const char* dir = getenv("TQ_DUMP_HIDDEN");
+    if (!dir) return;
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s.bin", dir, name);
+    FILE* f = fopen(path, "wb");
+    if (!f) return;
+    fwrite(data, sizeof(float), (size_t)n, f);
+    fclose(f);
+}
+
 float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
     double _fwd_t0 = g_tq_profile_enabled ? tq_now_ns() : 0;
     double _tp = 0;  /* profiling timestamp */
@@ -2560,6 +2578,7 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
         for (int i = 0; i < 8 && i < dim; i++) fprintf(stderr, "%.4f ", s->x[i]);
         fprintf(stderr, "\n");
     }
+    tq_dump_hidden("emb", s->x, dim, pos);
 
     /* PLE pre-computation: once per token, before the layer loop.
      * Computes ple_input[l] for each layer l from:
@@ -3057,6 +3076,10 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
             for (int i = 0; i < dim; i++) { _s += s->x[i]; _sa += (s->x[i]<0?-s->x[i]:s->x[i]); }
             fprintf(stderr, "[fwd]   L%d pos=%d final x sum=%.9f sumabs=%.9f\n", l, pos, _s, _sa);
         }
+        {
+            char _slot[16]; snprintf(_slot, sizeof(_slot), "h%d", l);
+            tq_dump_hidden(_slot, s->x, dim, pos);
+        }
         /* Post-layer processing: PLE, layer_output_scale.
          * GPU graph path jumps here after full-layer GPU forward. */
 
@@ -3153,6 +3176,7 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
         for (int i = 0; i < 8 && i < dim; i++) fprintf(stderr, "%.4f ", s->x[i]);
         fprintf(stderr, "\n");
     }
+    tq_dump_hidden("post_norm", s->x, dim, pos);
 
     /* Step 4: Output projection to vocab logits */
     TQ_PROF_START(_tp);
@@ -3171,6 +3195,7 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
     }
     TQ_PROF_STOP(_tp, matmul_ns);
     if (g_tq_profile_enabled) g_profile.lmhead_ns += tq_now_ns() - _tp_lm;
+    tq_dump_hidden("logits", s->logits, c->vocab_size, pos);
 
     if (pos <= 1 && getenv("TQ_DEBUG")) {
         /* Print top-5 logits for debugging */

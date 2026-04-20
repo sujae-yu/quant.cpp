@@ -1428,8 +1428,16 @@ int tq_encode(const tq_tokenizer_t* tok, const char* text,
             heap[0] = heap[--heap_size];
             if (heap_size > 0) { SIFT_DOWN(0); }
 
-            /* Check if stale (position was already merged) */
+            /* Check if stale (position was already merged).
+             * Pillar 1 Round 3 fix: a position that died as the RIGHT
+             * neighbor of some other merge doesn't get its gen[] bumped,
+             * so old heap entries at that position slip through the gen
+             * check. Additional guard on tokens[top.pos] < 0 catches this
+             * case and prevents writing to a dead slot. Root cause of the
+             * "Helll" tokenization garbage on Qwen3 (and the long-context
+             * "quicck bbrrown" doubling observed on Qwen3.5/3.6). */
             if (top.gen != gen[top.pos]) continue;
+            if (tokens[top.pos] < 0) continue;
             int ri = next[top.pos];
             if (ri >= n_tokens || tokens[ri] < 0) continue;
 
