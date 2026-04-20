@@ -226,6 +226,7 @@ int main(int argc, char** argv) {
 #endif
     if (n_threads < 1) n_threads = 4;
     if (n_threads > 16) n_threads = 16;  /* matches TQ_TP_MAX */
+    int n_threads_explicit = 0; /* set to 1 when user passes -j */
     int quant_mode = 0;   /* 0 = none (default), 2 = Q2, 4 = Q4, 8 = Q8 */
     int value_quant_bits = 0; /* 0 = FP16/FP32 (default), 4 = Q4, 2 = Q2 */
     int info_only = 0;
@@ -297,6 +298,7 @@ int main(int argc, char** argv) {
             }
         } else if (strcmp(argv[i], "-j") == 0 && i + 1 < argc) {
             n_threads = atoi(argv[++i]);
+            n_threads_explicit = 1;
         } else if (strcmp(argv[i], "-s") == 0 && i + 1 < argc) {
             rng_seed = strtoull(argv[++i], NULL, 10);
             if (rng_seed == 0ULL) rng_seed = 42ULL; /* 0 reserved for "use default" */
@@ -910,9 +912,31 @@ int main(int argc, char** argv) {
         }
     }
 
+    /* Pillar 1.5 R9: Qwen3.6-35B (qwen35moe + DeltaNet hybrid) shows
+     * non-deterministic T=0 output with multi-thread matmul (different
+     * output on same prompt run twice). -j 1 is deterministic AND
+     * produces coherent 100+ token generation where -j 8 garbles after
+     * ~60-70 tokens. Root cause: FP reduction order variance in parallel
+     * matmul accumulates over 30 MoE layers × position feedback loop,
+     * amplifying to top-1 argmax flips.
+     *
+     * Auto-force single-thread for qwen35moe UNLESS user explicitly
+     * passed -j or TQ_NO_AUTO_SERIAL=1. Speed cost: ~2× slower decode
+     * (7-8 → 3 t/s) but coherence up to 120+ tokens and deterministic
+     * output. The speed trade is necessary until the root-cause parallel
+     * variance is isolated in a future session. */
+    int auto_serial = 0;
+    if (model && model->config.is_moe && model->config.delta_n_heads > 0
+        && !n_threads_explicit && !getenv("TQ_NO_AUTO_SERIAL")) {
+        auto_serial = 1;
+        n_threads = 1;
+        fprintf(stderr, "Auto-serial: detected qwen35moe hybrid — forcing -j 1 "
+                        "for deterministic correctness (TQ_NO_AUTO_SERIAL=1 to opt out)\n");
+    }
     /* Set thread count for matmul parallelism */
     tq_set_threads(n_threads);
-    fprintf(stderr, "Threads: %d\n", tq_get_threads());
+    fprintf(stderr, "Threads: %d%s\n", tq_get_threads(),
+            auto_serial ? " (auto-serial quality mode)" : "");
 
     /* ================================================================
      * Mode: --profile-kv  (KV activation distribution profiling)

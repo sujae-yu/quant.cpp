@@ -823,6 +823,11 @@ moe_cpu_fallback: ;
     int n_threads = tq_get_threads();
     int parallel_experts = (num_active >= 2 && num_active <= n_threads &&
                              num_active <= TQ_TP_MAX);
+    /* Pillar 1.5 R9: TQ_MOE_SERIAL=1 forces serial expert dispatch for
+     * determinism testing. Parallel path was suspected source of T=0
+     * non-determinism that manifests as Qwen3.6-35B ~70-token decode
+     * degradation and long-context garbage. */
+    if (getenv("TQ_MOE_SERIAL")) parallel_experts = 0;
     /* Only do cross-expert parallel for GGUF experts (IQ2_XXS etc).
      * Q4-converted fast path has its own parallelism. */
     {

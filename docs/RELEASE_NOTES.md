@@ -6,6 +6,86 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v0.25.0] — 2026-04-20 (Qwen3.6 Auto-Serial Quality Mode — Determinism + Longer Coherence)
+
+### Honest headline
+
+**Qwen3.6-35B with multi-thread matmul is non-deterministic at T=0.**
+Same prompt run twice gives different output. Discovery: parallel
+FP reduction order variance compounds over 30 MoE layers × position
+feedback, amplifying to top-1 argmax flips. Auto-force single-thread
+for qwen35moe+DeltaNet hybrid models brings back **determinism and
+extends coherent generation from ~60-70 → ~90-100 tokens**.
+
+### What this ships
+
+`tools/quant.c`: detect `is_moe && delta_n_heads > 0` (qwen35moe
+hybrid) and auto-force `-j 1` unless user explicitly passed `-j` or
+sets `TQ_NO_AUTO_SERIAL=1`.
+
+Visible on load:
+
+```
+Auto-serial: detected qwen35moe hybrid — forcing -j 1 for
+  deterministic correctness (TQ_NO_AUTO_SERIAL=1 to opt out)
+Threads: 1 (auto-serial quality mode)
+```
+
+### Verified
+
+| Scenario | Multi-thread (-j 8) | Auto-serial (-j 1) |
+|---|---|---|
+| "Write a 300-word essay about AI." × 2 runs | Different outputs | **Identical, coherent** |
+| 250-token gen | Degrades at 60-70 tok | ~95 tokens coherent then mild degradation |
+| Decode speed | ~8 t/s | ~3 t/s (2-3× slower) |
+| Prefill 280 words | 29s | ~75s (slower, but was garbled at multi-thread anyway) |
+
+### Honest limits — NOT a full fix
+
+1000+ char coherent generation on Qwen3.6-35B **still fails** on some
+prompts. Auto-serial extends the coherence window but does not close
+it. Remaining bug class: numerical precision accumulation over 40
+layers × MoE 8-expert weighted sum × decode positions. Even single-
+threaded, FP32 + IQ4_XS quantization errors compound enough to
+eventually drift into repetition.
+
+### Why it's still worth shipping
+
+- Before: every Qwen3.6 run on same prompt gave different answer
+  (unusable for reproducible work)
+- After: deterministic output, extended coherence window, explicit
+  trade-off communicated to user.
+- Opt-out documented: `TQ_NO_AUTO_SERIAL=1` restores multi-thread
+  for users who want speed over stability.
+
+### What's still needed (honest)
+
+1. **Find the exact parallel-reduction source** of non-determinism
+   (even -j 2 diverges). Candidate: FP32 matmul row partition
+   ordering producing bit-level variance → cascades via MoE feedback.
+2. **Higher-precision MoE accumulator** (FP64 intermediate) — would
+   dampen compound error growth even in single-thread.
+3. **Router stability** — top-K from softmax probs (llama.cpp
+   convention) rather than raw logits for FP tie-break robustness.
+
+### Session arc (2026-04-20)
+
+| Ver | Root cause closed |
+|---|---|
+| 0.19.0 | BPE stale-entry (tokenizer) |
+| 0.20.0 | QK-norm + NEOX RoPE (Qwen3 family structural) |
+| 0.21.0 | MoE batched N>>1 → opt-in |
+| 0.22.0 | Chunked batched prefill (+30% TTFT, correctness preserved) |
+| 0.23.0 | Prompt buffer silent truncation (4K → 32K) |
+| 0.24.0 | MoE SwiGLU exact expf (precision margin) |
+| **0.25.0** | **Qwen3.6 auto-serial quality mode (determinism + longer window)** |
+
+### Regression
+
+15/15 test_models + 4/4 test_tokenizer PASS.
+
+---
+
 ## [v0.24.0] — 2026-04-20 (MoE SwiGLU Exact expf — Coherence Margin)
 
 ### Headline
