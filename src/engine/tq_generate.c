@@ -213,8 +213,14 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
             (size_t)n_layers * window * kv_dim, sizeof(float));
     }
 
-    /* Encode prompt */
-    int prompt_tokens[4096];
+    /* Encode prompt.
+     * Pillar 1.5 R7 fix: buffer was 4096 which truncated any prompt
+     * longer than ~4096 chars of English (BPE is char-level initial
+     * then merge-compressed, so the per-char cap bites before merges
+     * can reduce). Bumped to 32768 to support long-doc workflows up
+     * to the model's max_seq_len (typically 16384 after merges).
+     * 32768 × 4 bytes = 128 KB stack — fine on macOS (default 8 MB). */
+    int prompt_tokens[32768];
     int n_prompt = 0;
 
     if (tokenizer && prompt) {
@@ -246,7 +252,9 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
                 if (bos_id >= 0) add_bos = 1;
             }
         }
-        n_prompt = tq_encode(tokenizer, prompt, prompt_tokens, 4096, add_bos);
+        n_prompt = tq_encode(tokenizer, prompt, prompt_tokens,
+                              (int)(sizeof(prompt_tokens)/sizeof(prompt_tokens[0])),
+                              add_bos);
     } else {
         prompt_tokens[0] = (model->config.model_type == 1) ? 2 : 1;
         n_prompt = 1;

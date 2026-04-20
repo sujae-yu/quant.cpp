@@ -6,6 +6,75 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v0.23.0] — 2026-04-20 ★★ (Prompt Buffer + MoE Long-Context Isolation)
+
+### Headline
+
+**Silent prompt truncation at >4K chars FIXED.** Any prompt longer
+than ~4096 chars (≈ 700 words of English) was being cut off at the
+initial BPE char-level step and silently treated as a shorter input.
+After fix, Qwen3.5-4B and other non-MoE models now handle 500+ word
+documents cleanly. Qwen3.6-35B MoE hybrid long-context bug isolated
+to MoE path (DeltaNet and tokenization both proven correct).
+
+### The bug
+
+`src/engine/tq_generate.c:217` allocated `int prompt_tokens[4096]`
+and passed max_tokens=4096 to `tq_encode`. Our BPE does char-level
+initial tokenization (one vocab token per UTF-8 char) then merges
+them down. So a 4171-char text would hit the 4096 initial cap,
+discarding everything past char ~4096 BEFORE merges could reduce.
+The merged result (~684 tokens) would appear normal to the caller,
+but the TEXT beyond char 4096 was silently gone.
+
+### Diagnostic path (OpenMythos-inspired reference diff)
+
+- HF Qwen3-0.6B on text_1000.txt (561 words) + "Summarize..." →
+  **698 tokens**, coherent output.
+- Our engine same input → **684 tokens**, garbage output.
+- Tokenization check: our first 5 tokens = HF first 5 tokens
+  `[785 3840 315 24231 646]` ("The history of computing can") ✓
+- Our last tokens decoded: `". The abacus"` — **from the BEGINNING
+  of the text**, not the end!
+- Root cause: prompt was TRUNCATED; engine processed first 684
+  tokens of char-level initial tokenization, never reached the
+  "Summarize..." suffix.
+
+### Fix
+
+Buffer bumped `4096 → 32768` with dynamic max_tokens from
+`sizeof(prompt_tokens)/sizeof(...)`. 128 KB stack — fine on macOS
+(8 MB default thread stack).
+
+### Validation (same 561-word document + "In summary,")
+
+| Model | Before | After |
+|---|---|---|
+| Qwen3-0.6B (pure) | truncated → garbage | full text seen, model still weak at 698 tok |
+| Qwen3.5-4B (dense hybrid) | truncated → garbage | **coherent**: "the future of AI is not just about what we can do with it - it's about how we think about what matters most to us" ✓ |
+| Qwen3.6-35B (MoE hybrid) | truncated → garbage | full text seen, still garbage → **MoE-specific bug isolated** |
+
+### Remaining bug (isolated)
+
+Qwen3.6-35B at 561 words produces `2019, 20191345688...` repetition
+loop in BOTH per-token and chunked-batched modes. Qwen3.5-4B with
+the SAME DeltaNet architecture but DENSE FFN (no MoE) handles the
+SAME input fine. Conclusion: the bug is in the MoE feedback loop at
+long positions (expert accumulation, not DeltaNet state, not
+tokenization). Future investigation target.
+
+### Regression
+
+15/15 test_models + 4/4 test_tokenizer PASS.
+
+### Lesson
+
+Before concluding "long context broken," always verify the engine
+actually SAW the full input. Silent truncation at char buffers is a
+classic class of bug that hides underneath model-quality complaints.
+
+---
+
 ## [v0.22.0] — 2026-04-20 (Qwen3.6 Chunked Batched Prefill — +30% TTFT)
 
 ### Headline
