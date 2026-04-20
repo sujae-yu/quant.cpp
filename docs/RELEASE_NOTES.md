@@ -6,6 +6,56 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v0.24.0] — 2026-04-20 (MoE SwiGLU Exact expf — Coherence Margin)
+
+### Headline
+
+MoE SwiGLU activation now uses **exact expf** by default, replacing
+the ~2% error Schraudolph approximation. On Qwen3.6-35B this pushes
+back the long-context degradation boundary — 400-word documents now
+produce noticeably more coherent continuation. Speed cost:
+**unmeasurable** (SwiGLU is not the hot path).
+
+### Change
+
+`src/engine/tq_moe.c:swiglu_fused` now routes through `expf` scalar
+loop by default. Opt-out: `TQ_MOE_FAST_EXP=1` reverts to NEON
+Schraudolph path (for benchmarking only).
+
+### A/B (Qwen3.6-35B IQ4_XS, 400-word prose + "In summary,")
+
+| | Output |
+|---|---|
+| default (fast) | "most AI/ML (AI/ML) is a powerful tool for large-scale data processing." |
+| **exact expf** | "most of the other ' is a very important. The democratization of this is a very important and another particularly powerful and even more so that" |
+
+Longer, more varied output. Still not perfect at 400w+, but the
+degradation curve is noticeably softer. 280-word prose unchanged
+(already coherent pre-fix).
+
+### Speed
+
+Speed test on Qwen3.6-35B 280-word prompt (TTFT + decode):
+- default fast: 28-29s TTFT, 8.9-9.3 tok/s decode
+- exact expf:   28-29s TTFT, 9.0-9.3 tok/s decode
+
+Identical within noise. SwiGLU is not a bottleneck on CPU.
+
+### Known remaining
+
+Qwen3.6-35B at 500+ words still degrades (repetition loops on some
+prompts). The MoE long-context accumulation bug has MULTIPLE
+compounding sources; exact expf is one contributor, not the full
+fix. Next investigation targets: MoE router softmax stability at
+long positions, expert scale factor correctness, DeltaNet state
+spectral radius monitoring.
+
+### Regression
+
+15/15 test_models + 4/4 test_tokenizer PASS.
+
+---
+
 ## [v0.23.0] — 2026-04-20 ★★ (Prompt Buffer + MoE Long-Context Isolation)
 
 ### Headline

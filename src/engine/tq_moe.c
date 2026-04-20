@@ -64,8 +64,27 @@ static inline float32x4_t fast_exp_neon(float32x4_t vx) {
 }
 #endif
 
-/* Vectorized SwiGLU: hb[i] = silu(hb[i]) * hb2[i] */
+/* Vectorized SwiGLU: hb[i] = silu(hb[i]) * hb2[i].
+ * Pillar 1.5 R8: TQ_MOE_EXACT_EXP=1 routes SwiGLU through exact expf
+ * instead of Schraudolph approximation. Test if the ~2% precision
+ * error of fast_expf compounds over 30-layer × 500-token prefill to
+ * produce the Qwen3.6-35B long-context degradation. */
 static void swiglu_fused(float* restrict hb, const float* restrict hb2, int n) {
+    /* Pillar 1.5 R8: SwiGLU uses exact expf by default. Schraudolph
+     * approximation (~2% per-call error) compounds over 30 MoE layers ×
+     * 500+ tokens and degraded Qwen3.6 long-context output. Speed cost:
+     * unmeasurable on warm decode (SwiGLU is not the bottleneck).
+     * Opt-out: TQ_MOE_FAST_EXP=1 reverts to Schraudolph NEON path. */
+    static int fast_checked = 0;
+    static int use_fast = 0;
+    if (!fast_checked) { use_fast = getenv("TQ_MOE_FAST_EXP") != NULL; fast_checked = 1; }
+    if (!use_fast) {
+        for (int i = 0; i < n; i++) {
+            float g = hb[i];
+            hb[i] = (g / (1.0f + expf(-g))) * hb2[i];
+        }
+        return;
+    }
 #if TQ_MOE_HAS_NEON
     int i = 0;
     float32x4_t vone = vdupq_n_f32(1.0f);
