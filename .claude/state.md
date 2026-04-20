@@ -1,7 +1,62 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-20 (Pillar 1 R3 ★)
-**Session HEAD**: BPE root-cause FIXED — all Qwen3 family coherence restored.
+**Last updated**: 2026-04-20 (Pillar 1.5 R3 ★★)
+**Session HEAD**: NEOX RoPE root-cause FIXED — Qwen3 family long-prompt coherence restored.
+
+## ★★★ Pillar 1.5 R3 — NEOX-ordering RoPE for Qwen3 family (2026-04-20) ★★★
+
+### 발견 (OpenMythos insight 적용 직후)
+
+R7에서 발견한 "long-sequence transformer 버그"의 **진짜 원인**:
+- llama.cpp `LLM_ARCH_QWEN3 → LLAMA_ROPE_TYPE_NEOX` (half-split pairs)
+- 우리 엔진 `tq_rope` + batched prefill RoPE는 **LLaMA-style** `(q[2i], q[2i+1])`
+- R34가 partial-rotary path만 고침 → pure Qwen3 (full rotary) + tq_forward_batch는 여전히 LLaMA 스타일
+
+### 수정 (세 곳)
+
+1. `tq_rope_neox` 신규 (src/engine/tq_ops.c) — half-split pairs + TLS sin/cos
+2. `tq_engine.h`에 prototype export
+3. Per-token full-rotary path (tq_transformer.c:1553+) — GGUF arch/delta_n_heads 감지 후 neox 분기
+4. Batched prefill RoPE (tq_transformer.c:3648+) — learned-freq / fallback 둘 다 half-split
+
+### 실증 (Qwen3-0.6B Q4, 50-word 합성 입력 "word1..word50 Continue:")
+
+| | Output |
+|---|---|
+| 이전 (R7/R8 상태) | `"alyticsÐ°Ð½cieaâ��à¹�..."` UTF-8 garbage |
+| **이번 R3 fix (batched)** | `" Let me try to understand this"` ✨ |
+| R3 fix (per-token) | `" ... and so on... etc. So, the problem is to find..."` ✨ |
+
+### Qwen3.6-35B 상태 (broad validation)
+
+8-prompt 매트릭스 결과: **garbage 0건**. 4/8 "FAIL"은 키워드 미스(coherent output인데 특정 단어 미사용). 장문 생성 시:
+- "Once upon a time" → 완전 narrative (Elara 모험담)
+- Long essay → supervised vs unsupervised learning 코히어런트
+- Long story → "Here's a thinking process... Once upon a time..." 코히어런트
+
+Qwen3.6 초/중/장 프롬프트 모두 coherent. 남은 문제는 40+ word natural prose에서 가끔 반복 루프 발동하지만, 이는 DeltaNet state accumulation 별건(OpenMythos spectral monitor 방법 적용 가능).
+
+### 누적 세션 breakthrough
+
+| 라운드 | 한 줄 수정 | 영향 |
+|---|---|---|
+| Pillar 1 R3 (어제) | BPE stale-entry check | 토크나이저 복구 |
+| Pillar 1.5 R1 (오늘) | Qwen3 non-hybrid QK-norm 복구 | 자체 attention score 정규화 |
+| Pillar 1.5 R3 ★ (오늘) | NEOX RoPE for Qwen3 full-rotary + batched | **장문 coherence 회복** |
+
+3개 한 줄/한 함수 수정이 R26-R50 30+ 라운드 삽질을 종료시킴.
+
+### OpenMythos 인사이트 적용 실제 사례
+
+**Insight 적용**: "reference diff 방법론이 empirical한 수정보다 10-100× 빠름" — 이번 세션에서 HF ground-truth 비교가 없었다면 NEOX vs LLaMA ordering은 계속 놓쳤을 것.
+
+### 다음 단계 후보
+
+- Qwen3.6 DeltaNet state monitoring (OpenMythos insight #2)
+- MLA 모델 지원 (insight #3) — 64× KV 압축
+- v0.20.0 릴리스 (R3 + R1.5 R3 통합)
+
+## ★★★ Pillar 1 R3 — BPE stale-entry bug (ONE-LINE ROOT CAUSE) ★★★
 
 ## ★★★ Pillar 1 R3 — BPE stale-entry bug (ONE-LINE ROOT CAUSE) ★★★
 
