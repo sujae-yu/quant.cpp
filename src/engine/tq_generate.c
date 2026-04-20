@@ -312,12 +312,18 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
     int want_batched = (n_prompt >= 2) && !getenv("TQ_NO_BATCH_PREFILL");
     if (want_batched) {
         /* Qwen3.6 (MoE + DeltaNet hybrid) needs the dedicated MoE-batched
-         * driver — standard tq_forward_batch bails on is_moe. Default ON
-         * after Step 3g: sanity validated (1.2e-7 at N=1), 39% prefill
-         * speedup at j=8 measured. Opt-out via TQ_NO_MOE_BATCH=1 for A/B. */
+         * driver — standard tq_forward_batch bails on is_moe. Was default
+         * ON after Step 3g (sanity 1.2e-7 at N=1, +39% prefill at j=8),
+         * but Pillar 1.5 R5 found that at N≥40 the batched path produces
+         * UTF-8 garbage on natural prose while per-token produces perfect
+         * coherent summaries on the same input. Root cause TBD (likely
+         * in tq_moe_forward_batch scatter path at N>>1; sanity tests only
+         * cover N=1). Default is now OFF for correctness — opt-in via
+         * TQ_USE_MOE_BATCH=1 once the bug is isolated. */
         int use_moe_hybrid = model->config.is_moe &&
                              !model->config.is_gemma4 &&
                              model->layers[0].moe &&
+                             getenv("TQ_USE_MOE_BATCH") &&
                              !getenv("TQ_NO_MOE_BATCH");
         int rc;
         if (use_moe_hybrid) {
