@@ -1,7 +1,78 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-20 (Round 55)
-**Session HEAD**: Round 55 — **bench_my_mac.sh 1-command readiness**
+**Last updated**: 2026-04-20 (Pillar 1 R3 ★)
+**Session HEAD**: BPE root-cause FIXED — all Qwen3 family coherence restored.
+
+## ★★★ Pillar 1 R3 — BPE stale-entry bug (ONE-LINE ROOT CAUSE) ★★★
+
+### 발견 (HF reference diff 방법론 1회 적용으로 즉시 발견)
+
+R1: Python venv + HF Qwen3-0.6B FP32 설치, smoke test — HF coherent
+R2: hf_dump.py per-layer 캡처 도구 (28 layers + logits)
+R3: **토큰 레벨에서 불일치 즉시 발견**:
+- 우리 엔진: "Hello" → [32713='Hel', 654='ll'] = **"Helll"** (5 char: H,e,l,l,l)
+- HF: "Hello" → [9707='Hello'] = "Hello" (correct)
+
+### 버그
+
+`src/engine/tq_tokenizer.c:1442` BPE heap merge loop:
+
+```c
+/* Before */
+if (top.gen != gen[top.pos]) continue;
+int ri = next[top.pos];
+if (ri >= n_tokens || tokens[ri] < 0) continue;
+
+/* After — R3 fix */
+if (top.gen != gen[top.pos]) continue;
+if (tokens[top.pos] < 0) continue;  // ★ missing check
+int ri = next[top.pos];
+if (ri >= n_tokens || tokens[ri] < 0) continue;
+```
+
+**원인**: Position P가 다른 merge의 RIGHT neighbor로 죽을 때
+`tokens[P] = -1`만 설정되고 `gen[P]`는 bump 되지 않음. 이후 heap의
+오래된 entry가 position P에서 merge를 적용 → 죽은 slot 덮어쓰며
+linked list 오염 → 문자 중복/손실.
+
+### 해결한 증상 (모두 이 한 줄에서 유래)
+
+- **Qwen3-0.6B 1-word prompt garbage** (모든 Qwen3 vocab에서 재현)
+- **Qwen3.5/3.6 "quicck bbrrown" char doubling** (R32 Mission C 발견)
+- **Qwen3.6-35B ≥40-word prompt garbage** (R46-50 Mission D blocker)
+- **Phi-3.5 "What is 2+2?" → "tti" 환각** (개별적으로 보였던 이상)
+- **Rounds 26-50 DeltaNet/MoE 수사** (전부 잘못된 방향이었음)
+
+### 실증 결과 (fix 후, 동일 프롬프트)
+
+```
+Qwen3.6-35B long prompt (40+ words): "Once upon a time in a small
+village there lived a clever young programmer" →
+  "The idea intrigued him so much that he decided to create his
+  very own version of this classic game. He called it 'Hamster Run'"
+  (완전 coherent 60 tokens)
+
+Phi-3.5 "What is 2+2?" →
+  "The sum of 2 and 2 is equal to four." (정확한 수학)
+
+Llama-3.2-3B 100-token 장문 → 완전 coherent
+```
+
+### 교훈
+
+- **"답은 발견에 있다"**: HF reference diff 방법론이 직전 30+ 라운드
+  (R26-50)의 모든 커널/구조 수정보다 결정적
+- **토큰 레벨 불일치를 가정하지 말고 확인했어야**: R32 Mission C에서 "우리
+  tokenizer는 정상" 가정 통과, 30 라운드 낭비
+- **벡터를 기준점으로**: HF를 ground truth로 놓고 diff 방법이 보편적
+  디버깅 원칙
+
+### 남은 후속 작업
+
+- quant.h single-header: 다른(naive O(n²)) BPE 구현 사용 중 → 영향 없음
+- Pillar 2 (long prefill speed) + Pillar 3 (워크플로) 재정의 가능
+
+## Round 55 — scripts/bench_my_mac.sh (1-command readiness check)
 
 ## Round 58 — IQ4_XS prefetch-2 ATTEMPTED, rolled back (neutral)
 
