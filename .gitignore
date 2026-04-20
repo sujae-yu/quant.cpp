@@ -69,3 +69,9 @@ build_metal/
 
 
 blog/build_cpu/
+
+# Pillar 1 (Qwen3 coherence debugging)
+tools/pillar1/venv/
+tools/pillar1/*.npz
+tools/pillar1/__pycache__/
+
