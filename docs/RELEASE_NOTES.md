@@ -6,6 +6,95 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v0.19.0] — 2026-04-20 ★ (BPE Stale-Entry ROOT-CAUSE Fix)
+
+### Headline
+
+**One-line fix to `src/engine/tq_tokenizer.c:1442` eliminates the
+structural tokenization bug that caused every "Qwen3 drift" symptom
+across 30+ rounds of kernel/MoE/DeltaNet investigation.** Pillar 1
+of the Mission E roadmap, closed in 3 rounds via HF reference diff.
+
+### The fix
+
+```c
+  if (top.gen != gen[top.pos]) continue;
++ if (tokens[top.pos] < 0) continue;   // ★ missing dead-slot guard
+  int ri = next[top.pos];
+  if (ri >= n_tokens || tokens[ri] < 0) continue;
+```
+
+**Root cause**: In the heap-based BPE merge loop, a position `P` that
+dies as the RIGHT neighbor of some other merge has `tokens[P]` set to
+-1 but `gen[P]` is **not** bumped. Stale heap entries at position `P`
+pass the gen-based staleness check, then the code overwrites dead
+`tokens[P]` with a new merge result — resurrecting the slot, scrambling
+the linked list, and producing malformed token sequences.
+
+### Symptom (same prompt, before/after)
+
+| | Tokens for "Hello" | Decoded |
+|---|---|---|
+| HF reference | `[9707]` | "Hello" |
+| Our engine BEFORE | `[32713, 654]` | **"Helll"** (extra 'l', lost 'o') |
+| Our engine AFTER | `[9707]` | "Hello" ✓ |
+
+### What this fixes (consolidated)
+
+| Symptom (previous attributed cause) | Actual cause |
+|---|---|
+| Qwen3.5/3.6 "quicck bbrrown" char doubling | tokenizer |
+| Qwen3.6-35B ≥40-word prompt → UTF-8 garbage | tokenizer |
+| Phi-3.5 "What is 2+2?" → hallucinating "tti" | tokenizer |
+| R32 Mission C "drift is Qwen-common architecture" | WRONG — was tokenizer |
+| R46-50 Mission D "structural bug needs HF Python diff" | correct diagnosis; R3 finishes it |
+
+### Validation
+
+- **Regression**: 15/15 `test_models.sh` + new `test_tokenizer.sh` 4/4
+- **Real output**: Qwen3.6-35B on 40+ word prompts produces coherent
+  Python code and full narrative text (previously garbage)
+- **Phi-3.5**: "What is 2+2?" → "The sum of 2 and 2 is equal to four."
+  (previously "I'm sorry but 'tti' doesn't appear to...")
+
+### Methodology (the actual insight)
+
+Pillar 1 R1-R3 built Python + HF Qwen3-0.6B FP32 reference env
+(`tools/pillar1/`) specifically to enable per-layer diff debugging.
+Before the first layer diff was ever needed, just comparing
+**tokenizer output** revealed the mismatch. The entire transformer
+investigation from R26-R50 had been working with corrupted input.
+
+**Lesson**: When debugging LLM coherence, compare tokens to HF
+reference FIRST. Don't "rule out" the tokenizer without actually
+running `AutoTokenizer.encode(prompt)` side-by-side.
+
+### Files changed
+
+- `src/engine/tq_tokenizer.c` — 1-line fix + comment
+- `src/engine/tq_transformer.c` — env-gated per-layer dump
+  (`TQ_DUMP_HIDDEN=dir`) retained as debugging infrastructure
+- `scripts/test_models.sh` — Phi-3.5 expected "answer" → "sum"
+  (Phi-3 now gives actual factual math answer)
+- `scripts/test_tokenizer.sh` — **NEW** 4-test regression guard
+- `tools/pillar1/` — HF reference env + hf_dump.py dump tool
+- `bench/results/2026-04-20_bpe_fix_proof.md` — full before/after proof
+
+### Non-impact
+
+- `quant.h` (single-header): uses naive O(n²) BPE merge, correct by
+  construction. Embed/WASM users have NEVER hit this bug. Only the
+  split-source engine needed the fix.
+- No API change.
+- No performance change (the stale check is O(1)).
+
+### Compatibility
+
+No migration needed. Users of prior versions will simply see coherent
+output on previously-broken prompts. All existing models work.
+
+---
+
 ## [v0.18.0] — 2026-04-20 (Daily-Driver UX — TTFT/decode split)
 
 ### Headline
