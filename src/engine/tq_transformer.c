@@ -1201,14 +1201,19 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
      * TQ_NO_QK_NORM=1 forces off (diagnostic).
      * TQ_FORCE_QK_NORM=1 forces on (Gemma fallback for Qwen if ever
      * the convention is fixed). */
+    /* Pillar 1.5 R1 fix: the R40 arch-conditional disable was too broad.
+     * Pure Qwen3 (0.6B..32B, self-attn only) REQUIRES q_norm/k_norm —
+     * without them, long-prompt (pos>=1) attention corrupts via
+     * un-normalized Q·K scores, producing norm explosion at layer 2+
+     * and UTF-8 garbage output.
+     *
+     * Qwen3.5/3.6 HYBRID (DeltaNet + self-attn, delta_n_heads > 0) was
+     * empirically shown at R40 to degrade with QK-norm applied to the
+     * 10 self-attn layers. Keep that disabled. */
     int _qknorm_disabled = (getenv("TQ_NO_QK_NORM") != NULL);
-    int _is_qwen = (c->delta_n_heads > 0);  /* Qwen hybrid: always */
-    if (model->gguf_ctx) {
-        tq_gguf_ctx_t* gctx = (tq_gguf_ctx_t*)model->gguf_ctx;
-        if (strstr(gctx->arch, "qwen") != NULL) _is_qwen = 1;
-    }
+    int _is_qwen_hybrid = (c->delta_n_heads > 0);  /* Qwen3.5/3.6 hybrid */
     int _apply_qknorm = !_qknorm_disabled;
-    if (_is_qwen && !getenv("TQ_FORCE_QK_NORM")) _apply_qknorm = 0;
+    if (_is_qwen_hybrid && !getenv("TQ_FORCE_QK_NORM")) _apply_qknorm = 0;
 
     if (layer->q_norm && _apply_qknorm) {
         for (int h = 0; h < n_heads; h++) {
