@@ -64,14 +64,19 @@ docs/assets/hero_backup.png
 build_nomt/
 build_nometal/
 build_metal/
+build_cpu/
 
 .env
 
 
 blog/build_cpu/
+blog/
 
 # Pillar 1 (Qwen3 coherence debugging)
 tools/pillar1/venv/
+
+# Claude Code scheduled-task lockfile (runtime state)
+.claude/scheduled_tasks.lock
 tools/pillar1/*.npz
 tools/pillar1/__pycache__/
 
