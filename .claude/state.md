@@ -3,6 +3,31 @@
 **Last updated**: 2026-04-21 (Phase 1 refparity ★)
 **Session HEAD**: Reference-parity framework (tools/refparity/) LANDED — HF vs engine per-layer diff, pos-aligned, post_norm-aware.
 
+## Phase 1 R5 — TQ_NO_Q4=1 quality/speed tradeoff — NOT flipping default (2026-04-21)
+
+Cross-model A/B on "Once upon a time" (short) vs "Once upon a time in a
+faraway land" (longer):
+
+| Model | Default text | NO_Q4 text | Default t/s | NO_Q4 t/s | Δ speed |
+|---|---|---|---:|---:|---:|
+| Qwen3-0.6B Q4_K_M | math-genre "100 people…" | math-genre "100 people…" | 59.9 | 49.6 | **-17%** |
+| Phi-3.5 Q4_K_M | identical | identical | 15.9 | 14.8 | -7% |
+| Llama-3.2-1B Q8_0 | UTF-8 artifact "cafÃ©" | clean "badger Bertha" | 53.4 | 45.6 | -15% |
+| Qwen3.5-4B Q4_K_M | "young adventurer Alex" | "little animals" | 18.6 | 13.8 | **-26%** |
+
+Earlier "faraway land" prompt on Qwen3-0.6B *did* show a real NO_Q4 win
+(disjoint → coherent Luminara village narrative). Prompt-dependent.
+
+**Decision**: do NOT flip default. Evidence:
+- Speed cost real (7-26%) across all models
+- Quality win inconsistent — prompt-dependent, not universal
+- The Llama UTF-8 artifact hints at an unrelated subtle bug worth follow-up
+
+Keep `TQ_NO_Q4=1` as opt-in for "quality matters more than decode speed"
+scenarios. Document in README for users who care. Next-round candidate:
+investigate the Llama cafÃ© encoding issue — that's a separate, concrete bug
+surfaced by this round.
+
 ## Phase 1 R3 — FFN magnitude error correlates with activation magnitude (2026-04-21)
 
 Extended diagnosis: the FFN magnitude drift **scales with input activation magnitude**.
