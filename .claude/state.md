@@ -3,6 +3,36 @@
 **Last updated**: 2026-04-21 (Phase 1 refparity ★)
 **Session HEAD**: Reference-parity framework (tools/refparity/) LANDED — HF vs engine per-layer diff, pos-aligned, post_norm-aware.
 
+## ★★★ Phase 1 R24 — Drift is MoE×DeltaNet interaction, NOT DeltaNet alone (2026-04-21) ★★★
+
+Ran Qwen3.5-4B Q4_K_M (dense FFN + DeltaNet hybrid, **no MoE**) on the
+exact drift-trigger prompt "Once upon a time in a faraway land" -n 200:
+
+```
+…Lily the explorer met Wizard Wigglesworth who challenges her with
+math puzzles. She solves 5×3=15, reasons aloud, continues confidently
+through multiple story beats. 200 tokens, zero repetition loop.
+```
+
+35B (DeltaNet + MoE) hits "It could do math!" at 117. 4B (DeltaNet +
+dense FFN) goes 200+ coherent on the same prompt.
+
+**All prior rounds (R16-R19) assumed DeltaNet state was the sole cause.
+This is wrong.** DeltaNet works fine without MoE. The 117-token cliff
+emerges from the *interaction* between MoE routing and DeltaNet's
+persistent state — not from either in isolation.
+
+**New hypothesis**: MoE top-K expert routing becomes pathological at
+long positions (either collapsing to a stuck subset of experts, or
+routing on a DeltaNet-state-driven signal that locks in a loop). The
+DeltaNet state holds the "math math math" semantic; MoE keeps selecting
+the experts that most agree with that signal; positive feedback loop.
+
+Memory task #192 ("MoE router weight softmax sanity at long positions")
+becomes the leading follow-up. Concrete next step: instrument the
+router's top-K entropy and expert-selection histogram at positions
+50/100/115/120 on the 35B drift-trigger prompt.
+
 ## Phase 1 R19 — Single-layer reset is not enough — drift is distributed (2026-04-21)
 
 Added `TQ_DELTA_RESET_LAYER=N` env to bisect which DeltaNet layer drives
