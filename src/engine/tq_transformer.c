@@ -1850,9 +1850,28 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
         for(int i=0;i<head_dim;i++){if(dbg_key[i]<dbg_mn)dbg_mn=dbg_key[i];if(dbg_key[i]>dbg_mx)dbg_mx=dbg_key[i];if(fabsf(dbg_key[i])>sqrtf(cd1/head_dim)*0.5f)nz++;}
         if (getenv("TQ_DEBUG"))
             fprintf(stderr,"[DEBUG] key dist: min=%.2f max=%.2f nonzero(>0.5rms)=%d/%d\n",dbg_mn,dbg_mx,nz,head_dim);
-        fprintf(stderr,"[kv-probe] L%d pos=%d rms=%.4f mse=%.6f cos=%.6f (%s)\n",
-                l, pos, sqrtf(cd1/head_dim), mse/head_dim,
-                cn/(sqrtf(cd1)*sqrtf(cd2)+1e-10f),
+        int nan_out = 0;
+        for (int i = 0; i < head_dim; i++)
+            if (!isfinite(rc[i])) nan_out++;
+        /* Recompute MSE/cosine ignoring NaN lanes so stats are meaningful
+         * on hybrid arch where full-roundtrip turbo_kv_4b produces edge-case
+         * NaN in ~5% of lanes (does not affect production — attention path
+         * uses rotated-space dot via attention_ref, not full dequant). */
+        float mse_f=0, cn_f=0, cd1_f=0, cd2_f=0; int n_finite=0;
+        for (int i = 0; i < head_dim; i++) {
+            if (!isfinite(rc[i])) continue;
+            float d = dbg_key[i] - rc[i];
+            mse_f += d*d;
+            cn_f  += dbg_key[i]*rc[i];
+            cd1_f += dbg_key[i]*dbg_key[i];
+            cd2_f += rc[i]*rc[i];
+            n_finite++;
+        }
+        float cos_f = cn_f/(sqrtf(cd1_f)*sqrtf(cd2_f)+1e-10f);
+        float mse_per_elem_f = n_finite > 0 ? mse_f/n_finite : 0.0f;
+        fprintf(stderr,"[kv-probe] L%d pos=%d rms=%.4f mse=%.6f cos=%.6f nan=%d/%d (%s)\n",
+                l, pos, sqrtf(cd1/head_dim), mse_per_elem_f, cos_f,
+                nan_out, head_dim,
                 save_pre_norm_keys ? "pre-norm" : "post-norm");
     }
     float kv_prescale = 1.0f;

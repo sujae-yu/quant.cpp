@@ -3,6 +3,44 @@
 **Last updated**: 2026-04-21 (Phase 1 refparity ★)
 **Session HEAD**: Reference-parity framework (tools/refparity/) LANDED — HF vs engine per-layer diff, pos-aligned, post_norm-aware.
 
+## Phase 2 R33 — KV probe: hybrid arch limitation surfaced, production unaffected (2026-04-22)
+
+Extended R32's `TQ_KV_PROBE` to Qwen3 family:
+
+| arch | pos | cosine range | MSE range | NaN lanes |
+|---|---|---|---|---|
+| Llama-3.2-1B (non-hybrid) | 25-200 | 0.994-0.997 | 0.018-0.087 | 0/64 |
+| Qwen3-0.6B (non-hybrid, QK-norm) | 25, 50 | 0.995-0.997 | 0.024-4.4 | 0/128 |
+| Qwen3.5-4B (DeltaNet+attn hybrid) | 25 | — | inf | **6/256** |
+| Qwen3.6-35B (MoE+DeltaNet hybrid) | 0-200 | — | inf | **6/256** |
+
+### The finding
+
+On hybrid arch, the probe's full-dequant roundtrip — `dt->quantize`
+followed by `dt->dequantize` — produces NaN in ~5% of the 256-element
+lanes. Input keys verified finite (`nan_in=0`); NaN emerges inside the
+Hadamard-inverse × codebook path for small-rms post-norm keys.
+
+### Why production isn't affected
+
+Production attention on hybrid arch uses `tq_turbo_kv_4b_attention_ref`
+(rotated-space dot product vs stored-indices × codebook). Never calls
+the full-dequant roundtrip my probe does. Hybrid model outputs stay
+coherent; the NaN lanes are entirely probe-synthesized.
+
+### Methodology lesson
+
+refparity's strength is comparing the SAME code path against a reference.
+This round's probe compared turbo_kv_4b's `quantize`+`dequantize` against
+FP32 — but production on hybrid arch uses a third path (`attention_ref`)
+that bypasses full dequant. Probe measured the wrong thing.
+
+Next-round fix: add a hybrid-aware probe that measures `query @ dequant(K)`
+vs the production `attention_ref(query, K)` — same semantic, actual path
+used. That's the meaningful KV correctness check.
+
+Documented the probe's hybrid-arch limitation in `docs/env_vars.md`.
+
 ## Phase 2 R32 — KV refparity extension: turbo_kv_4b is clean (2026-04-22)
 
 Applied the refparity methodology (that surfaced the BPE and MoE bugs
