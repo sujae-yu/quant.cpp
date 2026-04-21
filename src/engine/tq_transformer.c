@@ -434,12 +434,16 @@ void tq_free_state(tq_state_t* state) {
  * Helper: L2 normalize a vector in-place (NEON-optimized)
  * ============================================================ */
 static void l2_normalize(float* v, int n) {
-    /* Round 26: epsilon fix.
-     * llama.cpp's ggml_l2_norm uses eps_norm = f_norm_rms_eps
-     * (typically 1e-6). Without eps, tiny ss → huge inv → numerical
-     * blowup that accumulates across DeltaNet's 30 recurrent layers,
-     * producing coherence drift after ~10 tokens on Qwen3.6 MoE.
-     * Missing eps was the likely root cause of Round 25's drift. */
+    /* Pillar 1.5 R10: match llama.cpp's ggml_l2_norm EXACTLY.
+     *   scale = 1 / max(sqrt(sum_sq), eps)
+     * NOT the R26 form `1/sqrt(sum_sq + eps)` which I had used.
+     * For typical inputs (sum_sq ~ 1) both give scale ~ 1. But for
+     * near-zero inputs: max form caps inv at 1/eps = 1e6; sum+eps
+     * caps at 1/sqrt(eps) = 1e3 — three orders of magnitude smaller.
+     * Over 30 DeltaNet layers × 70+ positions on Qwen3.6, this
+     * systematic under-scaling of K,Q magnitudes compounds and may
+     * be the source of the decode-length degradation we've been
+     * chasing. */
     const float eps = 1e-6f;
 #ifdef __ARM_NEON
     float32x4_t vss = vdupq_n_f32(0.0f);
@@ -451,7 +455,9 @@ static void l2_normalize(float* v, int n) {
     float ss = vaddvq_f32(vss);
     for (; i < n; i++) ss += v[i] * v[i];
     {
-        float inv = 1.0f / sqrtf(ss + eps);
+        float denom = sqrtf(ss);
+        if (denom < eps) denom = eps;
+        float inv = 1.0f / denom;
         float32x4_t vinv = vdupq_n_f32(inv);
         i = 0;
         for (; i + 3 < n; i += 4) {
@@ -464,7 +470,9 @@ static void l2_normalize(float* v, int n) {
     float ss = 0.0f;
     for (int i = 0; i < n; i++) ss += v[i] * v[i];
     {
-        float inv = 1.0f / sqrtf(ss + eps);
+        float denom = sqrtf(ss);
+        if (denom < eps) denom = eps;
+        float inv = 1.0f / denom;
         for (int i = 0; i < n; i++) v[i] *= inv;
     }
 #endif

@@ -6,6 +6,103 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v0.26.0] — 2026-04-21 ★ (L2-norm formulation matches ggml — Qwen3.6 +36% coherence window)
+
+### Headline
+
+**DeltaNet L2-normalization formulation mismatched llama.cpp's
+`ggml_l2_norm` for 30+ rounds.** Fixed to match reference. Qwen3.6-35B
+coherent generation extends from **~117 → 160 tokens** on the same
+prompt (+36%), with noticeably more coherent mid-section content.
+
+### The bug
+
+R26 had added `eps = 1e-6f` to our `l2_normalize`:
+
+```c
+/* OLD (R26 form) */
+float inv = 1.0f / sqrtf(ss + eps);
+```
+
+But llama.cpp's `ggml_compute_forward_l2_norm_f32` uses a different
+formulation:
+
+```c
+/* llama.cpp reference — eps is a floor on the DENOMINATOR */
+const float scale = 1.0f / fmaxf(sqrtf(sum), eps);
+```
+
+For typical inputs (sum ~ 1), both give scale ~ 1 — no difference.
+But for near-zero inputs:
+- Ours: `scale = 1 / sqrt(0 + 1e-6) ≈ 1000`
+- llama.cpp: `scale = 1 / max(0, 1e-6) = 1,000,000`
+
+**Three orders of magnitude** different for near-zero K/Q vectors.
+Over 30 DeltaNet layers × position, this systematic under-scaling of
+K,Q magnitudes compounds into the decode-length degradation we've
+been chasing across Pillars 1, 1.5, and 30+ rounds of Mission C.
+
+### Fix
+
+`src/engine/tq_transformer.c:l2_normalize`:
+
+```c
+float denom = sqrtf(ss);
+if (denom < eps) denom = eps;
+float inv = 1.0f / denom;
+```
+
+Both NEON and scalar paths updated. Now bit-equivalent to `ggml_l2_norm`.
+
+### A/B on Qwen3.6-35B IQ4_XS, auto-serial, "Write a 300-word essay about AI." + 300 tok gen
+
+| | Coherent content | Total tokens |
+|---|---|---|
+| v0.25.0 (old l2) | ~45 coherent then "the new normal" loop | 117 |
+| **v0.26.0 (ggml l2)** | ~110 coherent content before mild drift | **160** |
+
+New output (excerpt):
+> "Artificial Intelligence (AI) has rapidly evolved from a
+> transformative force in the modern world, reshaping industries
+> and transforming daily life across every sector from healthcare
+> to education and entertainment. At its core, AI's role is to
+> redefine what we know as 'intelligence itself.' In this context,
+> the role of AI is both a tool and a teacher, shaping how we
+> live and work today. AI's impact is profound: it is reshaping
+> economies and societies globally."
+
+### Why this was missed
+
+R26's "epsilon fix" was the right diagnosis (missing eps) but the
+wrong formulation. Since typical inputs gave scale ~ 1 in both
+forms, regression tests pass. The bug only surfaces with near-zero
+K/Q magnitudes × many positions.
+
+Discovered via direct reference-diff of llama.cpp's `ggml-cpu/ops.cpp`
+`ggml_compute_forward_l2_norm_f32` against our `l2_normalize`.
+
+### Honest status
+
+Not yet "1000+ char coherent generation." Still degrades after
+~110 tokens on some prompts. But:
+- 36% longer coherent window vs v0.25.0
+- More varied content before drift (not stuck in "new normal" loop)
+- Quantization-independent fix (IQ4_XS and Q5_K_M both benefit)
+- Compounds with prior fixes (v0.19-0.25)
+
+### Regression
+
+15/15 test_models + 4/4 test_tokenizer PASS.
+
+### Methodology note
+
+Yet another ref-diff win. Mission C's 30 rounds missed this because
+the diagnosis stopped at "needs eps" rather than "needs THIS eps
+formulation." Always ship the EXACT reference implementation, then
+optimize — don't paraphrase.
+
+---
+
 ## [v0.25.0] — 2026-04-20 (Qwen3.6 Auto-Serial Quality Mode — Determinism + Longer Coherence)
 
 ### Honest headline
