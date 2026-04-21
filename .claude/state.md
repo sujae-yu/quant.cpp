@@ -3,6 +3,35 @@
 **Last updated**: 2026-04-21 (Phase 1 refparity ★)
 **Session HEAD**: Reference-parity framework (tools/refparity/) LANDED — HF vs engine per-layer diff, pos-aligned, post_norm-aware.
 
+## ★ Phase 1 R16 — DeltaNet state CAUSALLY proves 35B drift (2026-04-21) ★
+
+Added `TQ_DELTA_RESET_EVERY=N` env ablation in `deltanet_forward` — zeroes
+`s->delta_state` + `s->conv_state` across all layers at every N-th
+layer-0 call. Default off; thread-local counter, no API change.
+
+Ablation on Qwen3.6-35B IQ4_XS, "Once upon a time in a faraway land", -n 200, T=0:
+
+| TQ_DELTA_RESET_EVERY | 0-117 tokens | post-117 behavior |
+|---|---|---|
+| unset (baseline) | Alex finds ENIAC book (narrative) | "It could do math! It could do math!" loop at 117 |
+| 50 | different content (premature reset mid-story) | degrades to "a a a" but NO "It could do math" loop |
+| 120 | identical narrative 0-117 | breaks loop — "2017-05-02 17:35 0 Comments \| Views: 4,986 views" |
+
+**Causal conclusion**: the specific repetition loop at 117 tokens IS
+DeltaNet-recurrent-state-driven. Reset at 120 produces incoherent-but-
+different post-drift output, proving state accumulation is the driver,
+not KV cache or MoE scatter or attention.
+
+Reset is NOT the fix — it throws away useful state and the model
+goes incoherent differently. But now we have a diagnostic lever to
+probe WHICH part of the state is blowing up (next round: per-layer
+per-head norm dump right before the 117-token cliff).
+
+`TQ_DELTA_RESET_EVERY` stays as a permanent debug env — future DeltaNet
+bug-hunt rounds can A/B against it to localize the exploding subtensor.
+
+Regression 15/15 PASS (ablation is env-gated, no default behavior change).
+
 ## Phase 1 R11 — BPE fix does NOT move 35B long-gen drift (2026-04-21)
 
 Post-v0.27.0 validation on `Once upon a time in a faraway land` (ASCII):

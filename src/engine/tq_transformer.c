@@ -623,6 +623,29 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
     float* state = s->delta_state + (size_t)l * dn * dk * dv;
     float* conv_st = s->conv_state + (size_t)l * qkv_dim * conv_buf_len;
 
+    /* Ablation hook: periodically reset recurrent state to test the hypothesis
+     * that long-gen drift is caused by DeltaNet state accumulation. Env
+     *   TQ_DELTA_RESET_EVERY=N  (default: off)
+     * zeroes delta_state + conv_state across ALL layers when the layer-0
+     * call count hits a multiple of N. Thread-local counter so this is safe
+     * with the existing single-threaded deltanet layer dispatch. */
+    {
+        static __thread int _delta_call_count = 0;
+        const char* _rst = getenv("TQ_DELTA_RESET_EVERY");
+        if (l == 0) _delta_call_count++;
+        if (_rst && l == 0) {
+            int rst_n = atoi(_rst);
+            if (rst_n > 0 && _delta_call_count > 1 && (_delta_call_count % rst_n) == 0) {
+                size_t total_delta = (size_t)c->n_layers * dn * dk * dv;
+                memset(s->delta_state, 0, total_delta * sizeof(float));
+                size_t total_conv = (size_t)c->n_layers * qkv_dim * conv_buf_len;
+                memset(s->conv_state, 0, total_conv * sizeof(float));
+                if (getenv("TQ_DEBUG"))
+                    fprintf(stderr, "[delta-reset] call=%d\n", _delta_call_count);
+            }
+        }
+    }
+
     /* Pre-quantize activation to Q8 once for all Q2/Q4 projections in this layer.
      * This eliminates redundant tq_quantize_row_q8 + malloc/free cycles. */
     int dn_has_q2 = (layer->delta_in_proj_qkv_q2 != NULL);
