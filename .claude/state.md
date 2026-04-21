@@ -3,6 +3,38 @@
 **Last updated**: 2026-04-21 (Phase 1 refparity ★)
 **Session HEAD**: Reference-parity framework (tools/refparity/) LANDED — HF vs engine per-layer diff, pos-aligned, post_norm-aware.
 
+## ★★ Phase 1 R17 — L0 DeltaNet state is 10× the others (2026-04-21) ★★
+
+Added `TQ_DELTA_PROBE=pos1,pos2,...` env in `deltanet_forward` to dump
+per-layer state L2 norm at listed layer-0 call counts.
+
+Measurement on Qwen3.6-35B IQ4_XS "Once upon a time in a faraway land":
+
+| call | L0 | L1 | L2 | L8 | L14 | L26 | typical rest |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 50 | **127.0** | 41.3 | 17.9 | 31.1 | 24.7 | 21.5 | 7-17 |
+| 100 | **150.7** | 42.4 | 16.7 | 31.5 | 24.1 | 21.3 | 7-18 |
+| 115 | **154.9** | 40.8 | 16.6 | 30.6 | 23.9 | 21.1 | 8-17 |
+| 118 | **154.7** | 42.3 | 17.7 | 30.8 | 23.9 | 21.0 | 8-17 |
+| 120 | **154.5** | 40.8 | 16.7 | 30.5 | 23.8 | 20.8 | 8-17 |
+
+**L0 is 3-10× everything else.** Not a transient spike at the drift
+boundary — L0 sat at ~155 for tokens 100-120, while the "It could do
+math!" loop kicked in at token 117. So L0's high steady-state IS the
+chronic condition; it must be interacting badly with attention's KV or
+downstream layers.
+
+L0 grew call 50→115 from 127→155 (+22%), while others stayed ±10%. So
+L0 also lacks proper decay relative to other layers, though growth has
+slowed by call 100 (suggesting partial steady-state).
+
+**Hypothesis**: L0's decay param (`a_log`) either has a different scale
+vs upstream layers, OR our implementation is applying decay wrong at L0
+specifically. Next round: dump L0's `a_log` vs L1's, and compare our
+decay math to refs/llama.cpp qwen3_next DeltaNet.
+
+`TQ_DELTA_PROBE` stays as a permanent diagnostic env.
+
 ## ★ Phase 1 R16 — DeltaNet state CAUSALLY proves 35B drift (2026-04-21) ★
 
 Added `TQ_DELTA_RESET_EVERY=N` env ablation in `deltanet_forward` — zeroes

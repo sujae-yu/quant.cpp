@@ -633,6 +633,32 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
         static __thread int _delta_call_count = 0;
         const char* _rst = getenv("TQ_DELTA_RESET_EVERY");
         if (l == 0) _delta_call_count++;
+
+        /* Probe: TQ_DELTA_PROBE=pos1,pos2,... prints per-layer state L2 norm
+         * at the listed layer-0 call counts. Helps localize which layer's
+         * recurrent state explodes first ahead of the drift cliff. */
+        const char* _probe = getenv("TQ_DELTA_PROBE");
+        if (_probe) {
+            int match = 0;
+            const char* p = _probe;
+            while (*p) {
+                int v = atoi(p);
+                if (v == _delta_call_count) { match = 1; break; }
+                while (*p && *p != ',') p++;
+                if (*p == ',') p++;
+            }
+            if (match) {
+                size_t layer_size = (size_t)dn * dk * dv;
+                double ss = 0.0;
+                for (size_t i = 0; i < layer_size; i++) {
+                    float v = state[i];
+                    ss += (double)v * v;
+                }
+                float nrm = (float)sqrt(ss);
+                fprintf(stderr, "[delta-probe] call=%d L%d state_norm=%.4f\n",
+                        _delta_call_count, l, nrm);
+            }
+        }
         if (_rst && l == 0) {
             int rst_n = atoi(_rst);
             if (rst_n > 0 && _delta_call_count > 1 && (_delta_call_count % rst_n) == 0) {
