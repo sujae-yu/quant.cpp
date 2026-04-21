@@ -2774,6 +2774,10 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
             for (int _i = 0; _i < dim; _i++) xs += s->x[_i] * s->x[_i];
             fprintf(stderr, "[WQ-DBG] L0 PRE-NORM s->x rms=%.4f dim=%d\n", sqrtf((float)(xs/dim)), dim);
         }
+        if (getenv("TQ_DUMP_INTERMEDIATE")) {
+            char _slot[24]; snprintf(_slot, sizeof(_slot), "h%d_in", l);
+            tq_dump_hidden(_slot, s->x, dim, pos);
+        }
         tq_rmsnorm(s->xb, s->x, layer->attn_norm, dim, c->rms_norm_eps);
 
         /* Begin layer-level GPU batch scope: all GGUF matmuls in this layer
@@ -2840,6 +2844,10 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
         /* else: skip (should not happen for valid models) */
 
         /* FFN Block — MoE or Dense SwiGLU/GeGLU */
+        if (getenv("TQ_DUMP_INTERMEDIATE")) {
+            char _slot[24]; snprintf(_slot, sizeof(_slot), "h%d_postattn", l);
+            tq_dump_hidden(_slot, s->x, dim, pos);
+        }
 
         /* Gemma 4 dual-FFN: Dense (shared MLP) and MoE run IN PARALLEL from same input,
          * outputs summed, then final post_ffw_norm, then residual add.
@@ -3008,6 +3016,10 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
                 ffn_norm_w = layer->pre_ffn_norm;
             }
             tq_rmsnorm(s->xb, s->x, ffn_norm_w, dim, c->rms_norm_eps);
+            if (getenv("TQ_DUMP_INTERMEDIATE")) {
+                char _slot[24]; snprintf(_slot, sizeof(_slot), "h%d_preffn", l);
+                tq_dump_hidden(_slot, s->xb, dim, pos);
+            }
 
             /* Per-layer intermediate dim (Gemma 4 E2B has variable FFN dim) */
             int inter = c->per_layer_inter_dim ? c->per_layer_inter_dim[l] : c->intermediate_dim;
@@ -3108,6 +3120,10 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
                     tq_rmsnorm(s->xb2, s->xb2, dense_post_norm, dim, c->rms_norm_eps);
             }
 
+            if (getenv("TQ_DUMP_INTERMEDIATE")) {
+                char _slot[24]; snprintf(_slot, sizeof(_slot), "h%d_ffnout", l);
+                tq_dump_hidden(_slot, s->xb2, dim, pos);
+            }
             tq_add(s->x, s->x, s->xb2, dim);
         }
 

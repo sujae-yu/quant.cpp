@@ -70,6 +70,20 @@ prompt) on failure.
 - `1` — divergence detected; diff report identifies the offending layer
 - `2` — environment or configuration error
 
+## Intermediate dumps (finer bisection)
+
+Set `TQ_DUMP_INTERMEDIATE=1` in addition to `TQ_DUMP_HIDDEN=dir` to get
+per-layer sub-stage dumps:
+
+- `h{l}_in.bin` — residual stream entering layer l
+- `h{l}_postattn.bin` — after self-attention + its residual add
+- `h{l}_preffn.bin` — after post-attention RMSNorm (= FFN input)
+- `h{l}_ffnout.bin` — FFN output, pre-residual-add
+- `h{l}.bin` — final (post-FFN-residual) — always dumped
+
+Useful to isolate whether a per-layer divergence comes from attention,
+FFN norm, or the FFN matmul chain.
+
 ## Methodology notes
 
 - **Quantization noise baseline**: expect ~1-3% L2_rel per layer due to Q4/Q5
@@ -99,7 +113,33 @@ First end-to-end run on `Qwen3-0.6B-Q4_K_M.gguf`, "Hello" prompt:
 | post_norm | ~100% | 0.24 | **real divergence — needs investigation** |
 | logits | — | 0.51 | top-1 mismatch (HF 21806 vs engine 11) |
 
-Framework correctly identifies the post_norm + logits divergence as a genuine
-engine bug (cannot be explained by Q4 quantization alone — mid-layer stays
-at 3.9%). This is tracked as a separate investigation; Phase 1's goal is only
-to ship the detection infrastructure.
+### Layer-27 FFN magnitude divergence (diagnosed via intermediate dumps)
+
+With `TQ_DUMP_INTERMEDIATE=1`, comparing our FFN output magnitude to HF's
+manual per-layer replay across layers:
+
+| layer | us_ffn_norm | hf_ffn_norm | ratio |
+|---:|---:|---:|---:|
+| 0 | 5.390 | 5.517 | 0.977 |
+| 1 | 15.170 | 14.920 | 1.017 |
+| 13 | 0.209 | 0.192 | 1.090 |
+| 26 | 245.9 | 302.4 | 0.813 |
+| 27 | **2648.0** | **5022.8** | **0.527** |
+
+FFN magnitude ratio is clean for early layers but drifts toward the end of
+the stack. At layer 27 it's ~half of HF, and since layer 27's FFN output
+in HF cancels most of the residual stream (6794 → 2214), magnitude loss
+here catastrophically fails to produce the correct collapse. Net result:
+engine h27 ≈ hf.h27 + 0.33·hf.h26 (residual leak signature, α=0.334).
+
+Pre-FFN input (`h27_preffn`) matches HF at cos=0.9999. The divergence is
+inside the FFN matmul chain (gate/up/silu/down).
+
+`TQ_NO_Q4=1` (skip load-time Q4 recompression) swings the error the other
+way: FFN ratio becomes ~1.54. Both paths are systematically off, suggesting
+a secondary kernel-level bug distinct from quantization noise. Tracked as
+follow-up.
+
+Framework's value: identified a real bug that all prior test harnesses
+(test_models.sh, PPL, cosine checks) missed because the output still parses
+as English ("Hello, I need to find the value of…" vs HF's "Hello Answer").

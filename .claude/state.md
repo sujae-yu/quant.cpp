@@ -3,6 +3,44 @@
 **Last updated**: 2026-04-21 (Phase 1 refparity ★)
 **Session HEAD**: Reference-parity framework (tools/refparity/) LANDED — HF vs engine per-layer diff, pos-aligned, post_norm-aware.
 
+## ★ Phase 1 R2 — Intermediate FFN dumps + Qwen3-0.6B FFN bug signature (2026-04-21) ★
+
+### Finding
+
+Extended refparity with `TQ_DUMP_INTERMEDIATE=1` env that produces 5
+sub-layer dumps per layer (`h{l}_in/postattn/preffn/ffnout` + final `h{l}`).
+Default off; no impact on existing dump output.
+
+Using these on Qwen3-0.6B Q4_K_M ("Hello" prompt):
+- Attention output matches HF within noise at all layers.
+- Pre-FFN (`h27_preffn`) matches HF at cos 0.9999 (5.9% L2_rel).
+- **FFN output magnitude drifts layer-wise**:
+  - Layer 0-13: ratio ~1.0 vs HF
+  - Layer 26: 0.81× HF
+  - Layer 27: **0.53× HF** (catastrophic; causes post_norm cosine 0.24)
+
+Residual-leak regression fits: `us.h27 ≈ hf.h27 + 0.334·hf.h26`.
+
+`TQ_NO_Q4=1` flips the error: ratio 1.54 instead of 0.53. Both paths
+systematically off ⇒ beyond pure Q4 noise.
+
+### Why this matters (per grow loop)
+
+- Confirmed the framework reveals class-of-bugs invisible to test_models.sh
+  (engine output still parses as English).
+- For 35B mission: this specific bug is Q4_K_M-load-time-conversion-related
+  and doesn't touch 35B (which auto-skips Q4 conversion due to Q8_0 attn).
+  But the METHODOLOGY transfers — if we extend refparity to Qwen3.5-4B
+  (DeltaNet hybrid, still fits in 16 GB), we can diagnose the Qwen3.6 35B
+  DeltaNet drift in FP32.
+
+### Not yet landed
+
+Fix for the FFN magnitude drift on Qwen3-0.6B Q4_K_M. Bisected to FFN
+matmul chain (after input norm matches HF). Both Q4-converted and GGUF-native
+paths have opposite-sign errors ⇒ deeper investigation needed in a later
+round — not a one-liner.
+
 ## ★ Phase 1 — Reference-parity framework (2026-04-21) ★
 
 ### Delivered
