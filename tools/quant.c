@@ -933,6 +933,20 @@ int main(int argc, char** argv) {
         fprintf(stderr, "Auto-serial: detected qwen35moe hybrid — forcing -j 1 "
                         "for deterministic correctness (TQ_NO_AUTO_SERIAL=1 to opt out)\n");
     }
+
+    /* R28: qwen35moe auto-default TQ_MOE_ROUTE_TEMP=2.0 unless user already set it.
+     * R26 measured: default T=1.0 causes 117-tok "It could do math!" repetition
+     * cliff via peaky MoE routing × DeltaNet feedback. T=2.0 spreads the softmax
+     * and the cliff disappears on the standard drift-trigger prompt. 5/5 short-
+     * prompt A/B (Paris/fibonacci/math/ML/story) show identical factual accuracy
+     * and similar quality at T=2.0. Opt out: TQ_NO_MOE_TEMP_AUTO=1 or set
+     * TQ_MOE_ROUTE_TEMP explicitly. */
+    if (model && model->config.is_moe && model->config.delta_n_heads > 0
+        && !getenv("TQ_MOE_ROUTE_TEMP") && !getenv("TQ_NO_MOE_TEMP_AUTO")) {
+        setenv("TQ_MOE_ROUTE_TEMP", "2.0", 0);
+        fprintf(stderr, "Auto-temp: qwen35moe router softmax T=2.0 "
+                        "(TQ_NO_MOE_TEMP_AUTO=1 to opt out)\n");
+    }
     /* Set thread count for matmul parallelism */
     tq_set_threads(n_threads);
     fprintf(stderr, "Threads: %d%s\n", tq_get_threads(),
