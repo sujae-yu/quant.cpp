@@ -3,6 +3,85 @@
 **Last updated**: 2026-04-22 (Phase 2 KV clean-bill)
 **Session HEAD**: turbo_kv_4b per-arch per-layer clean-bill LANDED via chunked TQ_KV_PROBE. 7×/+0% PPL claim now validated element-by-element across Llama, Qwen3-0.6B, Qwen3.5-4B, Qwen3.6-35B.
 
+## ★★★ Phase 3 R41 — ARCHITECTURE RESEARCH BREAKTHROUGH (2026-04-22) ★★★
+
+User callout (correct): "모델의 특성에 대해 제대로 이해하지 못한 상태에서
+너무 실험에만 의존". Switched to deep research (refs/ + web) before more
+experiments. Documented findings below.
+
+### What we MISUNDERSTOOD about Qwen3.6-35B-A3B / Qwen3-Next
+
+1. **3:1 hybrid ratio, not 1:1**. 75% DeltaNet + 25% attention layers.
+   For 40-layer 35B: only **10 attention layers**, 30 DeltaNet. Attention
+   is the MINORITY. (Source: vLLM blog, Qwen tech reports.)
+
+2. **Gated Attention (NeurIPS 2025, Qwen team)** is THE key stabilizer.
+   Head-wise `sigmoid(Wg·x)` applied elementwise to SDPA output — replaces
+   attention sinks, enables 1M-ctx training. If our engine doesn't apply
+   this gate correctly, attention layers lack sink-mitigation → long-gen
+   drift is PREDICTED by the architecture.
+   - Qwen single Q projection outputs 2× dim: `Q` + `gate` split along dim 0
+   - Post-attn: `attn_out = attn_out × sigmoid(gate)`
+   - Our config has `c->attn_output_gate` field — need to verify impl works
+   - Refs: `refs/llama.cpp/src/models/qwen35moe.cpp:156, 186-189`
+   - Refs: `refs/llama.cpp/src/models/qwen3next.cpp:165-172`
+
+3. **Instruct vs Thinking are DIFFERENT checkpoints** with DIFFERENT
+   expected chat templates:
+   - Instruct: NO `<think>` priming; HF card says "does not generate
+     `<think></think>` blocks"
+   - Thinking: DOES use `<think>\n` open
+   - **Our default primes empty `<think>\n\n</think>\n\n`** — if our
+     35B GGUF is actually the Instruct variant, we're feeding OOD input
+
+4. **qwen35moe uses IMRoPE (multi-section); qwen3next uses standard RoPE**.
+   We need to verify which one our 35B is, and that our dispatch is correct.
+
+5. **Known Gated-DeltaNet failure modes** (ICLR 2025 paper):
+   - Fixed-size recurrent state is a compression bottleneck
+   - α (decay) near 1.0 causes state saturation — numerical accumulation
+     in β/α is "known-fragile"
+   - Hybridization with full-attention layers is the REMEDY the paper
+     explicitly proposes. Qwen3-Next adopts this.
+
+6. **DRY sampler** (Dynamic N-gram repetition penalty, oobabooga PR #5677)
+   is the community-standard mitigation for loop-collapse in hybrid archs.
+   llama.cpp has it, our engine doesn't.
+
+### New hypothesis (architecture-grounded, not empirical guessing)
+
+Ranked by strength of evidence:
+
+**H1 (★ highest prior)**: our `attn_output_gate` implementation is
+missing or buggy on the 10 attention layers → no sink mitigation → long-
+gen attention drift → the "Sorry!" / alphabet-walk attractors we've been
+seeing in R26/R38/R40 without root-cause explanation.
+
+**H2**: our GGUF is the Instruct variant (non-thinking), but our chat
+template primes empty `<think>\n\n</think>\n\n` → out-of-distribution
+input distribution → trained attractors engaged incorrectly.
+
+**H3**: DeltaNet α saturation in specific heads at specific positions.
+Rounds 26-29 already attacked this with exact expf, but we didn't verify
+α stays bounded at pos 500+.
+
+### Plan (not-more-experiments-first, research-ground-all-changes)
+
+- R42: GGUF metadata check (Instruct vs Thinking) + audit
+  `attn_output_gate` in our `self_attn_forward` — line-by-line vs
+  qwen35moe.cpp:129-189
+- R43: if H1 or H2 is confirmed, fix and re-measure 1000-tok target
+- R44: port DRY sampler from llama.cpp as belt-and-suspenders
+- R45: final validation
+
+### Methodology lesson saved
+
+This is the third confirmation of the meta-insight we added to
+`MEMORY.md`: **reference > introspection**. BPE and MoE bugs fell in
+2-3 rounds once we had a reference to diff against. 35B long-gen stayed
+mysterious for 15+ rounds because we had no architectural reference
+handy. Research makes experiments targeted.
+
 ## Phase 3 R40 — Meaningful prompt + thinking-mode still hits NEW attractor (2026-04-22)
 
 User follow-up: "모델이 의미있는 긴 문장을 생성하도록 유의미한 질문도 생성해야 하는거 아닌가요?"
