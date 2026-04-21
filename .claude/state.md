@@ -3,6 +3,33 @@
 **Last updated**: 2026-04-21 (Phase 1 refparity ★)
 **Session HEAD**: Reference-parity framework (tools/refparity/) LANDED — HF vs engine per-layer diff, pos-aligned, post_norm-aware.
 
+## ★★ Phase 1 R7 — BPE ENCODE symmetric bug FIXED (2026-04-21) ★★
+
+The decode fix from R6 had a **symmetric encode-side bug**. For input text
+containing international chars, `encode_byte_to_bpe_char` emitted raw byte
+for GPT-2 direct-byte codepoints 0x80-0xFF, producing INVALID UTF-8 that
+couldn't match the vocab's proper UTF-8 entries.
+
+Result: international text got dropped / mis-matched via byte-fallback.
+
+HF vs ours tokenization, BEFORE:
+
+| Input | HF reference | Ours (broken) |
+|---|---|---|
+| café | [924, 58858] | [68796] |
+| naïve | [3376, 37572, 586] | [77, 523] |
+| 日本語 | [101059, 102819] | [245, 250, 252] |
+| привет | [124436, 26991, 8178] | [222, 224] |
+
+AFTER fix: **all four match HF exactly** (100% token-level parity on Qwen3).
+
+Impact: any prompt with accented chars / CJK / Cyrillic / emoji previously
+fed the model a completely different token sequence than it was trained on.
+Silent quality disaster. Combined with R6 (decode fix) now full round-trip
+clean for international text.
+
+Regression: 15/15 PASS unchanged.
+
 ## ★ Phase 1 R6 — BPE decode double-UTF-8 bug FIXED (2026-04-21) ★
 
 `src/engine/tq_tokenizer.c:1089-1093`: decode_bpe_token for codepoints

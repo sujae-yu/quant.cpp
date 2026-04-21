@@ -1141,9 +1141,23 @@ static int encode_byte_to_bpe_char(unsigned char byte, char* out) {
     if (byte >= 174) direct = 1; /* upper range always fits in uint8 */
 
     if (direct) {
-        out[0] = (char)byte;
-        out[1] = '\0';
-        return 1;
+        /* Codepoint = byte value. For bytes < 0x80 emit as 1-byte UTF-8;
+         * for bytes >= 0x80 (161-172, 174-255) emit the 2-byte UTF-8 encoding
+         * of the same codepoint (e.g. byte 0xC3 -> UTF-8 'Ã' c3 83). The
+         * vocab stores these as UTF-8 strings, so str_lookup only matches
+         * with the proper UTF-8 form. Emitting the raw byte (a standalone
+         * 0x80+ byte is invalid UTF-8) silently dropped international
+         * characters via byte-fallback mismatch. */
+        if (byte < 0x80) {
+            out[0] = (char)byte;
+            out[1] = '\0';
+            return 1;
+        } else {
+            out[0] = (char)(0xC0 | (byte >> 6));
+            out[1] = (char)(0x80 | (byte & 0x3F));
+            out[2] = '\0';
+            return 2;
+        }
     }
 
     /* Indirect bytes -> codepoint 256 + index */
