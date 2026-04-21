@@ -8279,8 +8279,15 @@ static const char* decode_bpe_token(const char* piece) {
                     decode_buf[out++] = (char)p[0];
                     decode_buf[out++] = (char)p[1];
                 }
+            } else if ((cp >= 0xA1 && cp <= 0xAC) || (cp >= 0xAE && cp <= 0xFF)) {
+                /* GPT-2 direct-byte mapping: codepoints U+00A1-U+00AC and
+                 * U+00AE-U+00FF represent raw bytes of the same value. The
+                 * BPE vocab stores these as UTF-8 (e.g. 'Ã' for byte 0xC3)
+                 * so emit the raw byte to reconstruct the intended UTF-8
+                 * character (e.g. 'Ã'+'©' → bytes 0xC3 0xA9 = 'é'). */
+                decode_buf[out++] = (char)(unsigned char)cp;
             } else {
-                /* Regular 2-byte UTF-8 char (e.g., accented letters) */
+                /* Regular 2-byte UTF-8 char (rare in GPT-2-style BPE) */
                 decode_buf[out++] = (char)p[0];
                 decode_buf[out++] = (char)p[1];
             }
@@ -8327,9 +8334,23 @@ static int encode_byte_to_bpe_char(unsigned char byte, char* out) {
     if (byte >= 174) direct = 1; /* upper range always fits in uint8 */
 
     if (direct) {
-        out[0] = (char)byte;
-        out[1] = '\0';
-        return 1;
+        /* Codepoint = byte value. For bytes < 0x80 emit as 1-byte UTF-8;
+         * for bytes >= 0x80 (161-172, 174-255) emit the 2-byte UTF-8 encoding
+         * of the same codepoint (e.g. byte 0xC3 -> UTF-8 'Ã' c3 83). The
+         * vocab stores these as UTF-8 strings, so str_lookup only matches
+         * with the proper UTF-8 form. Emitting the raw byte (a standalone
+         * 0x80+ byte is invalid UTF-8) silently dropped international
+         * characters via byte-fallback mismatch. */
+        if (byte < 0x80) {
+            out[0] = (char)byte;
+            out[1] = '\0';
+            return 1;
+        } else {
+            out[0] = (char)(0xC0 | (byte >> 6));
+            out[1] = (char)(0x80 | (byte & 0x3F));
+            out[2] = '\0';
+            return 2;
+        }
     }
 
     /* Indirect bytes -> codepoint 256 + index */
