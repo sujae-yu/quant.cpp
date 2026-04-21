@@ -3,6 +3,36 @@
 **Last updated**: 2026-04-21 (Phase 1 refparity ★)
 **Session HEAD**: Reference-parity framework (tools/refparity/) LANDED — HF vs engine per-layer diff, pos-aligned, post_norm-aware.
 
+## Phase 1 R18 — False alarm on a_log double-transform (2026-04-21)
+
+Dug into `ssm_a` values to test whether our `-expf(delta_a_log)` was a
+double-transform:
+
+| layer | ssm_a range | mean |
+|---|---|---:|
+| L0 | [-72.33, -0.02] | -10.84 |
+| L1 | [-27.03, -0.07] | -2.67 |
+
+llama.cpp qwen35moe.cpp:238 uses `ssm_a` directly with comment "-A_log.exp()
+* softplus", and kimi-linear.cpp:142 explicitly says "No need to -exp(a_log)
+because it was done in convert_hf_to_gguf.py" — suggesting GGUF should
+already be pre-transformed.
+
+**Ablation**: removed our `-expf(a_log)` → gate = softplus × a direct.
+Result: 35B output collapses to garbage immediately. "Paris" probe fails.
+
+**Conclusion**: this Unsloth UD-IQ4_XS GGUF stores RAW A_log, NOT the
+pre-transformed `-exp()`. Our engine's `-expf(delta_a_log)` is correct for
+this GGUF. Rolled back the attempted "fix".
+
+L0 steady-state norm ~155 is by design (heads with large a_log have weak
+decay intentionally). Not a kernel bug.
+
+**Next hypothesis**: R16 proved SOMETHING in DeltaNet state matters for the
+117-token loop, but R17's L0-outlier signature is design, not bug. Re-run
+ablation with TQ_DELTA_RESET selectively per-layer to find the actual
+causal layer. Also consider KV cache pattern at drift boundary.
+
 ## ★★ Phase 1 R17 — L0 DeltaNet state is 10× the others (2026-04-21) ★★
 
 Added `TQ_DELTA_PROBE=pos1,pos2,...` env in `deltanet_forward` to dump
