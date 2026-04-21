@@ -3,6 +3,25 @@
 **Last updated**: 2026-04-21 (Phase 1 refparity ★)
 **Session HEAD**: Reference-parity framework (tools/refparity/) LANDED — HF vs engine per-layer diff, pos-aligned, post_norm-aware.
 
+## Phase 1 R11 — BPE fix does NOT move 35B long-gen drift (2026-04-21)
+
+Post-v0.27.0 validation on `Once upon a time in a faraway land` (ASCII):
+
+| model | flags | coherent tokens before loop |
+|---|---|---:|
+| IQ4_XS | default | 117 (exactly matches pre-fix) |
+| IQ4_XS | --rep-penalty 1.3 | 158 |
+| Q5_K_M | --rep-penalty 1.3 | **200 (hit -n budget, graceful degrade)** |
+
+As expected — BPE UTF-8 fix only affects int'l-char prompts. 35B drift
+on ASCII prompts is orthogonal. Memory note "feedback_qwen36_long_gen_drift:
+likely DeltaNet recurrent state error" still the leading hypothesis.
+
+**Practical user guidance for 35B**: pair Q5_K_M with `--rep-penalty 1.3`
+for best observed behavior. Documented as the current baseline —
+subsequent rounds targeting DeltaNet need to beat this to claim an
+improvement.
+
 ## ★★ Phase 1 R7 — BPE ENCODE symmetric bug FIXED (2026-04-21) ★★
 
 The decode fix from R6 had a **symmetric encode-side bug**. For input text
