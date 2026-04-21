@@ -3,6 +3,67 @@
 **Last updated**: 2026-04-22 (Phase 2 KV clean-bill)
 **Session HEAD**: turbo_kv_4b per-arch per-layer clean-bill LANDED via chunked TQ_KV_PROBE. 7×/+0% PPL claim now validated element-by-element across Llama, Qwen3-0.6B, Qwen3.5-4B, Qwen3.6-35B.
 
+## Phase 3 R38 — 1000-tok target diagnosis — logits peaky, residual collapse suspected (2026-04-22)
+
+User-set breakthrough metric: **coherent generation to 1000+ tokens on
+Qwen3.6-35B**. Current ceiling:
+
+| Config | Coherent tokens | Failure mode |
+|---|---|---|
+| IQ4_XS, T=1.0 (pre-v0.28) | ~110 | "It could do math!" loop at 117 |
+| IQ4_XS, T=2.0 | ~150 | "Sorry!" mini-loop → alphabet walk from 200 |
+| IQ4_XS, T=2.0, --k-window 256 | ~150 | "Sorry?" repetition (no alphabet walk) |
+| IQ4_XS, T=2.0, delta-reset-100 | ~125 | "2020 dragon" loop (reset too aggressive) |
+| Q5_K_M, T=2.0 | **~170** | Longer narrative, still hits alphabet walk ~220 |
+
+Peak = ~170 coherent tokens with Q5_K_M + T=2.0. Far from 1000.
+
+### Logit probe findings (R38)
+
+Added `TQ_LOGIT_PROBE=every=N`. Measured at pos=25..250 on T=2.0:
+
+```
+pos=25  entropy=1.02 margin=0.94 (confident, normal)
+pos=50  entropy=2.08 margin=0.02 (low conf)
+pos=100 entropy=2.31 margin=0.25 (low conf)
+pos=125 entropy=0.29 margin=2.98 (VERY peaky — "Sorry!" loop starts)
+pos=200 entropy=1.24 margin=0.52 top5_ids=[87,68,86,85,83]  ← ALPHABET RUN
+pos=225 entropy=0.21 margin=3.29 top5_ids=[13607,2005,515,271,3260]
+pos=250 entropy=0.47 margin=2.45
+```
+
+**NOT logit flattening** (entropy is LOW = model very confident). The
+top-5 token IDs at pos=200 are CONSECUTIVE low IDs (83-87 range =
+single-char BPE tokens). Model is confidently predicting "next alphabet
+character" tokens one after another.
+
+### New hypothesis
+
+Residual stream **collapses into a narrow subspace** at long positions.
+The lm_head projection from that subspace happens to maximize on low-ID
+single-character tokens. Possible drivers:
+- KV attention output dominated by recent "Sorry!" / repetitive tokens
+  → biases residual toward their value-projection direction
+- DeltaNet state saturates into a low-rank attractor
+- Small per-position numerical drift compounds through 40 layers × pos
+
+### What this session CANNOT fix without deeper work
+
+- 1000-tok coherence requires preventing the residual-collapse
+  mechanism itself. Options for future rounds:
+  1. Per-layer residual rms dump (confirm the magnitude/direction of
+     collapse)
+  2. Attention weight dump at long positions (if attention focuses
+     pathologically on a narrow slice)
+  3. Periodic "residual refresh" (re-embed generation so far at
+     intervals, like kv-reset but softer)
+  4. Try a different base model (Qwen3-Next-80B if 16GB swap allows,
+     or wait for a smaller DeltaNet+MoE variant)
+
+Landed `TQ_LOGIT_PROBE` infrastructure for future investigation.
+Diagnostic-forward round, no fix this time — the 170-tok ceiling
+stands post-session.
+
 ## ★ META-INSIGHTS (distilled from 2026-04-21→22 35-round session, keep for future sessions) ★
 
 ### Five durable patterns

@@ -3355,6 +3355,47 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
     if (g_tq_profile_enabled) g_profile.lmhead_ns += tq_now_ns() - _tp_lm;
     tq_dump_hidden("logits", s->logits, c->vocab_size, pos);
 
+    /* TQ_LOGIT_PROBE=every=N — print top-5 logits + entropy at every N-th
+     * position. Detects logit-collapse / flattening at long positions
+     * (suspected cause of alphabet-walk degradation on Qwen3.6-35B beyond
+     * the 117-tok cliff). */
+    {
+        const char* _lp = getenv("TQ_LOGIT_PROBE");
+        if (_lp) {
+            int every = 0;
+            const char* eq = strstr(_lp, "every=");
+            if (eq) every = atoi(eq + 6);
+            if (every <= 0) every = 25;
+            if ((pos % every) == 0 || pos < 4) {
+                float top[5]; int top_idx[5];
+                for (int k = 0; k < 5; k++) { top[k] = -1e30f; top_idx[k] = -1; }
+                for (int i = 0; i < c->vocab_size; i++) {
+                    float v = s->logits[i];
+                    for (int k = 0; k < 5; k++) {
+                        if (v > top[k]) {
+                            for (int j = 4; j > k; j--) { top[j] = top[j-1]; top_idx[j] = top_idx[j-1]; }
+                            top[k] = v; top_idx[k] = i;
+                            break;
+                        }
+                    }
+                }
+                /* Compute softmax entropy (nats) */
+                float maxl = top[0];
+                double Z = 0, H = 0;
+                for (int i = 0; i < c->vocab_size; i++) Z += expf(s->logits[i] - maxl);
+                double logZ = log(Z);
+                for (int i = 0; i < c->vocab_size; i++) {
+                    double p = expf(s->logits[i] - maxl) / Z;
+                    if (p > 1e-30) H -= p * (log(p));
+                }
+                fprintf(stderr, "[logit-probe] pos=%d top5_logits=[%.3f,%.3f,%.3f,%.3f,%.3f] top5_ids=[%d,%d,%d,%d,%d] margin_1_to_2=%.3f entropy=%.3f nats\n",
+                        pos, top[0], top[1], top[2], top[3], top[4],
+                        top_idx[0], top_idx[1], top_idx[2], top_idx[3], top_idx[4],
+                        top[0]-top[1], H);
+            }
+        }
+    }
+
     if (pos <= 1 && getenv("TQ_DEBUG")) {
         /* Print top-5 logits for debugging */
         fprintf(stderr, "[DEBUG] pos=%d logits[0:8] = ", pos);
