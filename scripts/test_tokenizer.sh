@@ -90,6 +90,14 @@ check_tokens "Qwen3-0.6B-Q4_K_M.gguf"            "日本語"  "101059 102819" \
   "TQ_NO_METAL=1 TQ_NO_MLOCK=1"
 check_tokens "Qwen3-0.6B-Q4_K_M.gguf"            "привет"  "124436 26991 8178" \
   "TQ_NO_METAL=1 TQ_NO_MLOCK=1"
+# 4-byte UTF-8 (emoji) and 3-byte (CJK) — exercises every branch in
+# encode_byte_to_bpe_char including direct bytes inside multibyte chars.
+check_tokens "Qwen3-0.6B-Q4_K_M.gguf"            "🎉"      "144841" \
+  "TQ_NO_METAL=1 TQ_NO_MLOCK=1"
+check_tokens "Qwen3-0.6B-Q4_K_M.gguf"            "I❤️code"  "40 141390 30543 1851" \
+  "TQ_NO_METAL=1 TQ_NO_MLOCK=1"
+check_tokens "Qwen3-0.6B-Q4_K_M.gguf"            "한글 테스트"  "23573 83291 10764 72509 53189" \
+  "TQ_NO_METAL=1 TQ_NO_MLOCK=1"
 
 echo ""
 echo "--- Summary ---  PASS=$PASS  FAIL=$FAIL  SKIP=$SKIP"
