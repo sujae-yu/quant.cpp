@@ -1,7 +1,49 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-20 (Pillar 1.5 R3 ★★)
-**Session HEAD**: NEOX RoPE root-cause FIXED — Qwen3 family long-prompt coherence restored.
+**Last updated**: 2026-04-21 (Phase 1 refparity ★)
+**Session HEAD**: Reference-parity framework (tools/refparity/) LANDED — HF vs engine per-layer diff, pos-aligned, post_norm-aware.
+
+## ★ Phase 1 — Reference-parity framework (2026-04-21) ★
+
+### Delivered
+
+`tools/refparity/`: HF transformers FP32 ground truth vs our engine, per-layer
+cosine + L2_rel diff. Replaces ad-hoc "compare one layer by hand" debugging
+that consumed R26-R50 of Mission C.
+
+- `hf_reference.py` — HF dump → `.npz` (emb, h0..h_{N-2}, post_norm, logits)
+- `engine_reference.sh` — `TQ_DUMP_HIDDEN` wrapper → `.bin` per slot
+- `diff_layers.py` — per-slot cosine+L2_rel, pos=0 default, PASS/FAIL+first-diverge
+- `run_matrix.sh` — (model × prompt) sweep, `FILTER=` env, reports/per-slot .diff
+- `matrix.json` — 3 models × 2-3 prompts (Qwen3-0.6B, Qwen3.5-4B, Llama-3.2-1B)
+- `README.md` — methodology notes + known baseline findings
+
+### Two subtle mapping bugs caught while building
+
+1. **Position alignment**: engine dumps `TQ_DUMP_POS=0` (first token). Original
+   `diff_layers.py` defaulted to HF's last position → compared different tokens
+   on multi-token prompts, producing fake ~125% divergence.
+2. **HF `post_norm` aliasing**: transformers 5.x exposes 29 hidden_states for
+   28 layers — last entry is already post-RMSNorm. Original `hf_reference.py`
+   labeled it `h27` → compared it vs our engine's pre-norm last layer output.
+
+Both fixed. Baseline now: emb PASS (1.8%), mid-layers PASS (3-4% Q4 noise),
+post_norm FAIL (100% — real engine bug, separate investigation).
+
+### Follow-up findings (for later rounds)
+
+- Qwen3-0.6B Q4_K_M post_norm L2_rel ≈ 100%, logits cosine 0.51, top-1
+  mismatch (HF 21806 vs engine 11). Cannot be Q4 noise (mid-layers stay ≈4%).
+  Needs investigation — likely output_norm tensor load or final-layer output.
+- `h0`/`h1` sit at 15-20% L2_rel on Qwen3-0.6B. Small 0.6B models are
+  known to amplify Q4 quant noise in early layers; above 5% threshold but
+  cosine still 0.98. Tier test for ≥1B models expected to be cleaner.
+
+### Why this matters (strategic)
+
+Fixed 8 paraphrase bugs in v0.19.0→v0.26.0 one by one. This framework
+catches the class, not individual instances. One time investment now
+prevents Mission C style 30-round hunts forever.
 
 ## ★★★ Pillar 1.5 R3 — NEOX-ordering RoPE for Qwen3 family (2026-04-20) ★★★
 

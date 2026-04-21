@@ -1,0 +1,41 @@
+{
+  "_comment": "Reference-parity test matrix. Each entry: HF model name + local GGUF + prompts.",
+  "tests": [
+    {
+      "name": "qwen3_0.6b_short",
+      "hf_model": "Qwen/Qwen3-0.6B",
+      "engine_gguf": "Qwen3-0.6B-Q4_K_M.gguf",
+      "prompts": [
+        "Hello",
+        "The quick brown fox jumps over the lazy dog.",
+        "What is the capital of France?"
+      ],
+      "threshold_l2_rel": 0.05,
+      "threshold_cosine": 0.90
+    },
+    {
+      "name": "qwen3.5_4b_hybrid",
+      "hf_model": "Qwen/Qwen3.5-4B-Thinking",
+      "engine_gguf": "Qwen3.5-4B-Q4_K_M.gguf",
+      "_note": "Hybrid DeltaNet+self-attn reference. HF model may need download.",
+      "prompts": [
+        "Hello",
+        "def fibonacci(n):"
+      ],
+      "threshold_l2_rel": 0.05,
+      "threshold_cosine": 0.90
+    },
+    {
+      "name": "llama3.2_1b",
+      "hf_model": "meta-llama/Llama-3.2-1B",
+      "engine_gguf": "Llama-3.2-1B-Instruct-Q8_0.gguf",
+      "_note": "Standard transformer baseline. Requires HF token for gated model.",
+      "prompts": [
+        "Hello",
+        "Once upon a time"
+      ],
+      "threshold_l2_rel": 0.05,
+      "threshold_cosine": 0.90
+    }
+  ]
+}
