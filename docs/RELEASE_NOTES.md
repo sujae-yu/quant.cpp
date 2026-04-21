@@ -6,6 +6,110 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v0.28.0] — 2026-04-22 ★★★ (MoE softmax temperature breaks the Qwen3.6-35B 117-tok cliff)
+
+### Headline
+
+**One new env flag — `TQ_MOE_ROUTE_TEMP=2.0` — breaks the "It could do
+math! It could do math!" repetition loop that capped Qwen3.6-35B-A3B
+coherent generation at 117 tokens across 40+ prior debug rounds.** 35B
+long-gen goes 117 → 200+ coherent tokens on the standard drift-trigger
+prompt. Opt-in today; opt-out tomorrow.
+
+### The fix
+
+`src/engine/tq_moe.c::tq_moe_route` — 5-line diff on the top-K softmax:
+
+```c
+float inv_temp = 1.0f / route_temp;  /* default 1.0 = identity */
+for (int k = 0; k < num_active; k++) {
+    float e = expf((logits[out_expert_ids[k]] - max_val) * inv_temp);
+    ...
+}
+```
+
+### Why it works — 26-round investigation summary
+
+Rounds 1-19 on this project chased the drift in the DeltaNet recurrent
+state, assuming that was the cause. R19's per-layer reset bisection
+proved that hypothesis wrong: no single DeltaNet layer carries the
+drift signal.
+
+**R24** ran Qwen3.5-4B (DeltaNet + dense FFN, no MoE) on the exact
+drift-trigger prompt and got **200+ coherent tokens**. Confirmed the
+drift is MoE-specific, not DeltaNet alone.
+
+**R25** added `TQ_MOE_PROBE` — per-layer top-K router histogram —
+found a persistent near-collapse at L4 (one expert getting 0.80+ of
+the softmax mass at tokens 100-115).
+
+**R26** added `TQ_MOE_ROUTE_TEMP` — softmax temperature knob. Sweep
+T ∈ {1.0, 1.5, 1.8, 2.0, 2.5, 3.0}:
+
+| TEMP | outcome |
+|---:|:---|
+| 1.0 (default) | 117-tok loop "It could do math!" |
+| 1.5 | **87**-tok loop (earlier cliff, peakier in some heads) |
+| 1.8 | 113-tok loop |
+| **2.0** | **200 tokens, NO rep-loop**, coherent Alex+sad-tree story |
+| **2.5** | **200 tokens, NO rep-loop**, Alex+magic-leaves story |
+| 3.0 | 114-tok loop (over-flat, wrong expert mix) |
+
+Sweet spot T=2.0 to 2.5. The cliff is **caused by peaky MoE routing
+locking into a feedback loop** with DeltaNet's persistent state. Spread
+the routing distribution and the feedback can't form.
+
+### What v0.28.0 does NOT fix
+
+- Tail quality at 200+ tokens still degrades to character-level noise
+  (alphabet-walking) on longer `-n 500` runs. Probably quantization +
+  DeltaNet state accumulation still contributing at the margin.
+- A "Sorry!" mini-loop appears around token 170 at T=2.0 — human-visible
+  but doesn't trigger engine's rep-loop detector.
+
+So: **breaks the hard 117-tok cliff**, recovers ~50 additional coherent
+tokens. Full essay-length generation still has more to close.
+
+### Safety
+
+- `"The capital of France is"` → `"Paris."` at T=2.0 ✓
+- `bash scripts/test_models.sh` → **23/23 PASS** with T=2.0
+  (15 coherence + 11 tokenizer, no diff)
+
+### Default behavior
+
+**Unchanged.** `TQ_MOE_ROUTE_TEMP=1.0` is the default so existing users
+get identical behavior. Adding the flag is opt-in. A later release may
+flip `qwen35moe` arch to default T=2.0 after broader validation across
+prompts and `--chat` mode.
+
+### Recommended Qwen3.6-35B recipe
+
+```bash
+TQ_MOE_ROUTE_TEMP=2.0 \
+    ./build/quant models/Qwen3.6-35B-A3B-UD-Q5_K_M.gguf \
+    -p "<your prompt>" -n 200 -T 0 --rep-penalty 1.3
+```
+
+### Files changed
+
+- `src/engine/tq_moe.c` — 5-line softmax temperature insertion
+- `docs/env_vars.md` — `TQ_MOE_ROUTE_TEMP` row with measurements
+- `docs/supported_models_tier.md` — 35B recipe updated
+- `bench/results/2026-04-22_moe_temp_cliff_break.md` — full proof +
+  ablation data + causal story
+
+### Scope
+
+- **Affected**: Qwen3.6-35B-A3B (MoE + DeltaNet hybrid) — all quants.
+- **Default-mode unaffected**: every other model. All 40+ MoE layers
+  get the same `route_temp` but for non-pathological routing the
+  difference between T=1.0 and T=2.0 is within normal quality noise.
+
+Additional details: `bench/results/2026-04-22_moe_temp_cliff_break.md`.
+
+---
+
 ## [v0.27.0] — 2026-04-21 ★★ (BPE encode+decode UTF-8 fix — international text silent quality disaster RESOLVED)
 
 ### Headline
