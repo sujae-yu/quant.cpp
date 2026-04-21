@@ -75,6 +75,22 @@ check_tokens_single "Qwen3.5-4B-Q4_K_M.gguf"     "Hello" \
 check_tokens_single "Qwen3.6-35B-A3B-UD-IQ4_XS.gguf" "Hello" \
   "TQ_NO_METAL=1 TQ_NO_MLOCK=1"
 
+# BPE UTF-8 direct-byte encode regression — v0.27.0.
+# Before the fix, int'l text was encoded with raw byte bytes ≥ 0x80 that
+# standalone form invalid UTF-8 and failed vocab lookup, so chars dropped
+# or fell back to wrong low-id tokens. Expected IDs verified against HF
+# AutoTokenizer for Qwen/Qwen3-0.6B on 2026-04-21.
+echo ""
+echo "--- BPE UTF-8 direct-byte regression (v0.27.0) ---"
+check_tokens "Qwen3-0.6B-Q4_K_M.gguf"            "café"    "924 58858" \
+  "TQ_NO_METAL=1 TQ_NO_MLOCK=1"
+check_tokens "Qwen3-0.6B-Q4_K_M.gguf"            "naïve"   "3376 37572 586" \
+  "TQ_NO_METAL=1 TQ_NO_MLOCK=1"
+check_tokens "Qwen3-0.6B-Q4_K_M.gguf"            "日本語"  "101059 102819" \
+  "TQ_NO_METAL=1 TQ_NO_MLOCK=1"
+check_tokens "Qwen3-0.6B-Q4_K_M.gguf"            "привет"  "124436 26991 8178" \
+  "TQ_NO_METAL=1 TQ_NO_MLOCK=1"
+
 echo ""
 echo "--- Summary ---  PASS=$PASS  FAIL=$FAIL  SKIP=$SKIP"
 [[ "$FAIL" -eq 0 ]] || exit 1
