@@ -1841,9 +1841,16 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
     if (_kv_probe_fire) {
         const tq_type_traits_t* dt = &TQ_TRAITS[s->kv_quant_type];
         const float* dbg_key = save_pre_norm_keys ? pre_norm_keys : s->k;
-        float mse=0,cn=0,cd1=0,cd2=0; uint8_t tb[1024]; float rc[512];
-        dt->quantize(dbg_key, tb, head_dim);
-        dt->dequantize(tb, rc, head_dim);
+        float mse=0,cn=0,cd1=0,cd2=0; uint8_t tb[1024]; float rc[1024];
+        /* head_dim may exceed TQ_BK=128 (Qwen3.5/3.6 key_length=256). Traits
+         * quantize/dequantize clamp to TQ_BK per call, so chunk manually —
+         * this mirrors how production handles it (tq_transformer.c:1937/2081). */
+        int block_sz = head_dim > TQ_BK ? TQ_BK : head_dim;
+        for (int blk = 0; blk < head_dim; blk += block_sz) {
+            int bl = (blk + block_sz > head_dim) ? (head_dim - blk) : block_sz;
+            dt->quantize(dbg_key + blk, tb, bl);
+            dt->dequantize(tb, rc + blk, bl);
+        }
         for(int i=0;i<head_dim;i++){float d=dbg_key[i]-rc[i];mse+=d*d;cn+=dbg_key[i]*rc[i];cd1+=dbg_key[i]*dbg_key[i];cd2+=rc[i]*rc[i];}
         float dbg_mn=dbg_key[0],dbg_mx=dbg_key[0];
         int nz=0;

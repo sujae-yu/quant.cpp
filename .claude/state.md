@@ -3,6 +3,48 @@
 **Last updated**: 2026-04-21 (Phase 1 refparity ★)
 **Session HEAD**: Reference-parity framework (tools/refparity/) LANDED — HF vs engine per-layer diff, pos-aligned, post_norm-aware.
 
+## ★ Phase 2 R34 — KV probe chunking fix — turbo_kv_4b CLEAN across all tested arch ★
+
+R33 reported "hybrid arch produces NaN/inf in probe, production unaffected".
+That was HALF correct. The NaN/inf was real, but not from turbo_kv_4b's
+dequant edge case on small-rms keys — it was from **my probe code
+clamping head_dim>TQ_BK**.
+
+Root cause (probe bug, not production bug):
+
+```c
+dt->quantize(key, dst, head_dim);  // traits clamp to TQ_BK=128
+// For Qwen3.5-4B / Qwen3.6-35B head_dim=256: only first 128 written
+// rc[128..255] stays as stack garbage (often NaN)
+```
+
+GGUF metadata confirms Qwen3.5-4B and Qwen3.6-35B have `key_length=256`.
+Production handles head_dim > TQ_BK by chunking (tq_transformer.c:1937,
+2081, 2204). Probe didn't → false positive.
+
+Fix: chunk probe calls into TQ_BK blocks, mirroring production.
+
+After fix — TRUE per-arch KV quant error:
+
+| arch | head_dim | cos | MSE | NaN |
+|---|---|---|---|---|
+| Llama-3.2-1B | 64 | 0.994-0.997 | 0.02-0.09 | 0/64 |
+| Qwen3-0.6B | 128 | 0.995-0.997 | 0.02-4.4 | 0/128 |
+| Qwen3.5-4B | **256** | **0.994-0.996** | **0.007-0.010** | **0/256** |
+| Qwen3.6-35B | **256** | **0.994-0.997** | **0.005-0.009** | **0/256** |
+
+**turbo_kv_4b is uniformly clean** across every tested architecture.
+Cos ≥ 0.994 means the 7×-compression claim is structurally preserved
+per-layer per-position — not just at aggregate PPL level.
+
+### Methodology double-lesson
+
+R32 correctly said "Llama is clean". R33 wrongly said "hybrid is
+ambiguous". R34 finds: refparity's methodology is right; my probe
+implementation had a silent bug (just like the silent bugs we catch
+with this methodology). Always verify your diagnostic tools match the
+production code path even for the plumbing (chunking, buffer sizes).
+
 ## Phase 2 R33 — KV probe: hybrid arch limitation surfaced, production unaffected (2026-04-22)
 
 Extended R32's `TQ_KV_PROBE` to Qwen3 family:
