@@ -662,12 +662,25 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
         if (_rst && l == 0) {
             int rst_n = atoi(_rst);
             if (rst_n > 0 && _delta_call_count > 1 && (_delta_call_count % rst_n) == 0) {
-                size_t total_delta = (size_t)c->n_layers * dn * dk * dv;
-                memset(s->delta_state, 0, total_delta * sizeof(float));
-                size_t total_conv = (size_t)c->n_layers * qkv_dim * conv_buf_len;
-                memset(s->conv_state, 0, total_conv * sizeof(float));
+                /* TQ_DELTA_RESET_LAYER=N (default -1 = all layers).
+                 * Clears just that layer's slice so we can bisect which
+                 * layer actually drives the drift. */
+                const char* _only = getenv("TQ_DELTA_RESET_LAYER");
+                int only_layer = _only ? atoi(_only) : -1;
+                if (only_layer >= 0 && only_layer < c->n_layers) {
+                    memset(s->delta_state + (size_t)only_layer * dn * dk * dv,
+                           0, (size_t)dn * dk * dv * sizeof(float));
+                    memset(s->conv_state + (size_t)only_layer * qkv_dim * conv_buf_len,
+                           0, (size_t)qkv_dim * conv_buf_len * sizeof(float));
+                } else {
+                    size_t total_delta = (size_t)c->n_layers * dn * dk * dv;
+                    memset(s->delta_state, 0, total_delta * sizeof(float));
+                    size_t total_conv = (size_t)c->n_layers * qkv_dim * conv_buf_len;
+                    memset(s->conv_state, 0, total_conv * sizeof(float));
+                }
                 if (getenv("TQ_DEBUG"))
-                    fprintf(stderr, "[delta-reset] call=%d\n", _delta_call_count);
+                    fprintf(stderr, "[delta-reset] call=%d layer=%d\n",
+                            _delta_call_count, only_layer);
             }
         }
     }

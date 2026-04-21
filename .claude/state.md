@@ -3,6 +3,38 @@
 **Last updated**: 2026-04-21 (Phase 1 refparity ★)
 **Session HEAD**: Reference-parity framework (tools/refparity/) LANDED — HF vs engine per-layer diff, pos-aligned, post_norm-aware.
 
+## Phase 1 R19 — Single-layer reset is not enough — drift is distributed (2026-04-21)
+
+Added `TQ_DELTA_RESET_LAYER=N` env to bisect which DeltaNet layer drives
+the 117-tok repetition loop. Combined with `TQ_DELTA_RESET_EVERY=120` to
+force reset right at the drift boundary.
+
+Tested on Qwen3.6-35B IQ4_XS "Once upon a time in a faraway land":
+
+| reset layer | post-117 text |
+|:---:|:---|
+| L0 only | "It could do math! It could do math! It could do anything! It could" → STILL loop at 117 |
+| L8 only | "It could do math! It could do math! It could do math!" → loop at 117 |
+| L20 only | "It could do math!" ×3 → loop at 117 |
+| L38 only | "It could do math!" ×3 → loop at 117 |
+| ALL layers (R16 baseline) | "0 Comments \| Views: 4,986 views — 'The Great Adventure'" |
+
+R19 conclusion: **no single DeltaNet layer carries the drift signal alone**
+— clearing any one leaves the repetition cliff intact. Only the full
+30-layer reset breaks the "It could do math!" lock. So the 117-tok
+pathology is a **distributed multi-layer interaction**, not a single-layer
+bug amenable to a one-liner fix.
+
+Diagnostic infrastructure stays: `TQ_DELTA_PROBE`, `TQ_DELTA_RESET_EVERY`,
+`TQ_DELTA_RESET_LAYER` — future rounds can reset *ranges* or chain
+ablations more surgically.
+
+**Strategic step-back**: 35B DeltaNet drift looks unlikely to yield to
+short ablation rounds. Bigger-hammer approaches (full refparity against a
+4B-class DeltaNet HF model, or reference reimplementation port) are the
+remaining paths. Leave the diagnostic envs in place and move on to other
+deliverables this session.
+
 ## Phase 1 R18 — False alarm on a_log double-transform (2026-04-21)
 
 Dug into `ssm_a` values to test whether our `-expf(delta_a_log)` was a
