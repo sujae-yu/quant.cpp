@@ -1086,8 +1086,15 @@ static const char* decode_bpe_token(const char* piece) {
                     decode_buf[out++] = (char)p[0];
                     decode_buf[out++] = (char)p[1];
                 }
+            } else if ((cp >= 0xA1 && cp <= 0xAC) || (cp >= 0xAE && cp <= 0xFF)) {
+                /* GPT-2 direct-byte mapping: codepoints U+00A1-U+00AC and
+                 * U+00AE-U+00FF represent raw bytes of the same value. The
+                 * BPE vocab stores these as UTF-8 (e.g. 'Ã' for byte 0xC3)
+                 * so emit the raw byte to reconstruct the intended UTF-8
+                 * character (e.g. 'Ã'+'©' → bytes 0xC3 0xA9 = 'é'). */
+                decode_buf[out++] = (char)(unsigned char)cp;
             } else {
-                /* Regular 2-byte UTF-8 char (e.g., accented letters) */
+                /* Regular 2-byte UTF-8 char (rare in GPT-2-style BPE) */
                 decode_buf[out++] = (char)p[0];
                 decode_buf[out++] = (char)p[1];
             }

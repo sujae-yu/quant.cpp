@@ -3,6 +3,24 @@
 **Last updated**: 2026-04-21 (Phase 1 refparity ★)
 **Session HEAD**: Reference-parity framework (tools/refparity/) LANDED — HF vs engine per-layer diff, pos-aligned, post_norm-aware.
 
+## ★ Phase 1 R6 — BPE decode double-UTF-8 bug FIXED (2026-04-21) ★
+
+`src/engine/tq_tokenizer.c:1089-1093`: decode_bpe_token for codepoints
+U+0080-U+00FF was emitting raw UTF-8 bytes (c3 83 for 'Ã') instead of
+reversing GPT-2's byte-to-unicode mapping.
+
+Before: "café" (bytes 63 61 66 c3 a9) → engine emitted 63 61 66 **c3 83 c2 a9**
+After:  "café" (bytes 63 61 66 c3 a9) → engine emits   63 61 66 c3 a9 ✓
+
+Any Llama-3 / Qwen-style BPE output containing accented chars, non-ASCII
+punctuation, emoji (via byte-fallback) was getting silently double-encoded.
+Discovered via R5's A/B test surfacing the 'cafÃ©' artifact.
+
+Scope: direct byte codepoints U+00A1-U+00AC and U+00AE-U+00FF (GPT-2's
+"direct" byte mapping). Indirect bytes at U+0100+ were already handled.
+
+Regression: 12/12 PASS (+3 Metal tier) → 15/15 PASS unchanged.
+
 ## Phase 1 R5 — TQ_NO_Q4=1 quality/speed tradeoff — NOT flipping default (2026-04-21)
 
 Cross-model A/B on "Once upon a time" (short) vs "Once upon a time in a
