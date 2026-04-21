@@ -3,6 +3,44 @@
 **Last updated**: 2026-04-21 (Phase 1 refparity ★)
 **Session HEAD**: Reference-parity framework (tools/refparity/) LANDED — HF vs engine per-layer diff, pos-aligned, post_norm-aware.
 
+## Phase 1 R3 — FFN magnitude error correlates with activation magnitude (2026-04-21)
+
+Extended diagnosis: the FFN magnitude drift **scales with input activation magnitude**.
+
+| layer | preffn norm | ffn_out ratio (us/hf) | ffn_out cos |
+|---:|---:|---:|---:|
+| 0 | 14.1 | 0.977 | 0.9765 |
+| 13 | 2.5 | 1.090 | 0.9178 |
+| 26 | 63.6 | 0.813 | 0.9758 |
+| **27** | **480.4** | **0.527** | 0.8915 |
+
+Direction (cosine) is mostly preserved; **magnitude loss is the primary symptom**
+and correlates with preffn norm. This fits classic Q8 activation quantization
+saturation: when a 32-element block has outlier magnitudes, the absmax-per-32
+scale favors the outlier and truncates smaller companions.
+
+Preffn input cosine is 0.9999 at L27 → divergence is purely inside the FFN
+matmul chain (gate/up/silu/down), not upstream.
+
+### Why this matters (strategic)
+
+- The bug is quant-method-level, not per-layer logic. Q4 internal recompression
+  from Q4_K/Q6_K GGUF loses precision asymmetrically with activation range.
+- `TQ_NO_Q4=1` swings the opposite direction (1.54× HF) — native GGUF dequant
+  also systematically off. Both paths bias magnitude.
+- Not a one-line fix. Candidates for next round:
+  - Per-block scale + `min` tracking (not just absmax) to preserve small values
+  - Selective bypass: use FP32 matmul for high-magnitude-activation layers
+  - Q4_K native matmul with 6-bit sub-block scales preserved (avoids recomp)
+
+### What does NOT affect 35B
+
+Load-time Q4 recompression is already auto-skipped for 35B MoE (Q8_0 attn
+path). So this specific Qwen3-0.6B bug does not cause 35B long-gen drift.
+The bug methodology (activation-magnitude sensitivity) may apply to 35B's
+DeltaNet recurrent state though — worth testing once refparity is extended
+to 4B-class hybrid models.
+
 ## ★ Phase 1 R2 — Intermediate FFN dumps + Qwen3-0.6B FFN bug signature (2026-04-21) ★
 
 ### Finding
