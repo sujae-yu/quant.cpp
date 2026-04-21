@@ -17,6 +17,7 @@ here is opt-in; defaults are the tested production path.
 | `TQ_MOE_BATCH_SELFTEST` | off | Route N=1 MoE through batch(N=1) kernel — proves equivalence vs per-token path |
 | `TQ_PHI3_SPLIT` | 0 | Phi-3 fused QKV/FFN split to separate Q4 weights. **Off by default** — degrades chat quality per feedback/perf_commits_need_chat_test |
 | `TQ_MOE_FAST_EXP` | off | Use Schraudolph fast-exp in MoE SwiGLU (vs exact expf default). ~2% per-call error; may re-introduce long-gen drift |
+| `TQ_MOE_ROUTE_TEMP` | `1.0` | Softmax temperature on top-K expert routing. **`2.0` extends Qwen3.6-35B coherence from 117 → 200+ tokens** on the "Once upon a time" drift-trigger prompt (measured R26). Trade: slightly less decisive routing = slightly broader expert mix, but top-K set unchanged. `"Paris"` factual probe still correct. Recommended for long-form Qwen3.6-35B generation |
 
 ## Quality / correctness
 

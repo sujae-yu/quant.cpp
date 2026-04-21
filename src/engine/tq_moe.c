@@ -509,10 +509,20 @@ void tq_moe_route(const float* hidden, const float* router_weight,
         if (v > max_val) max_val = v;
     }
 
+    /* Optional softmax temperature (TQ_MOE_ROUTE_TEMP). T>1 spreads the
+     * top-K distribution (less peaky); T<1 sharpens. Read once at first
+     * call to avoid env parsing on hot path. */
+    static float route_temp = 0.0f;
+    if (route_temp == 0.0f) {
+        const char* s = getenv("TQ_MOE_ROUTE_TEMP");
+        route_temp = (s && atof(s) > 0.0f) ? (float)atof(s) : 1.0f;
+    }
+    float inv_temp = 1.0f / route_temp;
+
     float sum_exp = 0.0f;
     for (int k = 0; k < num_active; k++) {
         if (out_expert_ids[k] < 0) { out_expert_weights[k] = 0.0f; continue; }
-        float e = expf(logits[out_expert_ids[k]] - max_val);
+        float e = expf((logits[out_expert_ids[k]] - max_val) * inv_temp);
         out_expert_weights[k] = e;
         sum_exp += e;
     }

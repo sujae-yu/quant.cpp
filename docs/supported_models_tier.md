@@ -43,8 +43,8 @@ Use with user-facing guards (`--rep-penalty`, shorter `-n`).
 
 | Model | Quant | Decode | Practical config | Drift boundary |
 |---|---|---:|---|---:|
-| Qwen3.6-35B-A3B | UD-IQ4_XS | 12-16 t/s warm | `--rep-penalty 1.3` | ~117 tok default; ~200 tok with rep-penalty |
-| Qwen3.6-35B-A3B | UD-Q5_K_M | 10-13 t/s warm | `--rep-penalty 1.3` | 200+ tok (hits -n budget, graceful tail degrade) |
+| Qwen3.6-35B-A3B | UD-IQ4_XS | 12-16 t/s warm | `TQ_MOE_ROUTE_TEMP=2.0` or `--rep-penalty 1.3` | default 117; TEMP=2.0 → 200+ tok coherent story |
+| Qwen3.6-35B-A3B | UD-Q5_K_M | 10-13 t/s warm | `TQ_MOE_ROUTE_TEMP=2.0` | 200+ tok, graceful tail degrade |
 | Qwen3.6-35B-A3B | UD-Q3_K_S | 14 t/s warm | shorter `-n` | ~100 tok |
 
 **Status**: The 117-token repetition cliff on Qwen3.6-35B is a

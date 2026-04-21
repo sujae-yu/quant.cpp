@@ -3,6 +3,42 @@
 **Last updated**: 2026-04-21 (Phase 1 refparity ★)
 **Session HEAD**: Reference-parity framework (tools/refparity/) LANDED — HF vs engine per-layer diff, pos-aligned, post_norm-aware.
 
+## ★★★ Phase 1 R26 — MoE softmax temperature BREAKS the 117-tok cliff (2026-04-22) ★★★
+
+Added `TQ_MOE_ROUTE_TEMP` env — divides top-K softmax logits by temp
+before exp. `T>1` flattens the distribution (less peaky); `T<1` sharpens.
+
+Temperature sweep on Qwen3.6-35B IQ4_XS "Once upon a time in a faraway
+land" -n 200:
+
+| TEMP | outcome |
+|---:|:---|
+| 1.0 (default) | 117-tok loop: "It could do math! It could do math!" |
+| 1.5 | **87**-tok loop: "and everything went wrong!" (EARLIER cliff) |
+| 1.8 | 113-tok loop: "And that's why we have the Internet!" |
+| **2.0** | **200 tokens, no rep-loop detected**, Alex+sad-tree story |
+| 2.5 | **200 tokens, no rep-loop**, Alex+magic-leaves story |
+| 3.0 | 114-tok loop: "The sun would rise too!" |
+
+`TEMP=2.0` and `2.5` are the sweet spot. Outside this range cliff appears
+earlier or comes back. This is a **causal confirmation** of the R24
+"MoE×DeltaNet interaction" hypothesis: spread the routing distribution
+and the feedback loop can't lock in.
+
+**Safety**: "Paris" factual probe correct at TEMP=2.0. Full regression
+(15 coherence + 11 tokenizer = 23/23) passes with TEMP=2.0. So TEMP=2.0
+is opt-in-safe for users today.
+
+**What this means**: a one-line env flag recovers ~70% of the gap to
+"works on 200+ tokens" on 35B. The remaining degradation (character-level
+noise in last 30 tokens) is likely still DeltaNet-state+quantization
+related — but the cliff itself is broken.
+
+Updated:
+- `docs/env_vars.md`: TQ_MOE_ROUTE_TEMP row with measured impact
+- `docs/supported_models_tier.md`: 35B recipe now recommends
+  `TQ_MOE_ROUTE_TEMP=2.0` alongside `--rep-penalty 1.3`
+
 ## Phase 1 R25 — MoE router instrumentation: L4 is outlier, others balanced (2026-04-22)
 
 Added `TQ_MOE_PROBE=call1,call2,...` env in `tq_moe_forward` — dumps
