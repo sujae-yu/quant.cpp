@@ -3,6 +3,39 @@
 **Last updated**: 2026-04-21 (Phase 1 refparity ★)
 **Session HEAD**: Reference-parity framework (tools/refparity/) LANDED — HF vs engine per-layer diff, pos-aligned, post_norm-aware.
 
+## Phase 1 R25 — MoE router instrumentation: L4 is outlier, others balanced (2026-04-22)
+
+Added `TQ_MOE_PROBE=call1,call2,...` env in `tq_moe_forward` — dumps
+per-layer top-K expert IDs and softmax weights at listed layer-0 MoE
+call counts.
+
+Measurement on Qwen3.6-35B IQ4_XS at calls 50, 100, 115, 117 (around
+the 117-token drift boundary) on "Once upon a time in a faraway land":
+
+- Call 50 (early): all 40 MoE layers balanced, top-1 weight ≈ 0.15-0.30
+- Call 100 (mid): **L4 top-1 = 0.812** (expert 67 dominates); others OK
+- Call 115 (drift edge): **L4 top-1 = 0.804** (same 80%+ collapse); 39/40
+  layers normal (top-1 mean 0.221)
+- Call 117 (drift start): all layers back to normal; max top-1 = 0.450
+
+L4 shows a persistent near-collapse at ~0.80 weight on one expert at
+long positions, but 39/40 other layers stay healthy. The R24 "MoE×DeltaNet
+positive feedback" hypothesis isn't strictly supported by a uniform
+collapse pattern — only L4 deviates.
+
+**Revised hypothesis**: the drift isn't a simultaneous multi-layer MoE
+collapse. Instead, a single hot layer (L4) narrows to one expert family
+at long positions, that expert's constant large contribution feeds back
+into DeltaNet's state, and the joint signal pulls downstream semantics
+into repetition. Still requires a DeltaNet state to hold the semantic —
+explains why 4B (dense FFN, no MoE) doesn't drift at all.
+
+Concrete next step: A/B force-suppress L4 at long positions (e.g., mix in
+more experts via temperature on L4's router softmax). If that moves the
+cliff, L4 is the bottleneck.
+
+`TQ_MOE_PROBE` joins the permanent diagnostic suite.
+
 ## ★★★ Phase 1 R24 — Drift is MoE×DeltaNet interaction, NOT DeltaNet alone (2026-04-21) ★★★
 
 Ran Qwen3.5-4B Q4_K_M (dense FFN + DeltaNet hybrid, **no MoE**) on the

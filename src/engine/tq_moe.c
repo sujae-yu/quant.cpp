@@ -661,6 +661,37 @@ void tq_moe_forward(const tq_moe_layer_t* layer,
     }
     state->routing_precomputed = 0; /* reset for next call */
 
+    /* Probe: TQ_MOE_PROBE=pos1,pos2,... prints per-layer top-K expert IDs
+     * and routing weights. Use the layer-0 call counter to gate since this
+     * is called once per MoE layer per token. */
+    {
+        static __thread int _moe_call_count = 0;
+        if (layer_idx == 0) _moe_call_count++;
+        const char* _probe = getenv("TQ_MOE_PROBE");
+        if (_probe) {
+            int match = 0;
+            const char* p = _probe;
+            while (*p) {
+                int v = atoi(p);
+                if (v == _moe_call_count) { match = 1; break; }
+                while (*p && *p != ',') p++;
+                if (*p == ',') p++;
+            }
+            if (match) {
+                fprintf(stderr, "[moe-probe] call=%d L%d experts=[",
+                        _moe_call_count, layer_idx);
+                for (int k = 0; k < num_active; k++)
+                    fprintf(stderr, "%d%s", state->top_experts[k],
+                            k+1<num_active?",":"");
+                fprintf(stderr, "] weights=[");
+                for (int k = 0; k < num_active; k++)
+                    fprintf(stderr, "%.3f%s", state->expert_weights[k],
+                            k+1<num_active?",":"");
+                fprintf(stderr, "]\n");
+            }
+        }
+    }
+
     /* Step 2: Zero the output accumulator */
     memset(output, 0, (size_t)hidden_dim * sizeof(float));
 
