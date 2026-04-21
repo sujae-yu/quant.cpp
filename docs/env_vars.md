@@ -19,6 +19,7 @@ here is opt-in; defaults are the tested production path.
 | `TQ_MOE_FAST_EXP` | off | Use Schraudolph fast-exp in MoE SwiGLU (vs exact expf default). ~2% per-call error; may re-introduce long-gen drift |
 | `TQ_MOE_ROUTE_TEMP` | `1.0` (auto-flipped to `2.0` on qwen35moe arch at load time) | Softmax temperature on top-K expert routing. **`2.0` extends Qwen3.6-35B coherence from 117 → 200+ tokens** on the "Once upon a time" drift-trigger prompt (measured R26). Auto-detected for qwen35moe at model load (see also `TQ_NO_MOE_TEMP_AUTO`). Other arch default stays `1.0` (identity). Trade: slightly less decisive routing = slightly broader expert mix, but top-K set unchanged. `"Paris"` factual probe still correct at T=2.0 |
 | `TQ_NO_MOE_TEMP_AUTO` | off | Disable the qwen35moe auto-default flip. Use if you want the prior baseline T=1.0 behavior on Qwen3.6-35B |
+| `TQ_KV_PROBE` | off | Dump per-layer K quantization roundtrip stats (rms, MSE, cosine) at positions 0/25/50/100/200. Useful to verify KV compression is behaving uniformly across layers and not drifting over position. See the R32 finding — turbo_kv_4b holds cosine ≥0.994 across all layers and positions on Llama-3.2-1B |
 
 ## Quality / correctness
 

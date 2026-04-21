@@ -1825,22 +1825,35 @@ static void self_attn_forward(tq_model_t* model, tq_state_t* s, int l, int pos) 
             }
         }
     }
-    /* Debug: measure roundtrip of the keys ACTUALLY stored in quant cache */
-    if (pos == 0 && l == 0 && getenv("TQ_DEBUG") && use_int_attn) {
+    /* Debug: measure roundtrip of the keys ACTUALLY stored in quant cache.
+     * TQ_DEBUG fires only at L0/pos0 (legacy). TQ_KV_PROBE=1 fires at a
+     * sampled set of (layer, pos) pairs so we can see how quantization
+     * error varies per-layer and per-position — catches silent KV bugs
+     * that aggregate PPL metrics miss (same methodology as refparity for
+     * layer hidden states and the MoE route probe). */
+    int _kv_probe_fire = 0;
+    if (use_int_attn) {
+        if (pos == 0 && l == 0 && getenv("TQ_DEBUG")) _kv_probe_fire = 1;
+        if (getenv("TQ_KV_PROBE") &&
+            (pos == 0 || pos == 25 || pos == 50 || pos == 100 || pos == 200))
+            _kv_probe_fire = 1;
+    }
+    if (_kv_probe_fire) {
         const tq_type_traits_t* dt = &TQ_TRAITS[s->kv_quant_type];
         const float* dbg_key = save_pre_norm_keys ? pre_norm_keys : s->k;
         float mse=0,cn=0,cd1=0,cd2=0; uint8_t tb[1024]; float rc[512];
         dt->quantize(dbg_key, tb, head_dim);
         dt->dequantize(tb, rc, head_dim);
         for(int i=0;i<head_dim;i++){float d=dbg_key[i]-rc[i];mse+=d*d;cn+=dbg_key[i]*rc[i];cd1+=dbg_key[i]*dbg_key[i];cd2+=rc[i]*rc[i];}
-        /* Also check min/max of stored key */
         float dbg_mn=dbg_key[0],dbg_mx=dbg_key[0];
         int nz=0;
         for(int i=0;i<head_dim;i++){if(dbg_key[i]<dbg_mn)dbg_mn=dbg_key[i];if(dbg_key[i]>dbg_mx)dbg_mx=dbg_key[i];if(fabsf(dbg_key[i])>sqrtf(cd1/head_dim)*0.5f)nz++;}
-        fprintf(stderr,"[DEBUG] key dist: min=%.2f max=%.2f nonzero(>0.5rms)=%d/%d\n",dbg_mn,dbg_mx,nz,head_dim);
-        fprintf(stderr,"[DEBUG] quant key (%s): rms=%.4f | MSE=%.6f cosine=%.6f\n",
-                save_pre_norm_keys ? "pre-norm" : "post-norm",
-                sqrtf(cd1/head_dim), mse/head_dim, cn/(sqrtf(cd1)*sqrtf(cd2)+1e-10f));
+        if (getenv("TQ_DEBUG"))
+            fprintf(stderr,"[DEBUG] key dist: min=%.2f max=%.2f nonzero(>0.5rms)=%d/%d\n",dbg_mn,dbg_mx,nz,head_dim);
+        fprintf(stderr,"[kv-probe] L%d pos=%d rms=%.4f mse=%.6f cos=%.6f (%s)\n",
+                l, pos, sqrtf(cd1/head_dim), mse/head_dim,
+                cn/(sqrtf(cd1)*sqrtf(cd2)+1e-10f),
+                save_pre_norm_keys ? "pre-norm" : "post-norm");
     }
     float kv_prescale = 1.0f;
     if (use_int_attn && !is_kv_shared) {

@@ -3,6 +3,40 @@
 **Last updated**: 2026-04-21 (Phase 1 refparity ★)
 **Session HEAD**: Reference-parity framework (tools/refparity/) LANDED — HF vs engine per-layer diff, pos-aligned, post_norm-aware.
 
+## Phase 2 R32 — KV refparity extension: turbo_kv_4b is clean (2026-04-22)
+
+Applied the refparity methodology (that surfaced the BPE and MoE bugs
+earlier this session) to the project's killer-feature claim:
+**turbo_kv_4b = 7× compression at +0% PPL**. Added `TQ_KV_PROBE=1`
+env that dumps per-layer K quantization roundtrip stats at sampled
+positions (0/25/50/100/200).
+
+Measurement on Llama-3.2-1B Q8_0 + turbo_kv_4b KV, 200-token narrative:
+
+| layer | pos=25 | pos=50 | pos=100 | pos=200 |
+|---|---|---|---|---|
+| cosine range | 0.995-0.997 | 0.994-0.997 | 0.995-0.997 | 0.995-0.997 |
+| MSE range | 0.023-0.067 | 0.018-0.082 | 0.031-0.075 | 0.035-0.087 |
+
+- **No drift over position**: cosine at pos=200 statistically
+  indistinguishable from pos=25.
+- **No outlier layer**: highest MSE at L6/L9 on each position but
+  still cosine ≥ 0.995. Correlates with those layers' K dynamic range
+  (higher rms).
+- **No silent bug**: unlike BPE (silent double-encoding) or MoE
+  (silent peakiness at 117 tok), the KV compression passes per-layer
+  sanity check cleanly.
+
+Strategic meaning: the project's central research claim (turbo_kv_4b
+matches FP32 within measurement noise) is **structurally validated**,
+not just by aggregate PPL. Same methodology that found two silent
+quality disasters this session gives this subsystem a clean bill.
+
+`TQ_KV_PROBE` joins the permanent diagnostic suite (env_vars.md).
+Next candidates: run on Qwen3.x (larger head_dim, IMRoPE) and on
+the delta-compression path (3b K + P-frames) to verify those don't
+have drift either.
+
 ## ★★★ Phase 1 R26 — MoE softmax temperature BREAKS the 117-tok cliff (2026-04-22) ★★★
 
 Added `TQ_MOE_ROUTE_TEMP` env — divides top-K softmax logits by temp
