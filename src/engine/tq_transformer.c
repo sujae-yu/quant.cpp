@@ -3238,6 +3238,28 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
             char _slot[16]; snprintf(_slot, sizeof(_slot), "h%d", l);
             tq_dump_hidden(_slot, s->x, dim, pos);
         }
+        /* TQ_RESIDUAL_PROBE=every=N prints per-layer s->x rms + max-abs at
+         * every N-th position. Used to localize residual-stream collapse
+         * that drives 35B long-gen alphabet-walk (R38 diagnosis). */
+        {
+            const char* _rp = getenv("TQ_RESIDUAL_PROBE");
+            if (_rp) {
+                int every = 0;
+                const char* eq = strstr(_rp, "every=");
+                if (eq) every = atoi(eq + 6);
+                if (every <= 0) every = 25;
+                if ((pos % every) == 0 && pos > 0) {
+                    double ss = 0; float mx = 0;
+                    for (int i = 0; i < dim; i++) {
+                        ss += (double)s->x[i] * s->x[i];
+                        float a = fabsf(s->x[i]);
+                        if (a > mx) mx = a;
+                    }
+                    fprintf(stderr, "[res-probe] pos=%d L%d rms=%.3f max_abs=%.3f\n",
+                            pos, l, (float)sqrt(ss / dim), mx);
+                }
+            }
+        }
         /* Post-layer processing: PLE, layer_output_scale.
          * GPU graph path jumps here after full-layer GPU forward. */
 
@@ -3388,10 +3410,29 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
                     double p = expf(s->logits[i] - maxl) / Z;
                     if (p > 1e-30) H -= p * (log(p));
                 }
-                fprintf(stderr, "[logit-probe] pos=%d top5_logits=[%.3f,%.3f,%.3f,%.3f,%.3f] top5_ids=[%d,%d,%d,%d,%d] margin_1_to_2=%.3f entropy=%.3f nats\n",
+                /* EOS rank + logit: is the model trying to stop but getting
+                 * overruled by a peakier wrong token? Qwen3.6 EOS=248046,
+                 * Qwen3.x-thinking may use <|im_end|>=151645 etc.
+                 * We check a few common IDs and report the max-logit one. */
+                int eos_candidates[] = {248046, 248044, 151645, 128001, 128009, 2};
+                int n_eos = sizeof(eos_candidates)/sizeof(eos_candidates[0]);
+                float eos_logit = -1e30f; int eos_id = -1;
+                for (int e = 0; e < n_eos; e++) {
+                    int id = eos_candidates[e];
+                    if (id >= 0 && id < c->vocab_size && s->logits[id] > eos_logit) {
+                        eos_logit = s->logits[id]; eos_id = id;
+                    }
+                }
+                /* Compute EOS rank: how many tokens have higher logit than EOS */
+                int eos_rank = 0;
+                if (eos_id >= 0) {
+                    for (int i = 0; i < c->vocab_size; i++)
+                        if (s->logits[i] > eos_logit) eos_rank++;
+                }
+                fprintf(stderr, "[logit-probe] pos=%d top5_logits=[%.3f,%.3f,%.3f,%.3f,%.3f] top5_ids=[%d,%d,%d,%d,%d] margin=%.3f entropy=%.3f eos_id=%d eos_logit=%.3f eos_rank=%d\n",
                         pos, top[0], top[1], top[2], top[3], top[4],
                         top_idx[0], top_idx[1], top_idx[2], top_idx[3], top_idx[4],
-                        top[0]-top[1], H);
+                        top[0]-top[1], H, eos_id, eos_logit, eos_rank);
             }
         }
     }

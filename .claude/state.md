@@ -3,6 +3,62 @@
 **Last updated**: 2026-04-22 (Phase 2 KV clean-bill)
 **Session HEAD**: turbo_kv_4b per-arch per-layer clean-bill LANDED via chunked TQ_KV_PROBE. 7×/+0% PPL claim now validated element-by-element across Llama, Qwen3-0.6B, Qwen3.5-4B, Qwen3.6-35B.
 
+## ★ Phase 3 R39 — EOS rank diagnosis reframes the 1000-tok problem ★
+
+**User insight**: "혹시 종료할 시점에 종료를 하지 못해서 발생하는건 아닌지?" —
+could the degenerate output be the model unable to emit EOS?
+
+Added EOS rank to `TQ_LOGIT_PROBE` output. Qwen3.6-35B UD-IQ4_XS,
+"Once upon a time in a faraway land", T=2.0 (auto-default), -n 275:
+
+| pos | EOS rank | top1-EOS logit gap | observable |
+|---:|---:|---:|:---|
+| 25 | 511 | 17.5 | normal narrative |
+| 100 | 65 | 8.1 | normal |
+| 125 | 47 | 12.7 | "Sorry!" loop starts |
+| 175 | **13** | 6.0 | alphabet walk begins |
+| 200 | **13** | 5.9 | alphabet walk |
+| 250 | **6** | 6.7 | alphabet walk continues |
+
+**EOS rank climbs 511 → 6 through the degradation**. The model IS
+signaling termination with increasing confidence, but top1 always wins
+at T=0 by 3-7 logits. So the "alphabet walk" is the model **stuck
+between wanting to stop and being forced to output another token**.
+
+### Reframing the 1000-tok problem
+
+The 6-word prompt "Once upon a time in a faraway land" doesn't merit
+1000 coherent tokens. The model's natural answer is ~150-200 tokens of
+narrative then EOS. Forcing `-n 1000` on it means most of those tokens
+are post-EOS-attempt confusion.
+
+Tested with substantive prompt + `--chat`:
+- Qwen3.6-Thinking-Instruct chat template primes `<think>\n\n</think>\n\n`
+- Result: 0 tokens generated (model emits EOS immediately because
+  empty `<think>` block is malformed — needs actual reasoning content
+  in thinking mode)
+
+So 1000+ coherent tokens on 35B requires one of:
+1. Chat-template work: let model generate filled `<think>...</think>`
+   block before the response, OR use a non-thinking branch of Qwen3.6
+2. A base-completion prompt with enough structural scaffolding (system
+   + instruction + expected format) that 1000 tokens is in-distribution
+
+Neither is a quantization / DeltaNet / MoE bug. Both are product/ergonomics
+work on the chat pipeline.
+
+### Diagnostic deliverable
+
+`TQ_LOGIT_PROBE` now reports EOS rank per probe position — a cheap,
+decisive check. From `feedback_eos_rank_diagnosis.md`:
+
+> Rule: when a model emits degenerate output at long positions, BEFORE
+> assuming residual-space collapse / quantization drift / KV corruption,
+> ask: *is EOS rank climbing toward top-1?* If yes, the model is trying
+> to terminate.
+
+Saved as memory `feedback_eos_rank_diagnosis.md` + indexed in MEMORY.md.
+
 ## Phase 3 R38 — 1000-tok target diagnosis — logits peaky, residual collapse suspected (2026-04-22)
 
 User-set breakthrough metric: **coherent generation to 1000+ tokens on
