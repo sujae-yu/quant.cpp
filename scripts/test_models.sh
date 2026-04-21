@@ -130,7 +130,19 @@ echo "  PASS: $PASS"
 echo "  FAIL: $FAIL"
 echo "  SKIP: $SKIP"
 
-if [[ "$FAIL" -gt 0 ]]; then
+# Chain the tokenizer-level regression so 'the' regression is one command.
+# BPE stale-entry + UTF-8 direct-byte (v0.27.0) are invariants we must never
+# regress — running them here makes that guarantee automatic.
+TOK_SCRIPT="$(dirname "$0")/test_tokenizer.sh"
+if [[ -x "$TOK_SCRIPT" || -f "$TOK_SCRIPT" ]]; then
+    echo ""
+    BIN="$QUANT_BIN" MODELS_DIR="$MODELS_DIR" bash "$TOK_SCRIPT"
+    TOK_RC=$?
+else
+    TOK_RC=0
+fi
+
+if [[ "$FAIL" -gt 0 || "$TOK_RC" -ne 0 ]]; then
     exit 1
 fi
 exit 0
