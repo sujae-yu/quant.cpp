@@ -73,6 +73,20 @@ drift is a MoE-specific pathology, not DeltaNet's fault.
 So: T=2.0 **breaks the hard 117-tok cliff** and recovers ~50 additional
 coherent tokens. Full essay-length generation still needs more work.
 
+## Speed (R37 A/B, warm cache, auto-serial -j 1)
+
+Qwen3.6-35B IQ4_XS, -n 50 -T 0, warm cache 3-run:
+
+| Config | decode t/s |
+|---|---:|
+| TEMP=2.0 (auto-default) | 3.5 |
+| TEMP=1.0 (`TQ_NO_MOE_TEMP_AUTO=1`) | 3.0 |
+| TEMP=2.0 (repeat) | 3.1 |
+
+Within measurement noise (3.0-3.5 range). The softmax temperature divide
+adds one float division per active expert per layer per token = trivial.
+**Auto-default flip has zero speed cost.**
+
 ## Safety
 
 - `"The capital of France is"` → `"Paris."` (correct) at T=2.0
