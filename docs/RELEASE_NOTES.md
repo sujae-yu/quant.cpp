@@ -6,6 +6,75 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [v0.27.0] — 2026-04-21 ★★ (BPE encode+decode UTF-8 fix — international text silent quality disaster RESOLVED)
+
+### Headline
+
+**Two symmetric BPE bugs were silently corrupting every prompt and every
+output containing international characters (accents, CJK, Cyrillic,
+byte-fallback emoji) on all Llama-3 and Qwen3 family models.** Fixed both
+sides of the GPT-2 byte-to-unicode mapping. Token-level parity with HF
+reference now 100% on tested inputs.
+
+### The bugs
+
+Both `tq_tokenizer.c` (split-source) and `quant.h` (single-header) had
+mirrored bugs on the encode and decode paths for GPT-2-style BPE vocabs.
+
+**Encode** (`encode_byte_to_bpe_char`): for "direct" bytes in the range
+0xA1-0xAC and 0xAE-0xFF, we emitted the raw byte into the lookup string.
+Standalone bytes ≥ 0x80 are invalid UTF-8, so `str_lookup` never matched
+the vocab (which stores these as proper UTF-8 strings: byte 0xC3 → "Ã" =
+UTF-8 `c3 83`). The character silently fell back to a wrong low-id token.
+
+**Decode** (`decode_bpe_token`): for codepoints U+00A1-U+00AC and
+U+00AE-U+00FF found in vocab pieces, we emitted the UTF-8 encoding of the
+codepoint (2 bytes `c3 83` for U+00C3 "Ã") instead of the raw byte 0xC3
+that the codepoint represents in GPT-2's byte-to-unicode mapping. Output
+got double-encoded: "café" (3 bytes `63 61 66 c3 a9`) became `63 61 66
+c3 83 c2 a9` (6 bytes, renders as "cafÃ©").
+
+### Measured impact
+
+HF Qwen3 reference tokenization vs ours, before/after:
+
+| Input | HF reference | Before | After |
+|---|---|---|---|
+| café | [924, 58858] | [68796] | [924, 58858] ✓ |
+| naïve | [3376, 37572, 586] | [77, 523] | [3376, 37572, 586] ✓ |
+| 日本語 | [101059, 102819] | [245, 250, 252] | [101059, 102819] ✓ |
+| привет | [124436, 26991, 8178] | [222, 224] | [124436, 26991, 8178] ✓ |
+
+All four strings now tokenize byte-for-byte identical to the HF tokenizer.
+Before: model saw a completely different sequence than its training
+distribution — silent quality degradation proportional to share of
+non-ASCII content in the prompt.
+
+### Discovery
+
+Both bugs surfaced from the `tools/refparity/` framework added earlier
+this session. The decode bug was flagged first by an A/B output diff
+("cafÃ©" artifact on Llama-3.2-1B); once fixed, a targeted encode
+comparison vs HF tokenizer surfaced the symmetric encode bug.
+
+### Files changed
+
+- `src/engine/tq_tokenizer.c`: `encode_byte_to_bpe_char` and
+  `decode_bpe_token` each get a direct-byte branch
+- `quant.h`: synced (single-header had identical bugs)
+- Regression: 15/15 PASS unchanged
+
+### Scope
+
+- **Affected**: Llama-3.x, Qwen2.5, Qwen3.x, Qwen3.5, Qwen3.6, any model
+  using GPT-2-style byte-level BPE (log line shows `is_sentencepiece=0`)
+- **Not affected**: Gemma (SentencePiece), Phi-3 (SentencePiece path)
+
+Latent silent-quality bug for users whose prompts touch international text.
+Now unblocked.
+
+---
+
 ## [v0.26.0] — 2026-04-21 ★ (L2-norm formulation matches ggml — Qwen3.6 +36% coherence window)
 
 ### Headline
