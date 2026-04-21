@@ -3,6 +3,61 @@
 **Last updated**: 2026-04-22 (Phase 2 KV clean-bill)
 **Session HEAD**: turbo_kv_4b per-arch per-layer clean-bill LANDED via chunked TQ_KV_PROBE. 7×/+0% PPL claim now validated element-by-element across Llama, Qwen3-0.6B, Qwen3.5-4B, Qwen3.6-35B.
 
+## Phase 3 R40 — Meaningful prompt + thinking-mode still hits NEW attractor (2026-04-22)
+
+User follow-up: "모델이 의미있는 긴 문장을 생성하도록 유의미한 질문도 생성해야 하는거 아닌가요?"
+(Must we also construct meaningful questions for the model to produce
+meaningful long output?) — correct observation, tested.
+
+Setup:
+- Q5_K_M model
+- Rich structured KR prompt: "5 ML paradigms, each with (1) core idea,
+  (2) 2 algorithms, (3) industry case, (4) pros/cons"
+- `TQ_ENABLE_THINKING=1` (open `<think>\n` instead of empty)
+
+Result:
+- Thinking mode engages, generates English CoT ("Here's a thinking
+  process: 1. Analyze the request: The user wants...")
+- **Hits new attractor at 71 tokens: "requirements/requirements/requirements"**
+- EOS rank path (not EOS-block this time):
+  - pos=90: EOS rank 2523 (normal, mid-CoT)
+  - pos=120: EOS rank 178
+  - pos=135: EOS rank 100, margin=7.8 (PEAKY "requirements" lock)
+  - pos=150: EOS rank 222, margin=1.7 (trying to recover)
+
+This is a DIFFERENT failure mode from R38-39:
+- R38 "alphabet walk" — EOS rank climbing (model wants to stop)
+- R40 "requirements loop" — EOS rank NOT particularly close; model
+  semantically locked on one word and can't move forward
+
+**Three distinct degradation modes coexist** on 35B long-gen:
+1. EOS-block (R39): model signals termination but raw-completion forces
+   more tokens → alphabet walk
+2. Semantic lock-in (R40): model enters attractor on a specific word
+   (like "requirements") for multiple consecutive tokens
+3. Router collapse (R26/pre): now default-fixed by T=2.0, but analogous
+   attractors remain at other places
+
+### Brutal honesty on the 1000-tok target
+
+Not achievable with current engine + weights. All three failure modes
+appear regardless of prompt quality or thinking-mode state. They emerge
+from the TEMP=2.0 spread softening one attractor but leaving others.
+
+Paths for future work:
+- Multi-attractor suppression: stronger rep-penalty that scales with
+  position and peakiness (not just token match)
+- Fixed-k block self-attention: prevent any one token from dominating
+  attention weight long enough to form lock-in
+- DRY sampler (Don't Repeat Yourself) — exists in llama.cpp, not in ours
+- Upstream Qwen3.6 chat template work — `<|im_start|>assistant\n<think>`
+  may need a specific non-empty placeholder to unlock trained behavior
+
+Landed diagnostic infrastructure covers all three modes:
+`TQ_LOGIT_PROBE` (EOS rank + margin + entropy + top5),
+`TQ_RESIDUAL_PROBE` (residual rms per layer/pos — added R39 prep),
+`TQ_MOE_PROBE` (router top-K), `TQ_DELTA_PROBE` (state norm).
+
 ## ★ Phase 3 R39 — EOS rank diagnosis reframes the 1000-tok problem ★
 
 **User insight**: "혹시 종료할 시점에 종료를 하지 못해서 발생하는건 아닌지?" —
