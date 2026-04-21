@@ -15,15 +15,16 @@
     },
     {
       "name": "qwen3.5_4b_hybrid",
-      "hf_model": "Qwen/Qwen3.5-4B-Thinking",
+      "hf_model": "Qwen/Qwen3-Next-80B-A3B-Thinking",
       "engine_gguf": "Qwen3.5-4B-Q4_K_M.gguf",
-      "_note": "Hybrid DeltaNet+self-attn reference. HF model may need download.",
+      "_note": "Hybrid DeltaNet+self-attn. HF ref too big for 16 GB (80B). Use BF16 fallback or pick a smaller DeltaNet-class model. Currently DISABLED — kept for documentation.",
+      "_disabled": true,
       "prompts": [
-        "Hello",
-        "def fibonacci(n):"
+        "Hello"
       ],
       "threshold_l2_rel": 0.05,
-      "threshold_cosine": 0.90
+      "threshold_cosine": 0.90,
+      "dtype": "bfloat16"
     },
     {
       "name": "llama3.2_1b",

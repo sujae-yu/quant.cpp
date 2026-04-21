@@ -20,14 +20,27 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
-def run(model_name: str, prompt: str, out_path: str) -> int:
-    print(f"[refparity/hf] model={model_name}", file=sys.stderr)
+DTYPE_MAP = {
+    "float32": torch.float32, "fp32": torch.float32,
+    "bfloat16": torch.bfloat16, "bf16": torch.bfloat16,
+    "float16": torch.float16, "fp16": torch.float16,
+}
+
+
+def run(model_name: str, prompt: str, out_path: str,
+        dtype: str = "float32") -> int:
+    torch_dtype = DTYPE_MAP.get(dtype)
+    if torch_dtype is None:
+        print(f"error: unknown dtype {dtype!r}; valid: {list(DTYPE_MAP)}",
+              file=sys.stderr)
+        return 2
+    print(f"[refparity/hf] model={model_name} dtype={dtype}", file=sys.stderr)
     print(f"[refparity/hf] prompt: {prompt[:80]!r}{'...' if len(prompt) > 80 else ''}",
           file=sys.stderr)
 
     tok = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_pretrained(
-        model_name, dtype=torch.float32, device_map="cpu")
+        model_name, dtype=torch_dtype, device_map="cpu")
     model.eval()
 
     ids = tok.encode(prompt, return_tensors="pt")
@@ -77,6 +90,10 @@ def main():
     group.add_argument("--prompt", help="literal prompt text")
     group.add_argument("--prompt-file", help="read prompt from file")
     ap.add_argument("--out", required=True, help="output .npz path")
+    ap.add_argument("--dtype", default="float32",
+                    choices=list(DTYPE_MAP.keys()),
+                    help="HF model dtype (default: float32). Use bfloat16 "
+                         "for 4B+ models on 16 GB machines.")
     args = ap.parse_args()
 
     if args.prompt:
@@ -85,7 +102,7 @@ def main():
         with open(args.prompt_file) as f:
             prompt = f.read().rstrip("\n")
 
-    return run(args.model, prompt, args.out)
+    return run(args.model, prompt, args.out, dtype=args.dtype)
 
 
 if __name__ == "__main__":

@@ -39,6 +39,8 @@ with open("$MATRIX") as f:
     m = json.load(f)
 filt = "$FILTER"
 for t in m.get("tests", []):
+    if t.get("_disabled"):
+        continue
     if filt and filt not in t["name"]:
         continue
     gguf = t["engine_gguf"]
@@ -46,7 +48,7 @@ for t in m.get("tests", []):
         # bash-escaped prompt (base64 roundtrip to avoid quoting hell)
         import base64
         p64 = base64.b64encode(prompt.encode()).decode()
-        print(f"{t['name']}|{t['hf_model']}|{gguf}|{p64}|{t.get('threshold_l2_rel', 0.05)}|{t.get('threshold_cosine', 0.90)}")
+        print(f"{t['name']}|{t['hf_model']}|{gguf}|{p64}|{t.get('threshold_l2_rel', 0.05)}|{t.get('threshold_cosine', 0.90)}|{t.get('dtype', 'float32')}")
 PY
 )
 
@@ -66,7 +68,7 @@ echo ""
 
 PREV_NAME=""
 IDX=0
-while IFS='|' read -r NAME HF_MODEL GGUF P64 TH_L2 TH_COS; do
+while IFS='|' read -r NAME HF_MODEL GGUF P64 TH_L2 TH_COS DTYPE; do
     [[ -z "$NAME" ]] && continue
     PROMPT=$(echo "$P64" | base64 -d)
     TOTAL=$((TOTAL + 1))
@@ -93,7 +95,7 @@ while IFS='|' read -r NAME HF_MODEL GGUF P64 TH_L2 TH_COS; do
 
     # HF reference dump (one per slot — different prompts produce different tokens)
     REF_NPZ="$WORK_DIR/$SLOT.npz"
-    if ! python hf_reference.py --model "$HF_MODEL" --prompt "$PROMPT" --out "$REF_NPZ" 2>"$WORK_DIR/hf.err"; then
+    if ! python hf_reference.py --model "$HF_MODEL" --prompt "$PROMPT" --out "$REF_NPZ" --dtype "${DTYPE:-float32}" 2>"$WORK_DIR/hf.err"; then
         echo "   [ERROR] HF reference failed:"
         sed 's/^/     /' "$WORK_DIR/hf.err"
         FAILED_ENTRIES+=("$SLOT: hf_reference failed")
