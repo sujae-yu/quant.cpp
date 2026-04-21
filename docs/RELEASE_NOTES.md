@@ -78,10 +78,24 @@ tokens. Full essay-length generation still has more to close.
 
 ### Default behavior
 
-**Unchanged.** `TQ_MOE_ROUTE_TEMP=1.0` is the default so existing users
-get identical behavior. Adding the flag is opt-in. A later release may
-flip `qwen35moe` arch to default T=2.0 after broader validation across
-prompts and `--chat` mode.
+**Auto-flipped for `qwen35moe` arch.** `tools/quant.c` auto-detects the
+MoE+DeltaNet hybrid at load time and sets `TQ_MOE_ROUTE_TEMP=2.0` when
+the user hasn't provided one. No effect on Llama, Phi, Gemma, Qwen3
+non-hybrid, or any other arch — only `qwen35moe` gets the new default.
+
+The validation signal that justified the flip:
+- 5/5 short-prompt A/B (Paris, fibonacci, math, ML description, Once upon
+  a time) give identical factual accuracy at T=1.0 vs T=2.0
+- Full regression 23/23 PASS with auto-default enabled
+- 117-tok cliff broken on the drift-trigger prompt
+
+Precedent: same arch-scoped auto-mode pattern as `TQ_NO_AUTO_SERIAL` which
+auto-forces `-j 1` on qwen35moe for determinism.
+
+Opt-outs (any of):
+- `TQ_NO_MOE_TEMP_AUTO=1` — disable auto-default for this run
+- `TQ_MOE_ROUTE_TEMP=1.0` — explicit override to prior default
+- `TQ_MOE_ROUTE_TEMP=<other>` — explicit custom tuning
 
 ### Recommended Qwen3.6-35B recipe
 
