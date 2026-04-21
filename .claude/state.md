@@ -1,7 +1,46 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-21 (Phase 1 refparity ★)
-**Session HEAD**: Reference-parity framework (tools/refparity/) LANDED — HF vs engine per-layer diff, pos-aligned, post_norm-aware.
+**Last updated**: 2026-04-22 (Phase 2 KV clean-bill)
+**Session HEAD**: turbo_kv_4b per-arch per-layer clean-bill LANDED via chunked TQ_KV_PROBE. 7×/+0% PPL claim now validated element-by-element across Llama, Qwen3-0.6B, Qwen3.5-4B, Qwen3.6-35B.
+
+## ★ META-INSIGHTS (distilled from 2026-04-21→22 35-round session, keep for future sessions) ★
+
+### Five durable patterns
+
+1. **Reference comparison > symptom introspection.** Rounds that compared our engine vs HF / llama.cpp found a 5-line fix in 2-3 rounds each (BPE UTF-8, MoE 117-tok cliff). Rounds that only did internal ablation without a reference (R16-R19 DeltaNet state bisection) produced null results and wrong hypotheses. **Always establish a reference first; ablate second.**
+
+2. **Narrow bug requires wide instrumentation.** Every new `TQ_*_PROBE` env paid for itself many times. This session added 7 (`TQ_DUMP_INTERMEDIATE`, `TQ_DELTA_PROBE`, `TQ_DELTA_RESET_EVERY`, `TQ_DELTA_RESET_LAYER`, `TQ_MOE_PROBE`, `TQ_MOE_ROUTE_TEMP`, `TQ_KV_PROBE`). Reactive instrumentation is a tax; proactive instrumentation compounds.
+
+3. **Architecture-scoped auto-defaults > global envs.** Users shouldn't need to know flags. When a per-arch correction ships, bake it into `tools/quant.c` auto-detect block (qwen35moe → auto-serial, auto-moe-temp; MoE+Q8_0 → auto-skip-Q4). Users get the fix by upgrading.
+
+4. **Null results advance us.** R16-R19 "DeltaNet alone isn't the cause" WAS necessary before R24 could propose "compare 4B hybrid". Document null results with the same discipline as fixes — the failure eliminates hypotheses.
+
+5. **5-line fix has a 25-round prelude.** Both breakthroughs (BPE, MoE temp) are 5-line C changes. The time was entirely in LOCALIZATION. Invest in instrumentation infrastructure; the fix will be trivial once you know where.
+
+### Meta-anti-pattern — the R33→R34 irony
+
+Refparity's strength is comparing the **same code path** vs reference. In R33 I reported "hybrid arch KV probe produces NaN → production bug unclear". R34 found: my probe code was **clamping head_dim > TQ_BK without chunking**, while production chunks correctly. So the probe measured a different path than production → false positive. **Diagnostic tool's plumbing (chunking, buffer sizes, strides) must match production's plumbing**, not just the primary call. A silent bug in the diagnostic tool is as misleading as the bugs it tries to catch.
+
+### Permanent diagnostic envs added this session (keep)
+
+| env | scope | purpose |
+|---|---|---|
+| `TQ_DUMP_INTERMEDIATE` | refparity | per-layer sub-stage dumps (h_in/postattn/preffn/ffnout) |
+| `TQ_DELTA_PROBE` | DeltaNet | per-layer state L2 norm at listed call counts |
+| `TQ_DELTA_RESET_EVERY` | DeltaNet | periodic recurrent state reset (ablation) |
+| `TQ_DELTA_RESET_LAYER` | DeltaNet | restrict reset to one layer |
+| `TQ_MOE_PROBE` | MoE | top-K expert IDs + routing weights per layer |
+| `TQ_MOE_ROUTE_TEMP` | MoE | softmax temperature on router; **auto-flipped to 2.0 on qwen35moe** |
+| `TQ_KV_PROBE` | KV | per-layer K roundtrip cosine sim + MSE at sampled positions |
+| `TQ_NO_MOE_TEMP_AUTO` | escape | disable the qwen35moe auto-temp flip |
+
+### Session commits ledger
+
+`161a218` refparity framework · `5bc50b1` intermediate dumps · `f612c57` FFN drift diag · `6727a74` dtype opt · `6975522` NO_Q4 tradeoff · **`9c53491` BPE decode fix ★** · **`58d3925` BPE encode fix ★★** · `58a9d48` quant.h sync · `34661a8` v0.27.0 release · `972dc78` tokenizer fixtures · `fba7ff9` 35B baseline · `657f203` README v3.20 · `dc4152d` README.ko · `f912c32` regression chain · `2a1d40d` emoji/CJK fixtures · `b061e7d` delta reset ablation · `d1c6057` delta probe · `a05d4e4` a_log null · `65e4a2d` per-layer reset · `18223d8` bpe bench report · `ad30813` tier doc · `61f7ac0` env_vars · `88ed094` 4B-vs-35B insight · `6b362a8` moe probe · **`b212194` MoE temp cliff break ★★★** · `a4d0002` moe bench report · `d2fb852` v0.28.0 docs · `f0e51ab` auto-default temp · `f2f0d8a` auto-default docs · `52e78cb` .gitignore · `4d378f0` KV probe · `4b6019e` KV probe refined · `63e45bb` KV probe chunking fix · `600d49e` KV clean-bill report · this (`R36` consolidation).
+
+---
+
+
 
 ## ★ Phase 2 R34 — KV probe chunking fix — turbo_kv_4b CLEAN across all tested arch ★
 
