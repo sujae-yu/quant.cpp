@@ -56,13 +56,38 @@ Other round 3 checks (no change needed):
 - 4B model reaches 185 tok on same DeltaNet arch (no MoE) → DeltaNet
   is NOT the gap. 35B gap is MoE-specific.
 
-### Round 4 direction (planned)
+### Round 4 — SHARED expert outlier CONFIRMED; exact sigmoid ≈ neutral (commit ab16585)
 
-Hypothesis (b) — per-expert output RMS dump for layer 39.
-Layer 39's 5-10× elevated RMS could come from ONE specific expert
-(or shared expert). Dumping per-expert output RMS at layer 39
-identifies: routed-expert-N, shared expert, or the routing
-decision itself. Then fix scope is clear.
+Probe output on Qwen3.6-35B layer 39:
+
+| Expert type | RMS range | maxabs range |
+|---|---|---|
+| Routed experts (8 active) | 0.04 - 0.30 | mostly <1.5 |
+| **SHARED expert** | **0.25 - 0.41** | **2.35 - 9.16** |
+
+Shared expert has classic "superweight" outlier channel pattern.
+Weighted by gate ~0.35 → peak channel magnitude ~3 dominates residual.
+
+**Sub-fix tested**: Replaced `fast_expf_moe` → exact `expf` in shared
+gate sigmoid. Result: 140 tok vs 147 tok baseline (within noise).
+
+Gate precision is NOT the bottleneck. The outlier channels themselves
+are what propagate; a 1-2% gate error doesn't fundamentally change
+their impact. Change committed anyway since it matches llama.cpp
+exactly (ggml_sigmoid) and sets correct precedent.
+
+### Round 5 direction (planned)
+
+Outlier channels are intrinsic to weights. Our engine must handle
+them the same way llama.cpp does, or we diverge. Candidates:
+  - SwiGLU activation precision inside shared expert (silu uses
+    fast path? check tq_silu / activation_fn call in shared expert)
+  - Shared expert matmul kernel differs from routed experts:
+    Routed: IQ2_XXS fused dot (custom NEON)
+    Shared: Q8_0 GGUF on-the-fly dequant
+    Different precision characteristics could interact with outlier
+    channels to produce divergent output
+  - LM head Q8_0 matmul precision (layer 39 output → norm → lm_head)
 
 ## R47 — 35B 1000-tok attempt — 4 approaches all fail short of target (2026-04-22)
 
