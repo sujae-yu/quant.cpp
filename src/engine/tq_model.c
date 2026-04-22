@@ -1541,6 +1541,23 @@ static tq_model_t* tq_load_safetensors(const char* path) {
         int dim_h = model->config.hidden_dim;
         int head_dim_h = model->config.head_dim;
 
+        /* TQ_QWEN_NORM_PROBE=1: dump first attn_norm weight stats */
+        if (getenv("TQ_QWEN_NORM_PROBE") && n_layers > 0 && model->layers[0].attn_norm) {
+            float* w = model->layers[0].attn_norm;
+            float wmin = w[0], wmax = w[0], wsum = 0.0f;
+            int n_near_zero = 0, n_near_one = 0;
+            for (int i = 0; i < dim_h; i++) {
+                if (w[i] < wmin) wmin = w[i];
+                if (w[i] > wmax) wmax = w[i];
+                wsum += w[i];
+                if (w[i] > -0.5f && w[i] < 0.5f) n_near_zero++;
+                if (w[i] > 0.5f && w[i] < 1.5f) n_near_one++;
+            }
+            fprintf(stderr, "[norm-probe] layer 0 attn_norm pre-+1: min=%.4f max=%.4f mean=%.4f "
+                    "near0=%d near1=%d (n=%d)\n",
+                    wmin, wmax, wsum/dim_h, n_near_zero, n_near_one, dim_h);
+        }
+
         for (int l = 0; l < n_layers; l++) {
             tq_layer_weights_t* layer_w = &model->layers[l];
             if (layer_w->attn_norm) {
