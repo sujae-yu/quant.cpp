@@ -234,6 +234,25 @@ Fix: skip log conversion, use raw values. TQ_DN_ALOG_LEGACY=1 reverts.
 Result: 168 tok vs 147 baseline = +21 tok. **First non-regression in
 9 rounds**, validating the line-by-line vs-llama.cpp approach.
 
+## R12 — softplus threshold + router temp tests RULED OUT — commit 4bf449c
+
+Tested 2 more diffs vs llama.cpp:
+- Softplus threshold 15→20: 53 tok (-115). Early EOS triggered.
+- Router T=2.0→1.0 (match llama.cpp): 101 tok (-67). Our T=2.0 default
+  compensates for other unfound diffs; required to keep.
+
+Verified MATCHING llama.cpp (no fix needed):
+- l2_norm formula and eps (1e-6, max-form)
+- delta rule operator order
+- Q scaling location (we apply externally; llama.cpp inside build_delta_net)
+- alpha softplus path
+- shared expert sigmoid gate (R4 already exact)
+- expert_weights_scale 0.0 in GGUF (both engines skip)
+- ssm_a raw (R10 fix landed)
+- top-K weight re-normalization to sum=1
+
+Current best: R10 raw ssm_a fix → 168 tok.
+
 ## R11 — q_scale 1/sqrt(dk) ruled out as removal target — commit 64f66d8
 
 Tested removing our `Q *= 1/sqrt(dk)` since llama.cpp doesn't have
