@@ -87,17 +87,36 @@ exactly (ggml_sigmoid) and sets correct precedent.
   Shared expert is NECESSARY. Outlier channels (maxabs 2-9) are expected
   transformer "superweight" behavior, NOT a bug in our production.
 
-### Round 6 direction (planned)
+### Round 6 — LM head Q6_K precision RULED OUT (commit f84ac1c)
 
-Focus shifts to post-MoE path. The divergence from llama.cpp must occur
-in residual stream processing AFTER layer 39:
-  - **LM head Q6_K matmul** on 248k vocab (our load log shows
-    "separate output.weight, using Q6_K for lm_head"). A/B test:
-    dequant output.weight to FP32 at load time. If coherent window
-    extends, Q6_K matmul is the culprit.
-  - **Output norm** applied to layer 39 residual (RMSNorm)
-  - **Attention output gate** at layer 39 (if layer 39 has one — but
-    39 is DeltaNet not attn, so this may not apply)
+Added TQ_OUTPUT_FP32=1 env: forces Q6_K→FP32 dequant at load (2 GB RAM).
+
+35B result:
+  Baseline (Q6_K LM head):  147 tok
+  FP32 LM head:              54 tok (**-93 tok regression!**)
+
+Counter-intuitive but informative: FP32 is strictly more precise yet
+WORSE. Q6_K's ~0.5% noise regularizes the logit distribution; pure
+FP32 creates sharper peaks that lock onto attractor basins faster.
+llama.cpp also uses Q6_K → not the divergence point.
+
+**Key insight**: Single-point precision changes just reshuffle WHERE
+the attractor hits, not WHETHER. The gap must be in something that
+changes BEHAVIOR over 100+ tokens (accumulation), not a precision-loss
+point.
+
+### Round 7 direction (planned)
+
+DeltaNet recurrent state accumulation. Memory note says "Qwen3.6
+long-gen drift — likely DeltaNet recurrent state error". Layer 39 is
+specifically DeltaNet (full_attention_interval=4, attn at 0,4,8,..,36).
+Over 150 tokens × 30 DeltaNet layers, `state = state * decay + delta`:
+  - If decay has any bias, state magnitude drifts geometrically
+  - If delta has precision drift, accumulates linearly
+  - State initialized to 0; by pos 150 it carries all prior tokens
+
+Probe: dump DeltaNet state RMS per-layer at multiple positions,
+check growth rate vs 4B (which has same DeltaNet, gets 185 tok OK).
 
 ## R47 — 35B 1000-tok attempt — 4 approaches all fail short of target (2026-04-22)
 
