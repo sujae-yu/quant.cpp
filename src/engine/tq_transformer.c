@@ -3088,6 +3088,24 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
                            s->xb, s->xb2, dim, l);
             TQ_PROF_STOP(_tp, moe_ns);
 
+            /* TQ_MOE_RMS_PROBE=1: dump per-layer MoE output RMS at each pos.
+             * Used to localize where MoE precision drift first diverges from
+             * a healthy trajectory (e.g. 4B dense FFN). Streamed to stderr
+             * as `[moe-rms] pos=N layer=L rms=X.XXXe+YY maxabs=Z.ZZZe+YY`. */
+            if (getenv("TQ_MOE_RMS_PROBE")) {
+                double ss = 0.0;
+                float maxabs = 0.0f;
+                for (int i = 0; i < dim; i++) {
+                    float v = s->xb2[i];
+                    ss += (double)v * v;
+                    float a = v < 0 ? -v : v;
+                    if (a > maxabs) maxabs = a;
+                }
+                float rms = (float)sqrt(ss / (double)dim);
+                fprintf(stderr, "[moe-rms] pos=%d layer=%d rms=%.4e maxabs=%.4e\n",
+                        pos, l, rms, maxabs);
+            }
+
             /* Gemma: MoE output uses post_ffw_norm if present. */
             if (is_gemma3) {
                 float* moe_post_norm = layer->post_ffn_norm_1 ? layer->post_ffn_norm_1 : layer->post_ffn_norm;
@@ -3209,6 +3227,22 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
             /* Flush w_down GPU dispatch before CPU reads xb2 for post-FFN norm / residual */
             tq_metal_batch_flush_if_available();
             TQ_PROF_STOP(_tp, matmul_ns);
+
+            /* TQ_MOE_RMS_PROBE=1: dense-FFN RMS probe (4B baseline trajectory).
+             * Same format as MoE probe — enables direct per-layer comparison. */
+            if (getenv("TQ_MOE_RMS_PROBE")) {
+                double ss = 0.0;
+                float maxabs = 0.0f;
+                for (int i = 0; i < dim; i++) {
+                    float v = s->xb2[i];
+                    ss += (double)v * v;
+                    float a = v < 0 ? -v : v;
+                    if (a > maxabs) maxabs = a;
+                }
+                float rms = (float)sqrt(ss / (double)dim);
+                fprintf(stderr, "[dense-rms] pos=%d layer=%d rms=%.4e maxabs=%.4e\n",
+                        pos, l, rms, maxabs);
+            }
 
             /* Gemma: apply post-FFN norm if present. */
             if (is_gemma3) {
