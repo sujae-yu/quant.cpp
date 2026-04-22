@@ -3,6 +3,38 @@
 **Last updated**: 2026-04-22 (R47 — 35B 1000-tok attempt FAILED, engine-precision bug confirmed)
 **Session HEAD**: User demanded 1000+ tok on 35B this session. Tried 4 approaches — all failed well short (max 132 tok before attractor). 35B MoE precision drift is real and beyond env-tuning fix. Requires multi-round surgery (DRY sampler port, per-expert rms probe, DeltaNet β/α Q4_K path).
 
+## R48 loop — autonomous repeat until 1000-tok (2026-04-22)
+
+User: "도달할때까지, 세션과 무관하게 반복 루프 실행"
+Self-paced `/loop` started. Each round: measure, analyze, implement one
+hypothesis, rebuild, re-measure, commit. 30+ rounds tolerated.
+
+### Round 1 — DRY sampler port (landed commit 1417e98)
+
+- Ported from refs/llama.cpp: Z-algorithm-based exponential n-gram penalty
+- CLI: --dry-multiplier, --dry-base, --dry-allowed-length, --dry-penalty-last-n
+- Default: disabled (multiplier=0) for back-compat
+
+35B results on "Once upon a time in a faraway land", thinking-on, T=0:
+
+| Config | tok generated | attractor shape |
+|---|---:|---|
+| no DRY (baseline) | 132 | word-repeat `"once" "upon" "a"...` |
+| --dry-multiplier 0.8 | 98 | pushed EOS earlier |
+| --dry-multiplier 2.0 | 147 | **BEST**, shifts to `"4.5.6.7.8.9..."` + "pause" |
+
+Conclusion: DRY ADDS +15 tok over baseline but does NOT unblock target.
+Attractor SHAPE changes per penalty config → confirms drift is in
+forward-pass internal state, NOT in sampling distribution. Sampling
+mitigations hit diminishing returns. Round 2 must go into forward pass.
+
+### Round 2 next step (planned)
+
+Per-expert output RMS probe: instrument `output += weight[k] * expert_out[k]`
+in the MoE routed-expert aggregation, dump per-token RMS across all 40
+layers, compare 35B trajectory vs 4B dense FFN rms. First layer where
+RMS diverges systematically from 4B baseline = candidate for surgical fix.
+
 ## R47 — 35B 1000-tok attempt — 4 approaches all fail short of target (2026-04-22)
 
 User: "계속 진행해주세요. 마지막으로 35b 모델에서 1000+ 토큰까지 성공적으로 완료후 완료 보고 바랍니다."
