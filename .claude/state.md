@@ -28,12 +28,29 @@ Attractor SHAPE changes per penalty config → confirms drift is in
 forward-pass internal state, NOT in sampling distribution. Sampling
 mitigations hit diminishing returns. Round 2 must go into forward pass.
 
-### Round 2 next step (planned)
+### Round 2 — TQ_MOE_RMS_PROBE landed (commit a280244)
 
-Per-expert output RMS probe: instrument `output += weight[k] * expert_out[k]`
-in the MoE routed-expert aggregation, dump per-token RMS across all 40
-layers, compare 35B trajectory vs 4B dense FFN rms. First layer where
-RMS diverges systematically from 4B baseline = candidate for surgical fix.
+Instrumented per-layer MoE output RMS + maxabs. Also dense-FFN probe
+for 4B baseline comparison. Data collected:
+
+Key observations:
+- **35B MoE output 5-10× smaller** than 4B dense equivalent (0.12 vs 0.69 at last layer)
+- **Layer 39 consistently highest RMS** (0.1-0.3) with 2-3× intra-layer jumps
+- **Outlier features**: maxabs/RMS ≈ 30× in layers 37-39 (int8-quant research pattern)
+- **Layer 4 shows 10× pos-to-pos RMS variance**
+- **T=1 vs T=2 trade-off**: T=1 gives 76% larger RMS but generation collapses at 26 tok vs 147
+  → problem NOT "MoE too small" — T=2 shrinks outputs AND improves coherence
+
+### Round 3 direction (planned)
+
+MoE aggregation accumulator precision. 30× maxabs/RMS means outlier
+channels per expert. Naive FP32 sum of weighted outputs could
+catastrophically cancel between positive/negative outliers. Test:
+  a) Kahan summation in `output += weight[k] * expert_out[k]` loop
+  b) Separate routed-sum and shared-sum tracking
+  c) Per-expert RMS dump for layer 39 specifically to see which expert
+     produces outlier output
+  d) Compare attn-layer MoE vs DeltaNet-layer MoE (layer 39 is DeltaNet)
 
 ## R47 — 35B 1000-tok attempt — 4 approaches all fail short of target (2026-04-22)
 
