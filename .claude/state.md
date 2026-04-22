@@ -234,6 +234,68 @@ Fix: skip log conversion, use raw values. TQ_DN_ALOG_LEGACY=1 reverts.
 Result: 168 tok vs 147 baseline = +21 tok. **First non-regression in
 9 rounds**, validating the line-by-line vs-llama.cpp approach.
 
+## R51 — 새 전략: variance-first, paradigm shift (2026-04-22 시작)
+
+### 16+ 라운드의 메타 교훈
+
+R48-R50 모든 시도 실패 → **bug-fix 패러다임이 잘못된 framing 일 가능성**.
+Anti-pattern 메모리 노트: feedback_qwen36_anti_patterns.md.
+
+핵심 깨달음:
+- **모든 precision-up fix가 회귀** (FP64, FP32×4): Q4/Q6 noise = regularizer
+- **DeltaNet 자체는 OK**: verbatim llama.cpp port도 실패
+- **Variance ±20-40 tok**: R10의 +21이 noise일 가능성
+- 우리는 **noisy measurement 위에 결정** 쌓아왔음
+
+### R51 새 전략 (4-phase, 20 round budget)
+
+**Goal**: 1000+ coherent tok on Qwen3.6-35B,
+**또는** 객관적 evidence based "이 엔진의 수용 가능 한계는 X tok"
+**중 하나의 결정적 답**.
+
+**Phase 0 (rounds 1-2): Variance characterization**
+- `-j 1` deterministic 모드로 5회 측정, σ 정량화
+- llama.cpp 5회로 ground truth variance
+- Success criterion: σ < 5 tok이면 다음 phase, σ > 30이면 fix 대상이 아예 noise reduction
+- Insight 후보: "16라운드는 signal이 없는 noise 위 작업이었다"
+
+**Phase 1 (rounds 3-5): Stability hypothesis**
+- 만약 Phase 0에서 우리 = wide spread, llama = narrow → fix는 non-determinism 제거
+- TQ_FORCE_SERIAL_MATMUL 강제 + threading off + FMA reduction 순서 fix
+- Success: σ < 5 + mean tok 같거나 향상
+
+**Phase 2 (rounds 6-10): Working case backwards**
+- 4B (185 tok 자연 종료) vs 35B (100-170 collapse) 비교
+- llama.cpp가 35B에서 자연 종료까지 가는 prompt 찾기
+- 그 prompt로 우리 35B 측정 — 자연 종료 vs collapse?
+- 자연 종료한다 → narrowed prompt-dependent issue
+- 여전히 collapse → forward pass 일반 issue
+
+**Phase 3 (rounds 11-15): Different MoE isolation**
+- Qwen3.6 specific인지 general MoE issue인지 분리
+- 후보 모델: Mixtral-8x7B, DeepSeek-V2-Lite, Qwen2.5-MoE
+- 다른 MoE 정상 → DeltaNet × MoE 상호작용 의심
+- 모든 MoE 실패 → MoE routing 일반 의심
+
+**Phase 4 (rounds 16-20): Last resort 결정**
+- (a) 1000-tok 도달 시: 검증 + 일반화 + 안정화
+- (b) 미달 시: known limitation 문서화 + bulk port 평가 또는 product pivot
+
+### Stop conditions
+
+- ✅ 1000+ coherent tok stably (3+ runs, σ < 50)
+- 🛑 20 rounds 소진 + 진전 없음 → 사용자에게 결정 요청
+- ⚠️ 명백한 dead-end 발견 → 새 전략 다시 제안
+
+### Round-by-round 기록 의무
+
+매 라운드:
+1. 시작 시 anti-patterns 메모 확인 (반복 실수 방지)
+2. 가설 + 측정 protocol 명시  
+3. 실행 + 결과 commit
+4. **insight 발견 시 메모리 노트 추가** (cross-session 보존)
+5. Phase 진행 또는 다음 라운드 예약
+
 ## R50-5 fix attempt + honest reassessment (commit 3541c53)
 
 User: "돌파시도바랍니다." Implemented TQ_DELTA_AB_FP32 (skip Q4 quant
