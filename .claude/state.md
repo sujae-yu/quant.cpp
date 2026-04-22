@@ -222,6 +222,32 @@ Proceed with Round 9 (llama.cpp DeltaNet + MoE forward-path transplant)
 with confidence that the target is real. Estimated 3-5 further rounds
 of surgical porting to reconcile our engine path with ggml's.
 
+## R10 — ★ FIRST POSITIVE: raw ssm_a fix +21 tok (147→168) — commit 8c9a5ab
+
+llama.cpp uses ssm_a directly as -exp(a_log) (qwen35moe.cpp:238 comment
+"-A_log.exp() * softplus"). Our historical code did `a_log = log(-ssm_a)`
+at load + `-exp(a_log)` at forward = log+exp roundtrip = precision loss
+that compounded geometrically through DeltaNet recurrence.
+
+Fix: skip log conversion, use raw values. TQ_DN_ALOG_LEGACY=1 reverts.
+
+Result: 168 tok vs 147 baseline = +21 tok. **First non-regression in
+9 rounds**, validating the line-by-line vs-llama.cpp approach.
+
+## R11 — q_scale 1/sqrt(dk) ruled out as removal target — commit 64f66d8
+
+Tested removing our `Q *= 1/sqrt(dk)` since llama.cpp doesn't have
+explicit one. Result: 28 tok garbage. llama.cpp's build_delta_net
+applies it internally. Restored. Doc-only commit.
+
+## Next rounds
+
+Continue line-by-line llama.cpp comparison:
+- L2 norm eps source: ours hardcoded 1e-6, llama.cpp `hparams.f_norm_rms_eps`
+- Gated norm (build_norm_gated): silu(z) gate after RMSNorm — verify our z gate
+- Beta projection: separate `ssm_beta` weight per llama.cpp; we use combined
+- conv1d ordering vs silu
+
 ## R47 — 35B 1000-tok attempt — 4 approaches all fail short of target (2026-04-22)
 
 User: "계속 진행해주세요. 마지막으로 35b 모델에서 1000+ 토큰까지 성공적으로 완료후 완료 보고 바랍니다."
