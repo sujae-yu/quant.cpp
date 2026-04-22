@@ -1,10 +1,19 @@
-## Qwen3.6-A3B 35B Long-Generation: SE-aware preset (R52)
+## Qwen3.6-A3B 35B Long-Generation: SE + DN_NORM_FP64 preset (R53 P3)
 
-### R52 Update (2026-04-23): Super Expert FP32 override is the real fix
+### R53 P3 Update (2026-04-23): DeltaNet RMSNorm FP64 stacks on SE
 
-Replaced R51 ssm_out + LM head + llamacpp_port preset with **per-expert FP32 override** based on outlier-rank super experts. This extends *coherent* portion 30 → 80 tokens (2.7×), the first real coherent improvement on this model.
+Added per-head RMSNorm FP64 accumulation (TQ_DN_NORM_FP64=1) to the R52 SE
+preset. Unlike state/output-path precision fixes (DN_FP64, SSM_OUT_FP32)
+which REGRESS when stacked on SE, normalization-path precision stacks
+additively. Auto-enabled alongside SE on filename match.
 
-Mechanism: 40 routed experts (top-1 per layer by max activation) are kept at FP32, preserving outlier-channel weights that uniform IQ4_XS would clip. Memory cost ~480 MB extra. Per arxiv 2507.23279 "Unveiling Super Experts in MoE LLMs", these specific experts hold load-bearing model state; clipping their weights produces "repetitive uninformative output" — exact symptom of pre-fix attractor.
+### R52 Foundation (SE-aware override)
+
+40 routed experts (top-1 per layer by max activation from a dense-thinking
+calibration prompt) are kept at FP32, preserving outlier-channel weights
+that uniform IQ4_XS would clip. Memory cost ~480 MB extra. Per arxiv
+2507.23279 "Unveiling Super Experts in MoE LLMs", these specific experts
+hold load-bearing model state.
 
 ### Results (deterministic -j 1, "Once upon a time in a faraway land")
 
@@ -12,10 +21,29 @@ Mechanism: 40 routed experts (top-1 per layer by max activation) are kept at FP3
 |---|---:|---:|
 | No preset | 54 | ~30 |
 | R51 preset (ssm_out + LM + lcppport) | 234 | ~30 (extension only) |
-| **R52 SE preset (40 SEs FP32)** | **154** | **~80 (REAL coherent)** |
+| R52 SE preset (40 SEs FP32) | 187 | ~165 |
+| **R53 P3 SE + DN_NORM_FP64 (current)** | **258** | **~195** |
 | llama.cpp same model | ~1500 | ~1500 |
 
-Coherent length is the meaningful metric. R52 gives 2.7× coherent, R51 was 1× coherent.
+R53 P3 is +71 tok / +30 coh over R52 alone.
+
+### Stacking table (what helps vs regresses on top of SE)
+
+| Stacked with SE | Total tok | Verdict |
+|---|---:|---|
+| TQ_DN_NORM_FP64 (group norm) | **258** | ✓ stacks |
+| TQ_DN_FP64 (recurrent state) | 182 | ✗ mild regression |
+| TQ_SSM_OUT_FP32 | 195 | ✗ factual drift earlier |
+| TQ_DN_FP64 + TQ_SSM_OUT_FP32 | 89 | ✗✗ severe regression |
+| -k fp32 (FP32 KV cache) | 131 | ✗ worse than turbo_kv_4b |
+| L2-norm FP64 on Q/K | 191 | ✗ regression |
+
+Observation: **normalization-path precision** (RMSNorm accumulators)
+stacks with SE; **state-path precision** (recurrent FP64, output FP32)
+does not. RMSNorm over dv=128 values × 16 heads × 30 DeltaNet layers × N
+tokens accumulates per-element rounding that compounds; FP64 mantissa
+eliminates it. L2 normalize surprisingly regresses — the Q/K pre-norm
+is sensitive to exact FP32 rounding pattern.
 
 ### Calibration recipe
 
