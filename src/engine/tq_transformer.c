@@ -845,10 +845,11 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
      * R48 round 11 RULED OUT removal: 28 tok garbage. Keep base.
      * R49 Big Move 2: llama.cpp's gated_delta_net (ggml ops.cpp:10551)
      * applies scale to OUTPUT not to Q. TQ_DN_SCALE_OUT=1 matches that
-     * order. Tests if FP operation ordering vs ours diverges. */
+     * order. R49 Big Move 3: TQ_DN_LLAMACPP_PORT also applies on output. */
     int scale_out_mode = (getenv("TQ_DN_SCALE_OUT") != NULL);
+    int llamacpp_port = (getenv("TQ_DN_LLAMACPP_PORT") != NULL);
     float q_scale_inv = 1.0f / sqrtf((float)dk);
-    if (!scale_out_mode) {
+    if (!scale_out_mode && !llamacpp_port) {
         for (int i = 0; i < dn_kv * dk; i++) {
             Q_all[i] *= q_scale_inv;
         }
@@ -865,6 +866,78 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
      *   o = sum_rows(S * Q)         // output = S @ Q -> [dv]
      *
      * State layout: S[h] is [dk, dv] (row-major, S[i][j]) */
+
+    /* R49 Big Move 3: TQ_DN_LLAMACPP_PORT=1 — verbatim port of
+     * refs/llama.cpp/ggml/src/ggml-cpu/ops.cpp:10430-10557
+     * (ggml_compute_forward_gated_delta_net_one_chunk).
+     * Uses TRANSPOSED state layout: state_T[j*dk+i] = S[i][j].
+     * This is the dragon-slaying experiment — if llama.cpp's exact
+     * algorithm with our weights produces 1000+ coherent tok, our
+     * implementation despite line-by-line matching had a hidden bug.
+     * If still fails, bug is OUTSIDE delta_net entirely. */
+    if (getenv("TQ_DN_LLAMACPP_PORT") && dk == dv) {
+        /* Layout: state[h] is dk*dv = S_v*S_v matrix in TRANSPOSED form.
+         * Our existing storage uses sh[i*dv+j] = S[i][j] (row-major over [dk, dv]).
+         * llama.cpp uses s_out[j*S_v+i] = S[i][j] (row-major over [dv, dk] transposed).
+         * Since dk == dv (128 in 35B), in-place transpose IS the same memory.
+         * We use a thread-local scratch transpose for safety. */
+        const int S_v = dv;  /* = dk in qwen35moe (square) */
+        const float scale = 1.0f / sqrtf((float)S_v);
+        float scratch_state[256 * 256];  /* dv*dv max */
+        float delta_buf[256];
+
+        for (int h = 0; h < dn; h++) {
+            int kv_group = h % dn_kv;
+            const float* k_d = K_all + kv_group * dk;
+            const float* v_d = V_all + h * dv;
+            const float* q_d = Q_all + kv_group * dk;
+            const float beta_val = s->delta_ab[dn + h];
+            const float g_val = gate_vals[h];  /* scalar GDA branch */
+
+            /* Copy our state (sh[i*dv+j]) to scratch in transposed form (s_T[j*dk+i]) */
+            float* sh = state + (size_t)h * dk * dv;
+            for (int i = 0; i < dk; i++)
+                for (int j = 0; j < dv; j++)
+                    scratch_state[j * dk + i] = sh[i * dv + j];
+            float* s_out = scratch_state;
+
+            /* Decay (GDA branch): scale entire matrix by exp(g) */
+            float decay_scalar = expf(g_val);
+            for (int idx = 0; idx < S_v * S_v; idx++)
+                s_out[idx] *= decay_scalar;
+
+            /* delta[j] = (v[j] - sum_i s_out[j*S_v+i]*k[i]) * beta */
+            for (int j = 0; j < S_v; j++) {
+                float sum = 0.0f;
+                const float* row = &s_out[j * S_v];
+                for (int i = 0; i < S_v; i++) sum += row[i] * k_d[i];
+                delta_buf[j] = (v_d[j] - sum) * beta_val;
+            }
+
+            /* outer: s_out[j*S_v+i] += k_d[i] * delta[j] */
+            for (int j = 0; j < S_v; j++) {
+                float* row = &s_out[j * S_v];
+                float dj = delta_buf[j];
+                for (int i = 0; i < S_v; i++) row[i] += k_d[i] * dj;
+            }
+
+            /* attn_out[j] = sum_i s_out[j*S_v+i] * q[i] * scale */
+            float* oh = s->delta_out + h * dv;
+            for (int j = 0; j < S_v; j++) {
+                float sum = 0.0f;
+                const float* row = &s_out[j * S_v];
+                for (int i = 0; i < S_v; i++) sum += row[i] * q_d[i];
+                oh[j] = sum * scale;
+            }
+
+            /* Write back to our state layout: sh[i*dv+j] = s_T[j*dk+i] */
+            for (int i = 0; i < dk; i++)
+                for (int j = 0; j < dv; j++)
+                    sh[i * dv + j] = scratch_state[j * dk + i];
+        }
+        TQ_PROF_STOP(_tp, recurrent_ns);
+        goto deltanet_step8;
+    }
 
     /* R49: FP64 reference path. When TQ_DN_FP64=1 set at state creation,
      * execute entire delta rule in double precision using the FP64 mirror
