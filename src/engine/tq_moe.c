@@ -705,6 +705,14 @@ void tq_moe_forward(const tq_moe_layer_t* layer,
     /* Step 2: Zero the output accumulator */
     memset(output, 0, (size_t)hidden_dim * sizeof(float));
 
+    /* Kahan compensation buffer for MoE aggregation. Opt-in via
+     * TQ_MOE_KAHAN=1. R48 round 3 empirically tested on Qwen3.6-35B:
+     * 126 tok vs 147 tok baseline (NOT an improvement; catastrophic
+     * cancellation hypothesis RULED OUT for this model). Kept as opt-in
+     * for future investigation or different MoE architectures. */
+    float moe_kahan_comp[4096] = {0};
+    int use_kahan = (hidden_dim <= 4096) && (getenv("TQ_MOE_KAHAN") != NULL);
+
 #ifdef TQ_HAS_ACCELERATE
     g_cblas_token++;
 #endif
@@ -916,18 +924,30 @@ moe_cpu_fallback: ;
             float exp_scale = (layer->expert_scale) ? layer->expert_scale[eid] : 1.0f;
             float ws = w * exp_scale;
             float* eout = tasks[k].scratch_out;
-            int i = 0;
+            if (use_kahan) {
+                /* Scalar Kahan for parallel path — NEON FMA can't easily
+                 * track the compensation term, so fall back to scalar
+                 * when Kahan is enabled. */
+                for (int i = 0; i < hidden_dim; i++) {
+                    float y = ws * eout[i] - moe_kahan_comp[i];
+                    float t = output[i] + y;
+                    moe_kahan_comp[i] = (t - output[i]) - y;
+                    output[i] = t;
+                }
+            } else {
+                int i = 0;
 #ifdef __ARM_NEON
-            float32x4_t vws = vdupq_n_f32(ws);
-            for (; i + 3 < hidden_dim; i += 4) {
-                float32x4_t vo = vld1q_f32(output + i);
-                float32x4_t ve = vld1q_f32(eout + i);
-                vo = vmlaq_f32(vo, ve, vws);
-                vst1q_f32(output + i, vo);
-            }
+                float32x4_t vws = vdupq_n_f32(ws);
+                for (; i + 3 < hidden_dim; i += 4) {
+                    float32x4_t vo = vld1q_f32(output + i);
+                    float32x4_t ve = vld1q_f32(eout + i);
+                    vo = vmlaq_f32(vo, ve, vws);
+                    vst1q_f32(output + i, vo);
+                }
 #endif
-            for (; i < hidden_dim; i++)
-                output[i] += ws * eout[i];
+                for (; i < hidden_dim; i++)
+                    output[i] += ws * eout[i];
+            }
         }
         goto moe_shared_expert;
     }
@@ -1072,8 +1092,17 @@ moe_cpu_fallback: ;
          * Gemma 4 has per-expert output scaling (ffn_down_exps.scale). */
         float exp_scale = (layer->expert_scale) ? layer->expert_scale[eid] : 1.0f;
         float ws = w * exp_scale;
-        for (int i = 0; i < hidden_dim; i++)
-            output[i] += ws * state->expert_out[i];
+        if (use_kahan) {
+            for (int i = 0; i < hidden_dim; i++) {
+                float y = ws * state->expert_out[i] - moe_kahan_comp[i];
+                float t = output[i] + y;
+                moe_kahan_comp[i] = (t - output[i]) - y;
+                output[i] = t;
+            }
+        } else {
+            for (int i = 0; i < hidden_dim; i++)
+                output[i] += ws * state->expert_out[i];
+        }
     }
 
 #ifdef TQ_HAS_METAL
@@ -1130,8 +1159,17 @@ moe_shared_expert:
             tq_metal_batch_flush_if_available();
         }
 
-        for (int i = 0; i < hidden_dim; i++)
-            output[i] += shared_gate_val * state->expert_out[i];
+        if (use_kahan) {
+            for (int i = 0; i < hidden_dim; i++) {
+                float y = shared_gate_val * state->expert_out[i] - moe_kahan_comp[i];
+                float t = output[i] + y;
+                moe_kahan_comp[i] = (t - output[i]) - y;
+                output[i] = t;
+            }
+        } else {
+            for (int i = 0; i < hidden_dim; i++)
+                output[i] += shared_gate_val * state->expert_out[i];
+        }
     }
 }
 
