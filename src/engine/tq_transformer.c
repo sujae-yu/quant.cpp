@@ -1204,12 +1204,24 @@ deltanet_step8:
         }
     }
 
-    /* Step 8: Apply group norm (per-head RMSNorm), then z gate (swish), then output projection */
+    /* Step 8: Apply group norm (per-head RMSNorm), then z gate (swish), then output projection.
+     * R53 P2 R14-b: optional FP64 RMSNorm accumulation via TQ_DN_NORM_FP64=1.
+     * Hypothesis: per-head ss accumulation over dv=128 values can lose
+     * ~1e-7 precision per layer × 30 layers × 200 tokens. */
+    static int dn_norm_fp64 = -1;
+    if (dn_norm_fp64 == -1) dn_norm_fp64 = getenv("TQ_DN_NORM_FP64") ? 1 : 0;
     for (int h = 0; h < dn; h++) {
         float* oh = s->delta_out + h * dv;
 
         /* RMSNorm with delta_norm weights */
         float ss = 0.0f;
+        if (dn_norm_fp64) {
+            double ss_d = 0.0;
+            for (int j = 0; j < dv; j++) ss_d += (double)oh[j] * (double)oh[j];
+            double inv_rms_d = 1.0 / sqrt(ss_d / (double)dv + (double)c->rms_norm_eps);
+            for (int j = 0; j < dv; j++)
+                oh[j] = (float)((double)oh[j] * inv_rms_d * (double)layer->delta_norm[j]);
+        } else {
 #ifdef __ARM_NEON
         {
             float32x4_t vss = vdupq_n_f32(0.0f);
@@ -1230,6 +1242,7 @@ deltanet_step8:
         float inv_rms = 1.0f / sqrtf(ss);
         for (int j = 0; j < dv; j++) {
             oh[j] = oh[j] * inv_rms * layer->delta_norm[j];
+        }
         }
 
         /* Multiply by swish(z) for this head.

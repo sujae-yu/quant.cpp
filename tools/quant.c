@@ -428,6 +428,14 @@ int main(int argc, char** argv) {
                         "(40 super experts FP32, ~480 MB extra). "
                         "Set TQ_QWEN35MOE_NO_PRESET=1 to opt out.\n");
             }
+            /* R53 P3 R14-b: DeltaNet per-head RMSNorm in FP64.
+             * Stacks additively with SE override (+62 tok, +30 coh).
+             * Standalone gain w/o SE is noise; with SE it's real. */
+            if (!getenv("TQ_DN_NORM_FP64")) {
+                setenv("TQ_DN_NORM_FP64", "1", 0);
+                fprintf(stderr, "tq_main: qwen35moe DN_NORM_FP64 auto-enabled "
+                        "(per-head RMSNorm in FP64, negligible memory).\n");
+            }
         }
     }
 
