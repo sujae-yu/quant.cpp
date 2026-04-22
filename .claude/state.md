@@ -3,6 +3,81 @@
 **Last updated**: 2026-04-22 (Phase 2 KV clean-bill)
 **Session HEAD**: turbo_kv_4b per-arch per-layer clean-bill LANDED via chunked TQ_KV_PROBE. 7×/+0% PPL claim now validated element-by-element across Llama, Qwen3-0.6B, Qwen3.5-4B, Qwen3.6-35B.
 
+## Phase 3 R44 — 1000-tok hunt: engine-gap confirmed, shared-expert fix +20%, remaining gap is MoE-internal (2026-04-22)
+
+User pushback ("Q4 is common — why fail?") correctly identified engine
+bug, not architecture. R43 fix: disable shared-expert double-quant for
+qwen35moe arch. +20% coherent window on short prompts (170→204 tok).
+
+R44 investigation: what else is engine-specific?
+
+### Quantitative 4B-vs-35B gap measurement (63-tok prefill, n=500, same prompt)
+
+| Model | Post-fixes coherent gen | Total position |
+|---|---:|---:|
+| Qwen3.5-4B (dense hybrid, no MoE) | 347 tokens | 410 |
+| Qwen3.6-35B UD-IQ4_XS (MoE hybrid) | ~65 tokens | 128 |
+| Qwen3.6-35B UD-Q5_K_M (MoE hybrid) | ~65 tokens | ~128 |
+| **Ratio** | **4B is 5× better** | — |
+
+Both hybrids have DeltaNet. Only 35B has MoE. Both hit a loop eventually
+but 35B hits it MUCH sooner. Some MoE-specific precision loss remains.
+
+### TEMP sweep on long prefill (revealing distinct attractors)
+
+| TEMP | behavior |
+|---:|:---|
+| 1.0 | "3 4 5 6 7 8..." number-sequence crash in 10 tok |
+| 1.5 | "A dragon. A dragon" loop at 66 tok |
+| 2.0 | `**The End.**` — model emits EOS (prompt feels complete) |
+| 2.5 | "898989" corruption at 58 tok |
+
+Each TEMP reveals a different failure mode. No temperature fully fixes
+the 35B MoE + long-prefill situation.
+
+### What's NOT the cause (eliminated)
+
+- KV cache quantization (`-k none` same output)
+- TQ_NO_Q4=1 conversion bypass (only catches non-MoE weights)
+- Router softmax temp (swept, none fix)
+- rep-penalty (no effect on MoE loops)
+- k-window (no effect)
+- Shared expert double-quant (fixed in R43, +20% but not full)
+- Attention output gate (matches llama.cpp exactly)
+- chat template (both Thinking and Instruct modes handled)
+- QK-norm OFF for hybrid (empirically beats ON)
+- partial_rotary (hardcoded 0.25 for hybrid)
+- attention layers' Q8_0 conversion (auto-skipped)
+
+### What's still suspect
+
+Engine has ~20+ code paths that could each have a subtle precision
+difference vs llama.cpp. Candidates still unvetted:
+- Routed expert runtime dispatch (mmap on-the-fly GGUF dequant — should
+  match llama.cpp but details of accumulator precision unchecked)
+- MoE output aggregation: `output[i] += weight[k] * expert_out[k]`
+  per-expert then per-layer. FP32 throughout, but still 8 experts ×
+  40 layers × 500 tokens = potential summation-order drift
+- DeltaNet β, α computation under Q4_K for a_log weight
+- LM head logits computation at long positions (Q8_0 matmul accumulator)
+
+### Honest status
+
+1000-tok coherent on 35B NOT achieved this session. Moved from 117
+(pre-v0.28.0) to 204 (post-R43). Real progress but ceiling is
+session-exhaustible only with more hunting for engine-specific
+precision paths MoE-wise.
+
+### Next-session attack vectors
+
+1. Run llama.cpp on the same 35B + same prompt — establish absolute
+   reference for what's achievable at this weight. If llama.cpp gets
+   1000+ coherent, the gap IS engine-specific and surgery continues.
+   If llama.cpp also hits ~300, this quant+arch combo has inherent limit.
+2. Port DRY sampler — non-negotiable community-standard mitigation.
+3. Bisect MoE routed-expert path: add a probe that dumps per-token
+   expert output rms and compares to 4B dense FFN rms trajectory.
+
 ## Phase 3 R42 — Cross-validation of H1-H3 hypotheses from R41 (2026-04-22)
 
 All six architecture-grounded hypotheses from R41 cross-verified
