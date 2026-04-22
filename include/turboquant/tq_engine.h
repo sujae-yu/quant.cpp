@@ -327,6 +327,11 @@ typedef struct {
 
     /* DeltaNet recurrent state */
     float* delta_state;  /* [n_layers, delta_n_heads, key_head_dim, value_head_dim] */
+    /* R49: optional FP64 mirror for DeltaNet recurrent state. Allocated when
+     * TQ_DN_FP64=1 set at state creation. Cumulative state update precision
+     * over 100+ tokens × 30 DeltaNet layers is the suspected coherence ceiling
+     * cause; FP64 eliminates the ~10^-7 per-step rounding compounding. */
+    double* delta_state_fp64;
     float* conv_state;   /* [n_layers, qkv_dim, conv_width-1] */
 
     /* DeltaNet workspace buffers */

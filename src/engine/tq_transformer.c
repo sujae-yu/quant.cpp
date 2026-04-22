@@ -298,6 +298,17 @@ tq_state_t* tq_create_state_ex(const tq_model_config_t* config, tq_type kv_type,
         int dv = config->delta_value_head_dim;
         /* State: [n_layers, delta_n_heads, key_head_dim, value_head_dim] */
         s->delta_state = (float*)calloc((size_t)n_layers * dn * dk * dv, sizeof(float));
+        /* R49: optional FP64 mirror — TQ_DN_FP64=1 enables.
+         * 8 bytes per float × 30 layers × 32 heads × 128 × 128 = 120 MB.
+         * Manageable on 16 GB. Eliminates per-step FP32 rounding compounding. */
+        s->delta_state_fp64 = NULL;
+        if (getenv("TQ_DN_FP64")) {
+            s->delta_state_fp64 = (double*)calloc((size_t)n_layers * dn * dk * dv, sizeof(double));
+            if (s->delta_state_fp64) {
+                fprintf(stderr, "tq_state: TQ_DN_FP64 enabled — %.1f MB extra delta_state in FP64\n",
+                        (double)((size_t)n_layers * dn * dk * dv * sizeof(double)) / (1024.0*1024.0));
+            }
+        }
         /* Conv state: [n_layers, qkv_dim, conv_width-1] */
         int conv_buf_size = config->delta_conv_width - 1;
         if (conv_buf_size < 1) conv_buf_size = 1;
@@ -404,6 +415,7 @@ void tq_free_state(tq_state_t* state) {
     free(state->value_cache_qs);
     free(state->value_cache_scales);
     free(state->delta_state);
+    free(state->delta_state_fp64);
     free(state->conv_state);
     free(state->delta_qkv);
     free(state->delta_z);
@@ -830,12 +842,15 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
     }
 
     /* Step 6: Scale Q by 1/sqrt(head_dim).
-     * R48 round 11 RULED OUT: llama.cpp's build_delta_net applies this
-     * scaling internally (we tested removal: 28 tok garbage). Keep ours. */
-    {
-        float q_scale = 1.0f / sqrtf((float)dk);
+     * R48 round 11 RULED OUT removal: 28 tok garbage. Keep base.
+     * R49 Big Move 2: llama.cpp's gated_delta_net (ggml ops.cpp:10551)
+     * applies scale to OUTPUT not to Q. TQ_DN_SCALE_OUT=1 matches that
+     * order. Tests if FP operation ordering vs ours diverges. */
+    int scale_out_mode = (getenv("TQ_DN_SCALE_OUT") != NULL);
+    float q_scale_inv = 1.0f / sqrtf((float)dk);
+    if (!scale_out_mode) {
         for (int i = 0; i < dn_kv * dk; i++) {
-            Q_all[i] *= q_scale;
+            Q_all[i] *= q_scale_inv;
         }
     }
 
@@ -850,6 +865,63 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
      *   o = sum_rows(S * Q)         // output = S @ Q -> [dv]
      *
      * State layout: S[h] is [dk, dv] (row-major, S[i][j]) */
+
+    /* R49: FP64 reference path. When TQ_DN_FP64=1 set at state creation,
+     * execute entire delta rule in double precision using the FP64 mirror
+     * of state. This eliminates per-step ~1e-7 rounding that compounds
+     * over 100+ tokens × 30 layers. Definitive test for the
+     * "precision-cumulative drift" hypothesis. */
+    if (s->delta_state_fp64) {
+        double* state_fp64 = s->delta_state_fp64 + (size_t)l * dn * dk * dv;
+        double sk_d[256];   /* dv max 128, 256 safe */
+        double dvec_d[256];
+        double oh_d[256];
+        for (int h = 0; h < dn; h++) {
+            int kv_group = h % dn_kv;
+            float* qh = Q_all + kv_group * dk;
+            float* kh = K_all + kv_group * dk;
+            float* vh = V_all + h * dv;
+            double* sh_d = state_fp64 + (size_t)h * dk * dv;
+            double beta_h = (double)s->delta_ab[dn + h];
+            double decay  = (double)decay_vals[h];
+
+            /* Decay state and accumulate sk */
+            for (int j = 0; j < dv; j++) sk_d[j] = 0.0;
+            for (int i = 0; i < dk; i++) {
+                double* sp_d = sh_d + (size_t)i * dv;
+                double ki = (double)kh[i];
+                for (int j = 0; j < dv; j++) {
+                    sp_d[j] *= decay;
+                    sk_d[j] += sp_d[j] * ki;
+                }
+            }
+            /* Delta = beta * (V - sk) */
+            for (int j = 0; j < dv; j++) {
+                dvec_d[j] = beta_h * ((double)vh[j] - sk_d[j]);
+            }
+            /* State update + output: simultaneously
+             * sp[j] += K[i] * d[j], oh[j] += sp[j] * Q[i] */
+            for (int j = 0; j < dv; j++) oh_d[j] = 0.0;
+            for (int i = 0; i < dk; i++) {
+                double* sp_d = sh_d + (size_t)i * dv;
+                double ki = (double)kh[i];
+                double qi = (double)qh[i];
+                for (int j = 0; j < dv; j++) {
+                    sp_d[j] += ki * dvec_d[j];
+                    oh_d[j] += sp_d[j] * qi;
+                }
+            }
+            /* Write output as FP32 for downstream code */
+            float* oh = s->delta_out + h * dv;
+            for (int j = 0; j < dv; j++) oh[j] = (float)oh_d[j];
+            /* Mirror to FP32 state for any code that reads it (probes etc) */
+            float* sh = state + (size_t)h * dk * dv;
+            for (size_t i = 0; i < (size_t)dk * dv; i++) sh[i] = (float)sh_d[i];
+        }
+        TQ_PROF_STOP(_tp, recurrent_ns);
+        goto deltanet_step8;
+    }
+
     for (int h = 0; h < dn; h++) {
         int kv_group = h % dn_kv; /* tiled V-head order: GGUF reorders V-heads for ggml broadcast */
         float* qh = Q_all + kv_group * dk;
@@ -996,6 +1068,15 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
     }
 
     TQ_PROF_STOP(_tp, recurrent_ns);
+
+deltanet_step8:
+    /* R49 Big Move 2: if scale_out_mode, apply 1/sqrt(dk) to delta_out
+     * here (matches llama.cpp's apply-on-output ordering). */
+    if (scale_out_mode) {
+        for (int i = 0; i < dn * dv; i++) {
+            s->delta_out[i] *= q_scale_inv;
+        }
+    }
 
     /* Step 8: Apply group norm (per-head RMSNorm), then z gate (swish), then output projection */
     for (int h = 0; h < dn; h++) {
