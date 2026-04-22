@@ -133,16 +133,44 @@ The 147-tok baseline is a **local optimum** in our current parameter
 space. Single-op perturbations shift attractor position without
 widening the coherent window.
 
-### Round 8 direction (planned)
+### Round 8 — state clipping FAILS too (commit d86dca8)
 
-State magnitude clipping — not a precision change, but a stability
-intervention. If `|state| > threshold`, clip: `state *= threshold/|state|`.
-This preserves dynamics but prevents unbounded growth. If llama.cpp
-has implicit clipping via different dtype choices downstream, this
-might bridge the gap.
+TQ_DN_STATE_CLIP tested at 0.05, 0.10, 0.20:
+  clip=0.05:  72 tok (-75)
+  clip=0.10: 127 tok (-20)
+  clip=0.20:  52 tok (-95)
 
-Alternative if clipping fails: direct llama.cpp DeltaNet code
-transplant.
+All regress. Insight: DeltaNet has **group norm after per-head loop**
+that normalizes state-derived output to standard scale. So state
+magnitude drift is harmless; what matters is state DIRECTION (semantic
+info encoded). Clipping changes magnitude but preserves direction —
+which is why it doesn't fix anything.
+
+### 7-round intervention summary
+
+| Round | Intervention | Delta |
+|---|---|---:|
+| 3 | Kahan MoE agg        | -21 |
+| 6 | FP32 LM head         | -93 |
+| 7 | decay × 0.99         | -93 |
+| 8 | state clip 0.05      | -75 |
+| 8 | state clip 0.10      | -20 |
+| 8 | state clip 0.20      | -95 |
+
+All 7 localized interventions fail. 147 tok is a **local maximum**
+in the current parameter space.
+
+### Round 9 direction
+
+Only realistic remaining path: **llama.cpp DeltaNet+MoE forward-path
+transplant**. Copy the delta rule update and surrounding projections
+from `refs/llama.cpp/src/models/qwen35moe.cpp` directly; align our
+GGUF weight access to their ggml dispatch; reconcile at the hidden
+state + residual boundary.
+
+This is a significant engineering effort (hundreds of LOC, multiple
+rounds of fixes). Alternative: acknowledge the 147-tok ceiling as
+a known limitation pending architectural surgery.
 
 ## R47 — 35B 1000-tok attempt — 4 approaches all fail short of target (2026-04-22)
 
