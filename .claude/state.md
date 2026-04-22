@@ -234,6 +234,60 @@ Fix: skip log conversion, use raw values. TQ_DN_ALOG_LEGACY=1 reverts.
 Result: 168 tok vs 147 baseline = +21 tok. **First non-regression in
 9 rounds**, validating the line-by-line vs-llama.cpp approach.
 
+## R50-5 fix attempt + honest reassessment (commit 3541c53)
+
+User: "돌파시도바랍니다." Implemented TQ_DELTA_AB_FP32 (skip Q4 quant
+of alpha/beta projections). Tested on 35B long-gen.
+
+### Fix attempt result
+
+  Default Q4 (legacy):    127-168 tok (HIGH RUN-TO-RUN VARIANCE)
+  TQ_DELTA_AB_FP32=1:      71 tok (regression)
+
+Same pattern as R6 (FP32 LM head) and R7 (FP64 DeltaNet): more
+precision in any single op = worse 35B long-gen output. Q4/Q6 noise
+acts as regularizer.
+
+### Critical discovery: variance issue
+
+R10's "168 tok" baseline is NOT reproducible at exact same commit.
+Re-running checkout 8c9a5ab gave 127 tok. The R10 +21 tok improvement
+may be partially or fully within variance.
+
+NEON FMA reduction order is non-deterministic across runs (cache
+state, thread interleaving). For Q4 dot products on 35B, this
+variance is significant (±20-40 tok possible).
+
+### Honest position after R48 + R49 + R50 (16+ rounds)
+
+Definite achievements:
+- DeltaNet ruled out via verbatim llama.cpp port (R49)
+- Layer 0 divergence found via paired trace (R50)
+- Sub-op trace shows alpha matmul matches llama 0.5%, conv1d 0.08%
+- ssm_out matmul precision NOT the issue (FP32 dequant did nothing)
+
+Open mysteries:
+- Q post-L2-norm sum 2.45× larger than llama (worth pursuing)
+- Why every precision-fix regresses long-gen
+
+The "168 vs 147" framing was overstated due to variance. Real R10
+effect is +0~30 tok at best, possibly within noise.
+
+### R50 tool legacy
+
+- TQ_LAYER_TRACE=1: per-layer + per-DN-substep sum dump
+- TQ_DELTA_AB_FP32=1: opt-in FP32 alpha/beta (regresses 35B)
+- TQ_SSM_OUT_FP32=1: opt-in FP32 ssm_out (no effect)
+- refs/llama.cpp/build/bin/llama-debug: ground-truth comparator
+
+### Next session realistic plan
+
+Drop chase for "1000+ tok on 35B" via single-line precision fixes —
+proven ineffective and possibly chasing variance. Pivot to either:
+1. Element-wise paired comparison of Q values (identify L2-norm 2× bug)
+2. Bulk port of llama.cpp's complete forward path (multi-day commitment)
+3. Accept 100-170 tok as 35B's stable range and document as known limit
+
 ## ★★★ R50 — Side-by-side intermediate state diff localizes bug to alpha/beta projection (commit 8e4d85b)
 
 이번 세션 1순위 작업 (paired trace vs llama.cpp) 실행. 결정적 진전.
