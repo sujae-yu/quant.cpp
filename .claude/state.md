@@ -3,6 +3,62 @@
 **Last updated**: 2026-04-22 (Phase 2 KV clean-bill)
 **Session HEAD**: turbo_kv_4b per-arch per-layer clean-bill LANDED via chunked TQ_KV_PROBE. 7×/+0% PPL claim now validated element-by-element across Llama, Qwen3-0.6B, Qwen3.5-4B, Qwen3.6-35B.
 
+## ★★★ Phase 3 R45 — llama.cpp HEAD-TO-HEAD: 1000+ tok ACHIEVABLE on 35B, our engine has 23× gap (2026-04-22) ★★★
+
+User demanded: "1000+ tok 안될 게 없어 보입니다... 세션 한계에서 멈추지 말고 돌파."
+
+Built llama.cpp from refs/ and ran head-to-head on identical models:
+
+| Setup | Engine | Coherent output |
+|---|---|---:|
+| Qwen3.5-4B Q4_K_M, "Once upon a time in a faraway land", n=2000, T=0 | **llama.cpp** | **1286 words (~1700 tok)** |
+| Same | Ours | 185 tok (naturally stopped) |
+| Qwen3.6-35B UD-IQ4_XS, same prompt, n=2000, T=0, **CPU** | **llama.cpp** | **1101 words (~1500 tok), complete fantasy story** |
+| Same | Ours | ~65 tok |
+
+**1000+ IS achievable.** llama.cpp produced a **complete narrative with character,
+companion, quest, and resolution**, plus offered to continue — from an identical
+7-token prompt on IDENTICAL quantized weights, SAME CPU.
+
+Our gap: ~23× on 35B, ~10× on 4B. Not architectural. Implementation.
+
+### What was false hypothesis all along
+
+My R41-R42 research concluded "all patchable candidates already correctly
+implemented". That was a POINT check on attention gate, RoPE, QK-norm,
+RMSNorm formula — which were correct. But POINT correctness doesn't
+mean END-TO-END correctness. Numerical precision compounds differently
+when 40 layers × 1000 tokens push small per-step errors into attractors.
+
+### Next-step hypothesis (now pointed and testable)
+
+Root cause must be one of (ranked):
+
+1. **Our GGUF on-the-fly dequant matmul precision** — we do
+   tq_matmul_gguf which dequants Q4_K block → FP32 → multiplies by
+   activation. llama.cpp may do fused-dequant-matmul with different
+   accumulator ordering (ggml's highly-tuned CPU kernels).
+2. **Our KV compression (turbo_kv_4b default)** — we tested `-k none`
+   but that still uses our attention softmax path. llama.cpp might have
+   different attention precision even on FP32 KV.
+3. **Our matmul threading / reduction order** — we auto-serial for
+   determinism, but summation order within the single thread may still
+   differ from llama.cpp's.
+4. **EOS/stop-token handling** — our engine may emit EOS-ID tokens
+   earlier due to sharper logit peaking.
+
+Next round: diff our 35B output with llama.cpp's at EACH token position
+to find where the first divergence occurs. Then narrow to the specific
+operation that differs.
+
+### The one metric that matters
+
+llama.cpp 35B: 1500 tokens coherent complete story.
+Ours 35B: 65 tokens partial story then loop.
+
+**Goal reset: close the 23× gap on 35B long-gen.** Not "improve a bit"
+— fully match llama.cpp quality. User confirmed the target is correct.
+
 ## Phase 3 R44 — 1000-tok hunt: engine-gap confirmed, shared-expert fix +20%, remaining gap is MoE-internal (2026-04-22)
 
 User pushback ("Q4 is common — why fail?") correctly identified engine
