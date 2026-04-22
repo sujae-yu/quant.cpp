@@ -1,7 +1,119 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-22 (Phase 2 KV clean-bill)
-**Session HEAD**: turbo_kv_4b per-arch per-layer clean-bill LANDED via chunked TQ_KV_PROBE. 7×/+0% PPL claim now validated element-by-element across Llama, Qwen3-0.6B, Qwen3.5-4B, Qwen3.6-35B.
+**Last updated**: 2026-04-22 (R46 — R45 narrative CORRECTED)
+**Session HEAD**: R45 "23× gap" found to be partially confounded by chat-template thinking-mode mismatch, not pure engine precision gap. Real 35B engine issue reduced but still exists. Clean apples-to-apples needed.
+
+## ★ Phase 3 R46 — R45 correction: thinking-mode confound explains most 4B gap, 35B gap still real but smaller (2026-04-22) ★
+
+User said "계속 진행해주세요" to continue R45's 1000-tok hunt.
+
+**R45 reproduction attempt revealed the gap was mostly a methodology artifact:**
+
+- Ran Qwen3.5-4B Q4_K_M with `--chat` on our engine, identical prompt
+  "Once upon a time in a faraway land", T=0, -n 200, CPU.
+- Our engine output: 185 tok of **direct** story ("Aethelgard... Elara...
+  Would you like to hear more about her adventures?") — natural EOS.
+- llama.cpp in the R45 test: 1700 tok of **chat+think** output —
+  `<think>Here's a thinking process that leads...` followed by
+  analysis, drafts, final answer.
+
+**These are different tasks, not a precision gap:**
+
+- Our `tools/quant.c:1403` Qwen3.5 default chat template is:
+  `<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n`
+  (no `<think>` priming)
+- `quant.h:16289` also **actively suppresses `<think>` token** via
+  logit mask → model cannot enter thinking mode even if it wanted to.
+- llama.cpp processes the jinja chat template which defaults to
+  `enable_thinking=True` → emits assistant prefix with `<think>\n...`.
+- Result: llama.cpp gets thinking-trace (hundreds of tok) + drafts
+  (hundreds of tok) + final answer (hundreds of tok) = 1500-1700 tok.
+- Ours gets direct answer only = 150-250 tok.
+
+**This choice was intentional** for CLI responsiveness (user asking
+"Once upon a time" wants a story, not 1500 tok of reasoning). But it
+completely confounded the R45 long-gen comparison.
+
+### Revised gap picture
+
+| Model | llama.cpp | Ours (thinking-off) | True engine gap? |
+|---|---:|---:|:---|
+| Qwen3.5-4B Q4_K_M | 1700 tok (think+drafts+story) | 185 tok (direct story) | UNCLEAR — need llama.cpp thinking-OFF |
+| Qwen3.6-35B UD-IQ4_XS | 1500 tok (think+drafts+story) | ~65 tok | STILL REAL — 4B gets 185 but 35B only 65, larger model should not be shorter |
+
+### Remaining hypothesis (narrowed)
+
+The 35B specifically is short even in thinking-OFF direct-answer mode.
+4B direct-answer mode reaches 185 tok naturally; 35B reaches only 65 tok
+before hitting "Sorry!" attractor. This IS an engine issue, but
+quantitatively ~3× on 35B, not 23×. Most likely MoE-specific:
+
+- MoE routed-expert output aggregation (dimension/bf16 accumulator)
+- Shared-expert path specific drift after v0.28.0 fix
+- 35B's specific Q_in/Q_out = 256 head_dim vs 4B's = 160 — different
+  dequant pressure
+
+### R45 correction — what stands and what doesn't
+
+**Stands**: llama.cpp IS demonstrably capable of 1000+ tok coherent on
+35B with the same Q4 weights on the same CPU. So 1000+ is achievable
+at this quant level.
+
+**Doesn't stand**: "23× implementation gap" framing. The gap is mostly
+thinking-mode, not numerical precision compounding over layers.
+
+### Additional R46 findings
+
+- **Production (split-source) has NO `<think>` logit suppression.**
+  Only `quant.h` (single-header build) had it at line 16289/16462.
+  I added `TQ_ENABLE_THINKING=1` opt-out there for header-only users.
+  Split-source engine `src/engine/tq_generate.c` was already allowing
+  `<think>` to be sampled naturally; the suppression was NOT the cause.
+
+- **Yet our engine still does NOT sample `<think>` as position-0 top-1
+  while llama.cpp does**, on identical raw ChatML prompt with same Q4
+  weights and T=0 greedy. Verified by feeding llama.cpp the exact
+  string `<|im_start|>user\nOnce upon a time in a faraway land<|im_end|>\n<|im_start|>assistant\n`
+  via `llama-completion --no-jinja -no-cnv`: llama.cpp emits
+  `<think>\nHere's a thinking process...` at position 0 (318 tok
+  running over 300-tok limit, still going).
+
+- **So there IS a real precision gap, but narrower than R45 framed.**
+  It's a single-position argmax flip (top-1 between `<think>` and
+  newline/content tokens) driven by small forward-pass logit differences.
+  That flip changes the TASK (thinking mode → long trace vs direct
+  answer → short) and explains 1500-tok vs 185-tok visible gap.
+
+- **rep_penalty=1.1** (our default) vs llama.cpp's 1.00 was also tested
+  — changing our default to 1.0 changed the story contents (new
+  "Elara cartographer" narrative) but kept the length direct (126 tok)
+  and did NOT trigger `<think>`. So rep_penalty isn't the cause.
+
+- **35B ~65 tok is still a separate, real engine issue** (NOT explained
+  by thinking mode): our qwen35moe chat template already uses
+  `<think>\n\n</think>\n\n` thinking-OFF by default. Under that same
+  config, 4B dense hybrid gets 185 tok direct story, but 35B MoE
+  hybrid gets only 65 tok before "Sorry!" attractor. Length should
+  scale UP with model size in direct mode, not down by 3×.
+
+### Next steps (R47+)
+
+1. **Per-token logit forensics at position 0** — dump our top-5 tokens
+   + logit values at first generation position for Qwen3.5-4B. Compare
+   to llama.cpp's top-5 (via `--verbose-prompt` or model hook). If top-2
+   in llama.cpp is `<think>` logit=X.XX and ours says `<think>` is top-5
+   with logit=X.XX-N, we can quantify the forward precision drift.
+2. **35B MoE-specific hunt** (separate from #1):
+   - Port DRY sampler (non-negotiable community-standard)
+   - Per-expert output rms trajectory probe (dump per-token expert
+     rms across all 40 layers, compare to 4B dense FFN rms) — find
+     where drift compounds
+   - MoE output aggregation: verify `sum_k weight[k] * expert_out[k]`
+     accumulator in FP32 throughout
+3. **Product decision** — is thinking-mode-off the right default?
+   Community users expect thinking-on for long-form tasks; our choice
+   optimizes for CLI responsiveness. Consider a `--thinking` or
+   `TQ_ENABLE_THINKING=1` flag in the production CLI too.
 
 ## ★★★ Phase 3 R45 — llama.cpp HEAD-TO-HEAD: 1000+ tok ACHIEVABLE on 35B, our engine has 23× gap (2026-04-22) ★★★
 

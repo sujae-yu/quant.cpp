@@ -16285,9 +16285,12 @@ tq_gen_skip_tokenize:
     /* Suppress <think> token to disable thinking/reasoning mode.
      * Qwen3.5 models default to thinking mode which adds many tokens
      * of internal reasoning before the actual answer. By suppressing
-     * the <think> special token, the model goes directly to answering. */
+     * the <think> special token, the model goes directly to answering.
+     * TQ_ENABLE_THINKING=1 disables the suppression so callers can
+     * opt into long thinking-trace output (matches llama.cpp default). */
     int think_token_id = tokenizer ? str_lookup(tokenizer, "<think>") : -1;
-    if (think_token_id >= 0 && think_token_id < vocab_size) {
+    int suppress_think = (getenv("TQ_ENABLE_THINKING") == NULL);
+    if (suppress_think && think_token_id >= 0 && think_token_id < vocab_size) {
         state->logits[think_token_id] = -1e30f;
     }
 
@@ -16459,8 +16462,10 @@ tq_gen_skip_tokenize:
             }
         }
 
-        /* Suppress <think> token to prevent entering thinking mode */
-        if (think_token_id >= 0 && think_token_id < vocab_size) {
+        /* Suppress <think> token to prevent entering thinking mode.
+         * TQ_ENABLE_THINKING=1 disables the suppression (see first-token
+         * path above for rationale). */
+        if (suppress_think && think_token_id >= 0 && think_token_id < vocab_size) {
             state->logits[think_token_id] = -1e30f;
         }
 
