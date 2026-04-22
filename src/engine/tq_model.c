@@ -2136,15 +2136,43 @@ void tq_quantize_weights_q4(tq_model_t* model) {
                             &buf, &used);
         if (layer->delta_in_proj_z_q4) layer->delta_in_proj_z = NULL;
 
-        quantize_matrix_q4(layer->delta_in_proj_a, delta_dn, dim,
-                            &layer->delta_in_proj_a_q4, &layer->delta_in_proj_a_q4s,
-                            &buf, &used);
-        if (layer->delta_in_proj_a_q4) layer->delta_in_proj_a = NULL;
+        /* R50-5: TQ_DELTA_AB_LEGACY=1 reverts to Q4 quant for A/B testing.
+         * Default: keep alpha/beta projection FP32 to match llama.cpp's
+         * single-dequant precision. Output dim 32 (num_v_heads) is too
+         * small for Q4 quant — paired trace showed 67% sum diff vs llama.cpp
+         * cascading into 26% linear_attn_out diff. Memory cost: ~16 MB
+         * for 32-layer 4B model (negligible). */
+        int delta_ab_legacy = (getenv("TQ_DELTA_AB_LEGACY") != NULL);
+        if (delta_ab_legacy) {
+            quantize_matrix_q4(layer->delta_in_proj_a, delta_dn, dim,
+                                &layer->delta_in_proj_a_q4, &layer->delta_in_proj_a_q4s,
+                                &buf, &used);
+            if (layer->delta_in_proj_a_q4) layer->delta_in_proj_a = NULL;
 
-        quantize_matrix_q4(layer->delta_in_proj_b, delta_dn, dim,
-                            &layer->delta_in_proj_b_q4, &layer->delta_in_proj_b_q4s,
-                            &buf, &used);
-        if (layer->delta_in_proj_b_q4) layer->delta_in_proj_b = NULL;
+            quantize_matrix_q4(layer->delta_in_proj_b, delta_dn, dim,
+                                &layer->delta_in_proj_b_q4, &layer->delta_in_proj_b_q4s,
+                                &buf, &used);
+            if (layer->delta_in_proj_b_q4) layer->delta_in_proj_b = NULL;
+        } else {
+            /* Allocate persistent FP32 copies. Existing pointers reference
+             * fp32_temps[] which gets freed after this function. */
+            if (layer->delta_in_proj_a) {
+                size_t n = (size_t)delta_dn * dim;
+                float* persist = (float*)malloc(n * sizeof(float));
+                if (persist) {
+                    memcpy(persist, layer->delta_in_proj_a, n * sizeof(float));
+                    layer->delta_in_proj_a = persist;
+                }
+            }
+            if (layer->delta_in_proj_b) {
+                size_t n = (size_t)delta_dn * dim;
+                float* persist = (float*)malloc(n * sizeof(float));
+                if (persist) {
+                    memcpy(persist, layer->delta_in_proj_b, n * sizeof(float));
+                    layer->delta_in_proj_b = persist;
+                }
+            }
+        }
 
         quantize_matrix_q4(layer->delta_out_proj, dim, delta_z_dim,
                             &layer->delta_out_proj_q4, &layer->delta_out_proj_q4s,
@@ -3400,11 +3428,19 @@ tq_model_t* tq_load_gguf(const char* path) {
             /* Small DeltaNet weights: dequant to FP32 (alpha, beta are small) */
             snprintf(tname, sizeof(tname), "blk.%d.ssm_alpha.weight", l);
             t = find_gguf_tensor(gguf, tname);
-            if (t) { layer->gguf_delta_a = t->data; layer->gguf_delta_a_type = t->type; }
+            if (t) {
+                layer->gguf_delta_a = t->data; layer->gguf_delta_a_type = t->type;
+                if (l == 0) fprintf(stderr, "[ssm-types] ssm_alpha type=%d shape=[%lld,%lld]\n",
+                        t->type, (long long)t->shape[0], (long long)t->shape[1]);
+            }
 
             snprintf(tname, sizeof(tname), "blk.%d.ssm_beta.weight", l);
             t = find_gguf_tensor(gguf, tname);
-            if (t) { layer->gguf_delta_b = t->data; layer->gguf_delta_b_type = t->type; }
+            if (t) {
+                layer->gguf_delta_b = t->data; layer->gguf_delta_b_type = t->type;
+                if (l == 0) fprintf(stderr, "[ssm-types] ssm_beta type=%d shape=[%lld,%lld]\n",
+                        t->type, (long long)t->shape[0], (long long)t->shape[1]);
+            }
 
             /* DeltaNet projections: historically dequanted Q5_K → FP32 with
              * the rationale that "5-bit introduces too much error in recurrent

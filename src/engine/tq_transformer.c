@@ -832,12 +832,19 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
     }
 
     if (dn_trace) {
-        double qkv_sum = 0, ab_sum = 0, z_sum = 0;
+        double qkv_sum = 0, alpha_sum = 0, beta_sum = 0, z_sum = 0;
         for (int i = 0; i < qkv_dim; i++) qkv_sum += s->delta_qkv[i];
-        for (int i = 0; i < 2*dn; i++) ab_sum += s->delta_ab[i];  /* alpha+beta */
+        for (int i = 0; i < dn; i++) alpha_sum += s->delta_ab[i];  /* alpha is first dn */
+        for (int i = 0; i < dn; i++) beta_sum += s->delta_ab[dn + i];  /* beta is next dn */
         for (int i = 0; i < z_dim; i++) z_sum += s->delta_z[i];
-        fprintf(stderr, "[dn-trace] L%d qkv_proj sum=%.6f, alpha+beta sum=%.6f, z_proj sum=%.6f\n",
-                l, qkv_sum, ab_sum, z_sum);
+        fprintf(stderr, "[dn-trace] L%d qkv_proj sum=%.6f, alpha sum=%.6f, beta sum=%.6f, z_proj sum=%.6f\n",
+                l, qkv_sum, alpha_sum, beta_sum, z_sum);
+        fprintf(stderr, "[dn-trace] L%d alpha first6=%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n",
+                l, s->delta_ab[0], s->delta_ab[1], s->delta_ab[2],
+                s->delta_ab[3], s->delta_ab[4], s->delta_ab[5]);
+        fprintf(stderr, "[dn-trace] L%d beta first6=%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n",
+                l, s->delta_ab[dn+0], s->delta_ab[dn+1], s->delta_ab[dn+2],
+                s->delta_ab[dn+3], s->delta_ab[dn+4], s->delta_ab[dn+5]);
     }
 
     /* Step 4: Causal conv1d on QKV + SiLU (batched, NEON-optimized) */
@@ -1176,7 +1183,18 @@ deltanet_step8:
     if (dn_trace) {
         double dout_sum = 0;
         for (int i = 0; i < dn * dv; i++) dout_sum += s->delta_out[i];
-        fprintf(stderr, "[dn-trace] L%d delta_out sum=%.6f\n", l, dout_sum);
+        fprintf(stderr, "[dn-trace] L%d delta_out sum=%.6f first6=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n",
+                l, dout_sum,
+                s->delta_out[0], s->delta_out[1], s->delta_out[2],
+                s->delta_out[3], s->delta_out[4], s->delta_out[5]);
+        if (layer->delta_norm) {
+            fprintf(stderr, "[dn-trace] L%d delta_norm first6=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n",
+                l, layer->delta_norm[0], layer->delta_norm[1], layer->delta_norm[2],
+                layer->delta_norm[3], layer->delta_norm[4], layer->delta_norm[5]);
+        }
+        fprintf(stderr, "[dn-trace] L%d delta_z first6=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n",
+            l, s->delta_z[0], s->delta_z[1], s->delta_z[2],
+            s->delta_z[3], s->delta_z[4], s->delta_z[5]);
     }
     /* R49 Big Move 2: if scale_out_mode, apply 1/sqrt(dk) to delta_out
      * here (matches llama.cpp's apply-on-output ordering). */
