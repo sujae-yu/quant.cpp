@@ -3333,8 +3333,14 @@ tq_model_t* tq_load_gguf(const char* path) {
         t = find_gguf_tensor(gguf, tname);
         if (t) {
             layer->delta_a_log = dequant_tensor_fp32(t);
-            /* GGUF stores ssm_a as -exp(a_log), but our forward pass expects a_log.
-             * Convert back: a_log = log(-ssm_a) */
+            /* GGUF stores ssm_a as -exp(a_log). Historical: we converted
+             * a_log = log(-ssm_a) at load and then recomputed -exp(a_log)
+             * in forward — a log+exp roundtrip introducing precision loss
+             * on every head every token. R48 round 10: match llama.cpp
+             * by storing RAW -exp(a_log) and using it directly in the
+             * forward pass (see llama-cpp qwen35moe.cpp line 238:
+             * `gate = softplus(alpha+dt) * ssm_a` — ssm_a IS -exp(a_log)).
+             * TQ_DN_ALOG_LEGACY=1 reverts to old behavior for A/B. */
             if (layer->delta_a_log) {
                 float vmin = 1e30f, vmax = -1e30f;
                 int n_pos = 0, n_zero = 0;
@@ -3344,9 +3350,14 @@ tq_model_t* tq_load_gguf(const char* path) {
                     if (v > vmax) vmax = v;
                     if (v > 0) n_pos++;
                     if (v == 0) n_zero++;
-                    layer->delta_a_log[j] = (v < 0) ? logf(-v) : 0.0f;
                 }
-                /* TQ_DN_LOAD_PROBE=1: dump ssm_a raw stats per layer */
+                if (getenv("TQ_DN_ALOG_LEGACY")) {
+                    for (int64_t j = 0; j < t->shape[0]; j++) {
+                        float v = layer->delta_a_log[j];
+                        layer->delta_a_log[j] = (v < 0) ? logf(-v) : 0.0f;
+                    }
+                }
+                /* Else: leave as raw -exp(a_log), forward uses directly. */
                 if (getenv("TQ_DN_LOAD_PROBE")) {
                     float amin = 1e30f, amax = -1e30f;
                     for (int64_t j = 0; j < t->shape[0]; j++) {
@@ -3355,8 +3366,9 @@ tq_model_t* tq_load_gguf(const char* path) {
                         if (a > amax) amax = a;
                     }
                     fprintf(stderr, "[ssm_a-load] layer=%d raw_min=%.4e raw_max=%.4e n_pos=%d n_zero=%d "
-                            "alog_min=%.4e alog_max=%.4e\n",
-                            l, vmin, vmax, n_pos, n_zero, amin, amax);
+                            "stored_min=%.4e stored_max=%.4e (legacy=%d)\n",
+                            l, vmin, vmax, n_pos, n_zero, amin, amax,
+                            getenv("TQ_DN_ALOG_LEGACY") ? 1 : 0);
                 }
             }
 

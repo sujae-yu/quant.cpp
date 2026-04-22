@@ -771,7 +771,23 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
         } else {
             alpha_sp = logf(1.0f + expf(alpha_biased));
         }
-        float neg_exp_alog = -expf(layer->delta_a_log[h]);
+        /* R48 round 10: match llama.cpp by using raw -exp(a_log) from GGUF
+         * directly. Legacy mode (TQ_DN_ALOG_LEGACY=1) does the log+exp
+         * roundtrip from R<10 behavior. The raw path eliminates a precision
+         * loss that compounded geometrically through DeltaNet recurrence. */
+        static int alog_legacy_checked = 0;
+        static int alog_legacy = 0;
+        if (!alog_legacy_checked) {
+            alog_legacy = (getenv("TQ_DN_ALOG_LEGACY") != NULL);
+            alog_legacy_checked = 1;
+        }
+        float neg_exp_alog;
+        if (alog_legacy) {
+            neg_exp_alog = -expf(layer->delta_a_log[h]);
+        } else {
+            /* delta_a_log holds raw -exp(a_log) from GGUF (already negative) */
+            neg_exp_alog = layer->delta_a_log[h];
+        }
         gate_vals[h] = alpha_sp * neg_exp_alog;
         /* Round 27: exact expf for decay (was fast_expf). decay is
          * multiplied with the state matrix every token — any error
