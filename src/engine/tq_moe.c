@@ -1092,6 +1092,26 @@ moe_cpu_fallback: ;
          * Gemma 4 has per-expert output scaling (ffn_down_exps.scale). */
         float exp_scale = (layer->expert_scale) ? layer->expert_scale[eid] : 1.0f;
         float ws = w * exp_scale;
+
+        /* TQ_MOE_EXPERT_PROBE=1: per-expert RMS dump on layer 39 (or
+         * all layers if TQ_MOE_EXPERT_PROBE_ALL=1). Identifies which
+         * specific expert produces outlier-magnitude output that drives
+         * the layer-39 anomaly seen in R48 round 2. */
+        if (getenv("TQ_MOE_EXPERT_PROBE") &&
+            (getenv("TQ_MOE_EXPERT_PROBE_ALL") || layer_idx == 39)) {
+            double ss = 0.0;
+            float maxabs = 0.0f;
+            for (int i = 0; i < hidden_dim; i++) {
+                float v = state->expert_out[i];
+                ss += (double)v * v;
+                float a = v < 0 ? -v : v;
+                if (a > maxabs) maxabs = a;
+            }
+            float rms = (float)sqrt(ss / (double)hidden_dim);
+            fprintf(stderr, "[moe-expert] layer=%d k=%d eid=%d w=%.4f exp_scale=%.4f rms=%.4e maxabs=%.4e\n",
+                    layer_idx, k, eid, w, exp_scale, rms, maxabs);
+        }
+
         if (use_kahan) {
             for (int i = 0; i < hidden_dim; i++) {
                 float y = ws * state->expert_out[i] - moe_kahan_comp[i];
@@ -1113,13 +1133,20 @@ moe_shared_expert:
         int shared_dim = config->shared_expert_intermediate_dim;
         if (shared_dim == 0) shared_dim = expert_dim;
 
-        /* Optional shared expert gating (sigmoid scalar gate) */
+        /* Optional shared expert gating (sigmoid scalar gate).
+         * R48 round 4: replaced fast_expf_moe with EXACT expf. The gate
+         * scalar multiplies the entire shared expert output (which has
+         * outlier channels with maxabs 2-9 in layer 39). Any bias in
+         * fast_expf at ~0.35 sigmoid range uniformly mis-scales those
+         * outliers, which cascades into logit drift. llama.cpp uses
+         * ggml_sigmoid (exact). Precedent: Round 27/29 did the same
+         * swap for DeltaNet β/α and decay. */
         float shared_gate_val = 1.0f;
         if (layer->shared_gate) {
             float dot = 0.0f;
             for (int j = 0; j < hidden_dim; j++)
                 dot += input[j] * layer->shared_gate[j];
-            shared_gate_val = 1.0f / (1.0f + fast_expf_moe(-dot)); /* sigmoid */
+            shared_gate_val = 1.0f / (1.0f + expf(-dot)); /* exact sigmoid */
         }
 
         if (layer->shared_expert.q4_converted) {
@@ -1157,6 +1184,23 @@ moe_shared_expert:
                            hidden_dim, shared_dim);
             /* Flush w_down before CPU reads expert_out */
             tq_metal_batch_flush_if_available();
+        }
+
+        /* TQ_MOE_EXPERT_PROBE=1: shared expert RMS dump. Shared expert
+         * is always-active and has different weight scale from routed. */
+        if (getenv("TQ_MOE_EXPERT_PROBE") &&
+            (getenv("TQ_MOE_EXPERT_PROBE_ALL") || layer_idx == 39)) {
+            double ss = 0.0;
+            float maxabs = 0.0f;
+            for (int i = 0; i < hidden_dim; i++) {
+                float v = state->expert_out[i];
+                ss += (double)v * v;
+                float a = v < 0 ? -v : v;
+                if (a > maxabs) maxabs = a;
+            }
+            float rms = (float)sqrt(ss / (double)hidden_dim);
+            fprintf(stderr, "[moe-expert] layer=%d k=SHARED gate=%.4f rms=%.4e maxabs=%.4e\n",
+                    layer_idx, shared_gate_val, rms, maxabs);
         }
 
         if (use_kahan) {
