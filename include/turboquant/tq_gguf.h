@@ -244,6 +244,14 @@ typedef struct {
     uint8_t* down_q4_qs;      /* packed Q4 for down */
     float*   down_q4_scales;
     int      q4_converted;    /* 1 if Q4 conversion done */
+    /* R52: Super Expert FP32 override. When fp32_keep is set,
+     * gate/up/down are pre-dequanted to FP32 buffers and forward
+     * uses tq_matmul instead of tq_matmul_gguf. For SE-aware
+     * quantization (preserves outlier-channel weights). */
+    int      fp32_keep;
+    float*   gate_fp32;
+    float*   up_fp32;
+    float*   down_fp32;
 } tq_expert_weights_t;
 
 /* MoE layer (per transformer layer) */

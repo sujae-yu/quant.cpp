@@ -1024,7 +1024,14 @@ moe_cpu_fallback: ;
          * removed the dead dispatch site. See git history of this
          * file for the prior implementation. */
 
-        if (exp->q4_converted) {
+        if (exp->fp32_keep) {
+            /* R52 Super Expert FP32 path: pre-dequanted gate/up/down,
+             * use FP32 matmul to preserve outlier-channel precision. */
+            tq_matmul(state->expert_hb, input, exp->gate_fp32, expert_dim, hidden_dim);
+            tq_matmul(state->expert_hb2, input, exp->up_fp32, expert_dim, hidden_dim);
+            activation_fn(state->expert_hb, state->expert_hb2, expert_dim);
+            tq_matmul(state->expert_out, state->expert_hb, exp->down_fp32, hidden_dim, expert_dim);
+        } else if (exp->q4_converted) {
             /* Fast Q4 matmul path — pre-converted expert weights (shared expert)
              * tq_matmul_q4(out, x, w_qs, w_scales, n=out_rows, d=in_cols) */
             tq_matmul_q4(state->expert_hb, input,

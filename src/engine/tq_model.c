@@ -3630,6 +3630,48 @@ tq_model_t* tq_load_gguf(const char* path) {
                     }
                 }
 
+                /* R52: Super Expert FP32 override.
+                 * TQ_SE_LIST="L:E,L:E,..." — dequant specified routed
+                 * experts to FP32 to preserve outlier-channel weights.
+                 * SE literature: Qwen3-30B has 3 SEs at layers 1-3
+                 * (arxiv 2507.23279). For Qwen3.6-35B-A3B, SEs identified
+                 * via per-expert max-activation calibration. */
+                {
+                    const char* se_list = getenv("TQ_SE_LIST");
+                    if (se_list && c->is_moe) {
+                        const char* p = se_list;
+                        while (*p) {
+                            int se_layer = atoi(p);
+                            const char* col = strchr(p, ':');
+                            if (!col) break;
+                            int se_eid = atoi(col + 1);
+                            if (se_layer == l && se_eid >= 0 && se_eid < c->num_experts) {
+                                tq_expert_weights_t* exp = &moe->experts[se_eid];
+                                if (exp->w_gate && exp->w_up && exp->w_down) {
+                                    int exp_inter = c->expert_intermediate_dim;
+                                    int hd = c->hidden_dim;
+                                    size_t n_gu = (size_t)exp_inter * hd;
+                                    size_t n_d  = (size_t)hd * exp_inter;
+                                    exp->gate_fp32 = (float*)malloc(n_gu * sizeof(float));
+                                    exp->up_fp32   = (float*)malloc(n_gu * sizeof(float));
+                                    exp->down_fp32 = (float*)malloc(n_d  * sizeof(float));
+                                    if (exp->gate_fp32 && exp->up_fp32 && exp->down_fp32) {
+                                        tq_dequant_row_gguf(exp->gate_type, exp->w_gate, exp->gate_fp32, (int)n_gu);
+                                        tq_dequant_row_gguf(exp->up_type,   exp->w_up,   exp->up_fp32,   (int)n_gu);
+                                        tq_dequant_row_gguf(exp->down_type, exp->w_down, exp->down_fp32, (int)n_d);
+                                        exp->fp32_keep = 1;
+                                        fprintf(stderr, "[SE] layer=%d expert=%d → FP32 (%.1f MB)\n",
+                                                l, se_eid, (n_gu * 2 + n_d) * 4.0 / (1024.0 * 1024.0));
+                                    }
+                                }
+                            }
+                            const char* comma = strchr(p, ',');
+                            if (!comma) break;
+                            p = comma + 1;
+                        }
+                    }
+                }
+
                 /* Shared expert (if present) */
                 if (c->has_shared_expert) {
                     snprintf(tname, sizeof(tname), "blk.%d.ffn_gate_shexp.weight", l);
