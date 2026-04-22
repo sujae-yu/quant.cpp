@@ -234,6 +234,37 @@ Fix: skip log conversion, use raw values. TQ_DN_ALOG_LEGACY=1 reverts.
 Result: 168 tok vs 147 baseline = +21 tok. **First non-regression in
 9 rounds**, validating the line-by-line vs-llama.cpp approach.
 
+## R13 — long-vs-coherent tradeoff isolated, fundamental wall hit (commit 2c7243d)
+
+Tested combinations on 35B "Once upon a time...":
+  R10 + DRY=2.0:    168 tok, ~50 coherent then attractor → EOS
+  R10 only (no DRY): 770 tok, ~30 coherent then garbage loop
+  Different prompt:   32 tok, early EOS
+
+**Key insight**: model enters attractor at ~30-50 tok regardless of
+sampling mitigation. DRY shortens output by forcing EOS in attractor;
+no DRY lets model loop until n limit but content is garbage.
+
+llama.cpp on same prompt+weights generates 2000+ COHERENT tok.
+The gap is fundamental: our forward pass produces state that drifts
+into attractor corners by token 30, while llama.cpp's doesn't.
+
+R10 raw ssm_a delayed collapse from 25→30 coherent tok (+5 inside
+the coherent window, +21 in observed tokens with DRY).
+
+### Conclusion: localized 1-line fixes have hit a wall
+
+After 13 rounds (1 positive, 12 neutral/negative), R10's +21 tok
+looks to be the only single-line fix from line-by-line matching of
+llama.cpp's structure-level operations. Further progress requires:
+
+1. Token-level intermediate state diff vs llama.cpp at first divergent
+   position (requires instrumenting BOTH engines in parallel)
+2. Bulk transplant of llama.cpp's DeltaNet implementation (hundreds
+   of LOC port)
+
+Both are multi-session efforts. 168 tok stands as current best.
+
 ## R12 — softplus threshold + router temp tests RULED OUT — commit 4bf449c
 
 Tested 2 more diffs vs llama.cpp:
