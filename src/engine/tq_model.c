@@ -4206,8 +4206,20 @@ skip_q4_conversion: ;
          * layer stay in Q4 form, keeping memory under ~2 GB.
          *
          * Shared experts are always active, so convert them at load time.
+         *
+         * R43 diagnostic: Qwen3.6-35B long-gen drift suspected to come
+         * from shared-expert double-quant. TQ_NO_Q4_SHARED=1 skips this
+         * conversion — forward path uses on-the-fly GGUF dequant instead
+         * (like routed experts), matching llama.cpp behavior.
          * ============================================================ */
-        if (c->is_moe) {
+        /* R43 auto-default: for qwen35moe hybrid (DeltaNet + MoE + shared
+         * experts), the double-quant (GGUF Q6_K/Q4_K → FP32 → internal
+         * per-32-absmax Q4) on shared experts measurably degrades long-gen
+         * coherence (170 → 204 tok on drift-trigger prompt). Skip by
+         * default for this arch; keep for other MoE (Gemma 4 etc). Opt-out
+         * with TQ_FORCE_Q4_SHARED=1. */
+        int _auto_skip_shared_q4 = (c->delta_n_heads > 0 && !getenv("TQ_FORCE_Q4_SHARED"));
+        if (c->is_moe && !getenv("TQ_NO_Q4_SHARED") && !_auto_skip_shared_q4) {
             int shared_inter = c->shared_expert_intermediate_dim;
             if (shared_inter == 0) shared_inter = c->expert_intermediate_dim;
 
