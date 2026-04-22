@@ -2136,13 +2136,13 @@ void tq_quantize_weights_q4(tq_model_t* model) {
                             &buf, &used);
         if (layer->delta_in_proj_z_q4) layer->delta_in_proj_z = NULL;
 
-        /* R50-5: TQ_DELTA_AB_LEGACY=1 reverts to Q4 quant for A/B testing.
-         * Default: keep alpha/beta projection FP32 to match llama.cpp's
-         * single-dequant precision. Output dim 32 (num_v_heads) is too
-         * small for Q4 quant — paired trace showed 67% sum diff vs llama.cpp
-         * cascading into 26% linear_attn_out diff. Memory cost: ~16 MB
-         * for 32-layer 4B model (negligible). */
-        int delta_ab_legacy = (getenv("TQ_DELTA_AB_LEGACY") != NULL);
+        /* R50-5: TQ_DELTA_AB_FP32=1 keeps alpha/beta projection FP32.
+         * Tested empirically: although alpha matmul precision improves
+         * (0.5% sum match w/ llama.cpp vs ~3% with Q4), the OVERALL
+         * effect on 35B long-gen is REGRESSION (71 tok vs R10 168 baseline).
+         * Same pattern as R6 (FP32 LM head): precision up = worse.
+         * Q4 noise acts as regularizer. Default Q4 (legacy), opt-in FP32. */
+        int delta_ab_legacy = (getenv("TQ_DELTA_AB_FP32") == NULL);
         if (delta_ab_legacy) {
             quantize_matrix_q4(layer->delta_in_proj_a, delta_dn, dim,
                                 &layer->delta_in_proj_a_q4, &layer->delta_in_proj_a_q4s,
