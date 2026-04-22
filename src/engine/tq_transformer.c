@@ -697,6 +697,14 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
         }
     }
 
+    /* R50: TQ_LAYER_TRACE — DeltaNet sub-op trace for layer 0 only */
+    int dn_trace = (l == 0 && getenv("TQ_LAYER_TRACE"));
+    if (dn_trace) {
+        double xb_sum = 0;
+        for (int i = 0; i < dim; i++) xb_sum += s->xb[i];
+        fprintf(stderr, "[dn-trace] L%d attn_norm_out sum=%.6f\n", l, xb_sum);
+    }
+
     /* Pre-quantize activation to Q8 once for all Q2/Q4 projections in this layer.
      * This eliminates redundant tq_quantize_row_q8 + malloc/free cycles. */
     int dn_has_q2 = (layer->delta_in_proj_qkv_q2 != NULL);
@@ -823,11 +831,25 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
         }
     }
 
+    if (dn_trace) {
+        double qkv_sum = 0, ab_sum = 0, z_sum = 0;
+        for (int i = 0; i < qkv_dim; i++) qkv_sum += s->delta_qkv[i];
+        for (int i = 0; i < 2*dn; i++) ab_sum += s->delta_ab[i];  /* alpha+beta */
+        for (int i = 0; i < z_dim; i++) z_sum += s->delta_z[i];
+        fprintf(stderr, "[dn-trace] L%d qkv_proj sum=%.6f, alpha+beta sum=%.6f, z_proj sum=%.6f\n",
+                l, qkv_sum, ab_sum, z_sum);
+    }
+
     /* Step 4: Causal conv1d on QKV + SiLU (batched, NEON-optimized) */
     TQ_PROF_START(_tp);
     causal_conv1d_silu_batch(s->delta_qkv, conv_st, layer->delta_conv1d,
                               qkv_dim, conv_width);
     TQ_PROF_STOP(_tp, conv1d_ns);
+    if (dn_trace) {
+        double conv_sum = 0;
+        for (int i = 0; i < qkv_dim; i++) conv_sum += s->delta_qkv[i];
+        fprintf(stderr, "[dn-trace] L%d conv1d_silu sum=%.6f\n", l, conv_sum);
+    }
 
     /* Step 5: Split into Q, K, V per head and L2 normalize Q, K.
      * Layout: Q[dn_kv * dk] + K[dn_kv * dk] + V[dn * dv]
@@ -839,6 +861,14 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
     for (int h = 0; h < dn_kv; h++) {
         l2_normalize(Q_all + h * dk, dk);
         l2_normalize(K_all + h * dk, dk);
+    }
+    if (dn_trace) {
+        double q_sum = 0, k_sum = 0, v_sum = 0;
+        for (int i = 0; i < dn_kv * dk; i++) q_sum += Q_all[i];
+        for (int i = 0; i < dn_kv * dk; i++) k_sum += K_all[i];
+        for (int i = 0; i < dn * dv; i++) v_sum += V_all[i];
+        fprintf(stderr, "[dn-trace] L%d post_l2norm Q sum=%.6f, K sum=%.6f, V sum=%.6f\n",
+                l, q_sum, k_sum, v_sum);
     }
 
     /* Step 6: Scale Q by 1/sqrt(head_dim).
@@ -1143,6 +1173,11 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
     TQ_PROF_STOP(_tp, recurrent_ns);
 
 deltanet_step8:
+    if (dn_trace) {
+        double dout_sum = 0;
+        for (int i = 0; i < dn * dv; i++) dout_sum += s->delta_out[i];
+        fprintf(stderr, "[dn-trace] L%d delta_out sum=%.6f\n", l, dout_sum);
+    }
     /* R49 Big Move 2: if scale_out_mode, apply 1/sqrt(dk) to delta_out
      * here (matches llama.cpp's apply-on-output ordering). */
     if (scale_out_mode) {
@@ -1190,6 +1225,14 @@ deltanet_step8:
             float z_val = zh[j];
             oh[j] *= z_val / (1.0f + expf(-z_val));
         }
+    }
+    if (dn_trace) {
+        double final_sum = 0;
+        for (int i = 0; i < dn * dv; i++) final_sum += s->delta_out[i];
+        fprintf(stderr, "[dn-trace] L%d post_groupnorm_zgate (final_output) sum=%.6f first6=%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n",
+                l, final_sum,
+                s->delta_out[0], s->delta_out[1], s->delta_out[2],
+                s->delta_out[3], s->delta_out[4], s->delta_out[5]);
     }
 
     /* Output projection: [dim, z_dim] @ delta_out[z_dim] -> xb2[dim] */
@@ -3147,7 +3190,21 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
 
         if (layer->delta_a_log) {
             /* DeltaNet layer */
+            /* R50: TQ_LAYER_TRACE — capture residual before DN call */
+            double trace_x_pre = 0.0;
+            if (l == 0 && getenv("TQ_LAYER_TRACE")) {
+                for (int i = 0; i < dim; i++) trace_x_pre += s->x[i];
+            }
             deltanet_forward(model, s, l);
+            if (l == 0 && getenv("TQ_LAYER_TRACE")) {
+                double xb2_sum = 0.0, x_post = 0.0;
+                /* xb2 was just added to x in deltanet_forward; recover by subtracting */
+                for (int i = 0; i < dim; i++) x_post += s->x[i];
+                xb2_sum = x_post - trace_x_pre;
+                fprintf(stderr, "[trace] L0 input_embed sum=%.6f\n", trace_x_pre);
+                fprintf(stderr, "[trace] L0 linear_attn_out sum=%.6f\n", xb2_sum);
+                fprintf(stderr, "[trace] L0 attn_residual sum=%.6f\n", x_post);
+            }
         } else if (layer->gguf_w_qkv) {
             /* Phi-3 fused QKV — `gguf_wq/wk/wv` are NULL because Q, K
              * and V are concatenated into `gguf_w_qkv`. self_attn_forward

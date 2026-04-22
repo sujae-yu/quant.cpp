@@ -3448,7 +3448,21 @@ tq_model_t* tq_load_gguf(const char* path) {
 
             snprintf(tname, sizeof(tname), "blk.%d.ssm_out.weight", l);
             t = find_gguf_tensor(gguf, tname);
-            if (t) { layer->gguf_delta_out = t->data; layer->gguf_delta_out_type = t->type; }
+            if (t) {
+                /* R50: TQ_SSM_OUT_FP32=1 force dequant ssm_out to FP32.
+                 * Diagnosis: 1% final_output sum diff amplifies to 26%
+                 * linear_attn_out diff after this matmul. Tests if
+                 * quant precision is the amplification source. */
+                if (getenv("TQ_SSM_OUT_FP32") && t->type != TQ_GGML_TYPE_F32) {
+                    layer->delta_out_proj = dequant_tensor_fp32(t);
+                    layer->gguf_delta_out = NULL;
+                    layer->gguf_delta_out_type = 0;
+                    if (l == 0) fprintf(stderr, "[ssm-out-fp32] dequant ssm_out type=%d → FP32\n", t->type);
+                } else {
+                    layer->gguf_delta_out = t->data;
+                    layer->gguf_delta_out_type = t->type;
+                }
+            }
 
             /* Infer DeltaNet config from tensor shapes if not set */
             if (c->delta_n_heads == 0 && layer->delta_a_log) {
