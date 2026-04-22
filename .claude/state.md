@@ -234,6 +234,40 @@ Fix: skip log conversion, use raw values. TQ_DN_ALOG_LEGACY=1 reverts.
 Result: 168 tok vs 147 baseline = +21 tok. **First non-regression in
 9 rounds**, validating the line-by-line vs-llama.cpp approach.
 
+## R14 — QK-norm matching attempt failed (-139 tok), single-line fix wall confirmed
+
+Tested TQ_FORCE_QK_NORM=1 (apply QK-norm on hybrid layers, matching
+llama.cpp's qwen35moe.cpp:138-150). Result: 29 tok regression (-139
+vs R10 baseline 168).
+
+R40's empirical decision (disable QK-norm on hybrid) was correct.
+llama.cpp uses QK-norm AND succeeds, but our engine fails with
+QK-norm even after R10 fix. The interaction with our DeltaNet path
+(or some other unfound diff) makes QK-norm harmful in our impl.
+
+### Verified matching (no fix needed)
+
+- tq_rmsnorm formula: `out = x * rsqrt(mean_sq + eps) * weight` ✓
+- Q+gate fused projection deinterleave (interleaved per head) ✓
+- Output gate sigmoid * attn_out ✓
+
+### Final round 14 status
+
+**Single-line localized fix candidates exhausted.** R10 (raw ssm_a, +21
+tok) remains the only positive landed in 14 rounds. Current best
+168 tok vs R1 baseline 147.
+
+The 168→2000+ gap to llama.cpp is fundamental cumulative drift requiring
+either:
+1. Token-level intermediate state diff vs llama.cpp (instrumentation
+   of both engines, identifying first divergent op at first divergent
+   position) — multi-day work
+2. Bulk DeltaNet+MoE forward-path transplant from llama.cpp — multi-week
+   port spanning hundreds of LOC across our quantized matmul kernels
+
+Recommendation: stop autonomous loop here. Subsequent work should be
+user-directed multi-session effort on either (1) or (2).
+
 ## R13 — long-vs-coherent tradeoff isolated, fundamental wall hit (commit 2c7243d)
 
 Tested combinations on 35B "Once upon a time...":
