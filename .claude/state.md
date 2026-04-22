@@ -1,7 +1,89 @@
 # quant.cpp — Session State
 
-**Last updated**: 2026-04-22 (R46 — R45 narrative CORRECTED)
-**Session HEAD**: R45 "23× gap" found to be partially confounded by chat-template thinking-mode mismatch, not pure engine precision gap. Real 35B engine issue reduced but still exists. Clean apples-to-apples needed.
+**Last updated**: 2026-04-22 (R47 — 35B 1000-tok attempt FAILED, engine-precision bug confirmed)
+**Session HEAD**: User demanded 1000+ tok on 35B this session. Tried 4 approaches — all failed well short (max 132 tok before attractor). 35B MoE precision drift is real and beyond env-tuning fix. Requires multi-round surgery (DRY sampler port, per-expert rms probe, DeltaNet β/α Q4_K path).
+
+## R47 — 35B 1000-tok attempt — 4 approaches all fail short of target (2026-04-22)
+
+User: "계속 진행해주세요. 마지막으로 35b 모델에서 1000+ 토큰까지 성공적으로 완료후 완료 보고 바랍니다."
+
+Direct 35B execution attempts, all on Qwen3.6-35B-A3B-UD-IQ4_XS, prompt
+"Once upon a time in a faraway land", T=0, seed=42, 4 threads, CPU:
+
+| Attempt | Config | Result |
+|---|---|---:|
+| (a) thinking-on default | `TQ_ENABLE_THINKING=1` + auto T=2.0 + turbo_kv_4b | 132 tok, collapse at ~30 tok: `"once" "upon" "a" "time"...` quoted-word attractor |
+| (b) thinking-on + FP32 KV | above + `-k fp32` | 113 tok, `"They've given me setup. They've given me setup."` loop — our own loop-detector fired |
+| (c) thinking-on + aggressive rep | `--rep-penalty 1.3 --rep-window 128` + `TQ_NO_LOOP_DETECT=1` | 62 tok, model emitted `<\|im_end\|>` early (natural EOS under heavy rep penalty) |
+| (d) long engaging prompt | 65-tok "Write a 2000 word fantasy" prompt + thinking-off | 0 tok generated, model emitted `<\|im_end\|>` immediately after `<think>\n\n</think>\n\n` close |
+
+**None reached anywhere near 1000 tok.** Max coherent window was ~30 tok
+before attractor started.
+
+### Why env-tuning failed
+
+The 35B-specific MoE precision drift is baked into the forward pass.
+No CLI flag or env var unblocks it:
+- Temperature sweep (R44 tested 1.0/1.5/2.0/2.5) — each reveals a
+  DIFFERENT attractor, none fix
+- KV quantization OFF (FP32) — same attractors
+- Rep penalty 1.3 — makes model emit EOS early rather than break
+  attractor
+- Thinking mode ON — actually makes it WORSE (132 tok vs 65 tok default)
+  because thinking puts model into a more logit-sensitive regime
+- Long engaging prompt — prefill quirk emits EOS before first gen token
+
+### Added: `TQ_NO_LOOP_DETECT=1` env var
+
+While debugging, added opt-out for our n-gram loop detector at
+`src/engine/tq_generate.c`. Useful for long-form benchmarks that want
+to see how far raw generation goes before model-internal termination.
+Commit with R47 writeup.
+
+### Honest status on 1000-tok target
+
+NOT achieved this session. The 30+ rounds of accumulated work on
+Qwen3.6-35B MoE have hit a precision wall that requires:
+
+1. **DRY sampler port** (non-negotiable community standard for loop
+   suppression; better than naive rep-penalty which just shifts
+   attractors around)
+2. **Per-expert output rms probe** — instrument the routed-expert
+   aggregation `output += weight[k] * expert_out[k]`, dump per-token
+   RMS across all 40 layers, compare to 4B dense FFN rms trajectory
+   to identify which layer's expert output first accumulates error
+3. **DeltaNet recurrent state audit** — β, α computation from Q4_K
+   a_log weight may lose precision differently than llama.cpp's FP32
+   intermediate path
+4. **Position-0 logit divergence forensics** (from R46) — at the
+   first gen position, our top-1 differs from llama.cpp's top-1,
+   quantify that delta across the vocab
+
+This is genuinely multi-round precision surgery, not a one-session
+fix. Memory note from prior work: "Qwen3.6 long-gen drift (all
+quants) — likely DeltaNet recurrent state error. Round 16 Q5_K_M
+실증 downgraded: load+short ✓, long gen ✗." — this has been known
+since R25 and repeatedly hit.
+
+### What stands vs what's blocked
+
+**Stands (this session's contributions):**
+- R46: Correctly identified that R45's "23× gap" framing was mostly
+  chat-template thinking-mode confound, not pure numerical precision
+- R47: Quantified that 4 distinct attractors emerge under different
+  configs on 35B, demonstrating engine precision drift (not just
+  sampling issue)
+- Code: Added `TQ_NO_LOOP_DETECT=1` opt-out for long-form benchmarks
+- Code: Added `TQ_ENABLE_THINKING=1` opt-out for quant.h single-header
+  build path
+
+**Blocked (next sessions' work):**
+- 1000-tok on 35B: requires DRY sampler + MoE surgery (3-5 rounds
+  estimated based on prior similar investigations)
+- Position-0 logit divergence quantification (R47 #61 task)
+- Per-expert rms trajectory probe (R47 #62 task)
+
+
 
 ## ★ Phase 3 R46 — R45 correction: thinking-mode confound explains most 4B gap, 35B gap still real but smaller (2026-04-22) ★
 

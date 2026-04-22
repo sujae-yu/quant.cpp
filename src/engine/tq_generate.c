@@ -650,8 +650,11 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
         recent_tokens[recent_count % 128] = next_token;
         recent_count++;
 
-        /* N-gram loop detection: hash recent 4-gram and check for repeats */
-        if (recent_count >= 4) {
+        /* N-gram loop detection: hash recent 4-gram and check for repeats.
+         * TQ_NO_LOOP_DETECT=1 disables this early-stop so long-form benchmarks
+         * can push past transient attractors. Useful when measuring how far
+         * the engine can coherently go before the model itself terminates. */
+        if (recent_count >= 4 && getenv("TQ_NO_LOOP_DETECT") == NULL) {
             uint32_t h = 0;
             for (int r = 0; r < 4; r++) {
                 int gi = (recent_count - 4 + r) % 128;
