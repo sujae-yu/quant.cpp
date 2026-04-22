@@ -105,18 +105,44 @@ the attractor hits, not WHETHER. The gap must be in something that
 changes BEHAVIOR over 100+ tokens (accumulation), not a precision-loss
 point.
 
-### Round 7 direction (planned)
+### Round 7 — DeltaNet state drift CONFIRMED, decay_scale fix FAILS (commit 342d029)
 
-DeltaNet recurrent state accumulation. Memory note says "Qwen3.6
-long-gen drift — likely DeltaNet recurrent state error". Layer 39 is
-specifically DeltaNet (full_attention_interval=4, attn at 0,4,8,..,36).
-Over 150 tokens × 30 DeltaNet layers, `state = state * decay + delta`:
-  - If decay has any bias, state magnitude drifts geometrically
-  - If delta has precision drift, accumulates linearly
-  - State initialized to 0; by pos 150 it carries all prior tokens
+TQ_DN_STATE_PROBE + TQ_DN_LOAD_PROBE + TQ_DN_DECAY_SCALE landed.
 
-Probe: dump DeltaNet state RMS per-layer at multiple positions,
-check growth rate vs 4B (which has same DeltaNet, gets 185 tok OK).
+**Data proves DeltaNet drift hypothesis on 35B:**
+
+| Metric | 4B Layer 0 (healthy) | 35B Layer 0 (broken) |
+|---|---|---|
+| pos 1 state RMS | 0.007 | 0.008 |
+| pos 40 state RMS | 0.054 (**plateau**) | 0.21 (**growing**) |
+| growth pattern | oscillates around 0.05 | monotonic 28× over 70 pos |
+
+But fixing decay didn't help:
+  Baseline:             147 tok
+  TQ_DN_DECAY_SCALE=0.99: 54 tok (**-93 tok regression**)
+
+### Round 3/6/7 pattern — localized fixes ALL regress
+
+| Intervention | Delta tokens |
+|---|---:|
+| Kahan MoE aggregation | -21 |
+| FP32 LM head          | -93 |
+| Decay scale 0.99      | -93 |
+
+The 147-tok baseline is a **local optimum** in our current parameter
+space. Single-op perturbations shift attractor position without
+widening the coherent window.
+
+### Round 8 direction (planned)
+
+State magnitude clipping — not a precision change, but a stability
+intervention. If `|state| > threshold`, clip: `state *= threshold/|state|`.
+This preserves dynamics but prevents unbounded growth. If llama.cpp
+has implicit clipping via different dtype choices downstream, this
+might bridge the gap.
+
+Alternative if clipping fails: direct llama.cpp DeltaNet code
+transplant.
 
 ## R47 — 35B 1000-tok attempt — 4 approaches all fail short of target (2026-04-22)
 
