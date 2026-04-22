@@ -234,6 +234,71 @@ Fix: skip log conversion, use raw values. TQ_DN_ALOG_LEGACY=1 reverts.
 Result: 168 tok vs 147 baseline = +21 tok. **First non-regression in
 9 rounds**, validating the line-by-line vs-llama.cpp approach.
 
+## ★★★ R50 — Side-by-side intermediate state diff localizes bug to alpha/beta projection (commit 8e4d85b)
+
+이번 세션 1순위 작업 (paired trace vs llama.cpp) 실행. 결정적 진전.
+
+### Tools confirmed available
+
+- **refs/llama.cpp/build/bin/llama-debug**: 빌드되어 있음. 모든
+  op intermediate state + sum 출력 (`common_debug_cb_eval:` prefix).
+- 우리 엔진: `TQ_LAYER_TRACE=1` 환경 변수 추가 (l_out per layer + DN sub-op).
+
+### Per-layer l_out comparison (Qwen3.5-4B "Hi" prompt, 32 layers)
+
+| L | llama.cpp | ours | ratio |
+|---|---:|---:|---:|
+| 0 | 0.605 | 1.170 | **1.93×** |
+| 1 | 0.244 | 0.506 | 2.07× |
+| 2 | -0.054 | -0.726 | ~13× |
+| 4 | 0.923 | -1.071 | **SIGN FLIP** |
+| 5 | 0.447 | -0.444 | **SIGN FLIP** |
+
+**Bug starts at layer 0 — NOT cumulative drift.** 14+ rounds chasing
+"long-gen precision drift" was wrong framing.
+
+### Layer 0 sub-op trace (DN block)
+
+| Step | llama.cpp | ours | match |
+|---|---:|---:|---|
+| input_embed | -0.227 | -0.227 | ✓ |
+| attn_norm | -24.556 | -24.556 | ✓ |
+| qkv_proj | 96.218 | 101.280 | +5% |
+| **alpha+beta** | **-4.84** | **-8.07** | **+67%!** |
+| final_output (post groupnorm+zgate) | -9.819 | -9.747 | sum 1%, elements 5-6% |
+| **linear_attn_out (after ssm_out matmul)** | **1.410** | **1.780** | **+26%** |
+
+### Bug identified: alpha/beta projection precision
+
+- `ssm_alpha`/`ssm_beta` (Qwen 3.5 DeltaNet `delta_in_proj_a/b`)
+  are Q4_K in GGUF.
+- Our load path: GGUF Q4_K → FP32 dequant (line 4231-4250) →
+  our Q4 quant (line 4263 `tq_quantize_weights_q4`).
+- Output dim is 32 (`num_v_heads`) — very small, Q4 precision loss
+  is proportionally larger.
+- llama.cpp uses raw GGUF Q4_K with single dequant in matmul.
+
+The 67% alpha+beta sum divergence cascades:
+- alpha drives decay → small precision error compounds geometrically
+- beta scales delta → precision error scales every state update
+- 5-6% drift in final_output elements amplifies to 26% in
+  linear_attn_out via large matmul
+
+### Next session immediate work
+
+1. **TQ_DELTA_AB_FP32=1** — keep delta_in_proj_a, delta_in_proj_b
+   in FP32, skip the second Q4 quantization
+2. Re-run paired trace, verify alpha+beta sum matches llama.cpp
+3. If sum matches: test long-gen on 35B
+4. If long-gen breaks attractor → land as auto-skip default
+5. Probable +50-100 tok improvement based on amplification cascade
+
+### R50 tool summary
+
+- TQ_LAYER_TRACE=1: per-layer l_out + per-DN-substep sum
+- TQ_SSM_OUT_FP32=1: opt-in ssm_out FP32 (ruled out as amplifier)
+- refs/llama.cpp/build/bin/llama-debug: ground-truth comparator
+
 ## ★★ R49 — DeltaNet RULED OUT as bottleneck via verbatim llama.cpp port (commit da0ad5f)
 
 User directive: "용잡는 칼로 용을 잡을수 있도록" (use a dragon-slaying
