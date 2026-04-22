@@ -826,10 +826,14 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
         l2_normalize(K_all + h * dk, dk);
     }
 
-    /* Step 6: Scale Q by 1/sqrt(head_dim) */
-    float q_scale = 1.0f / sqrtf((float)dk);
-    for (int i = 0; i < dn_kv * dk; i++) {
-        Q_all[i] *= q_scale;
+    /* Step 6: Scale Q by 1/sqrt(head_dim).
+     * R48 round 11 RULED OUT: llama.cpp's build_delta_net applies this
+     * scaling internally (we tested removal: 28 tok garbage). Keep ours. */
+    {
+        float q_scale = 1.0f / sqrtf((float)dk);
+        for (int i = 0; i < dn_kv * dk; i++) {
+            Q_all[i] *= q_scale;
+        }
     }
 
     TQ_PROF_START(_tp);
