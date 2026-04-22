@@ -41,16 +41,28 @@ Key observations:
 - **T=1 vs T=2 trade-off**: T=1 gives 76% larger RMS but generation collapses at 26 tok vs 147
   → problem NOT "MoE too small" — T=2 shrinks outputs AND improves coherence
 
-### Round 3 direction (planned)
+### Round 3 — Kahan summation RULED OUT (commit ed13b60)
 
-MoE aggregation accumulator precision. 30× maxabs/RMS means outlier
-channels per expert. Naive FP32 sum of weighted outputs could
-catastrophically cancel between positive/negative outliers. Test:
-  a) Kahan summation in `output += weight[k] * expert_out[k]` loop
-  b) Separate routed-sum and shared-sum tracking
-  c) Per-expert RMS dump for layer 39 specifically to see which expert
-     produces outlier output
-  d) Compare attn-layer MoE vs DeltaNet-layer MoE (layer 39 is DeltaNet)
+Hypothesis (a) tested: Kahan summation in MoE aggregation.
+
+Result: 126 tok vs 147 tok baseline — actually 21 tok REGRESSION.
+Catastrophic cancellation hypothesis RULED OUT on Qwen3.6-35B.
+
+Kept as opt-in (TQ_MOE_KAHAN=1) for future investigation / different
+MoE architectures. Default remains naive-sum NEON path.
+
+Other round 3 checks (no change needed):
+- DeltaNet β/α: already uses exact expf (Round 29 precedent). Math OK.
+- 4B model reaches 185 tok on same DeltaNet arch (no MoE) → DeltaNet
+  is NOT the gap. 35B gap is MoE-specific.
+
+### Round 4 direction (planned)
+
+Hypothesis (b) — per-expert output RMS dump for layer 39.
+Layer 39's 5-10× elevated RMS could come from ONE specific expert
+(or shared expert). Dumping per-expert output RMS at layer 39
+identifies: routed-expert-N, shared expert, or the routing
+decision itself. Then fix scope is clear.
 
 ## R47 — 35B 1000-tok attempt — 4 approaches all fail short of target (2026-04-22)
 
