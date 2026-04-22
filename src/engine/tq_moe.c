@@ -1128,8 +1128,13 @@ moe_cpu_fallback: ;
 #ifdef TQ_HAS_METAL
 moe_shared_expert:
 #endif
-    /* Step 4: Shared expert (always-active, if present) */
-    if (config->has_shared_expert) {
+    /* Step 4: Shared expert (always-active, if present).
+     * TQ_MOE_NO_SHARED=1 disables it entirely for A/B testing against
+     * llama.cpp's presumed identical path. If disabling improves
+     * long-gen, shared expert's outlier channels are poisoning the
+     * residual; if worse, shared expert is necessary but our handling
+     * diverges from reference. */
+    if (config->has_shared_expert && getenv("TQ_MOE_NO_SHARED") == NULL) {
         int shared_dim = config->shared_expert_intermediate_dim;
         if (shared_dim == 0) shared_dim = expert_dim;
 
