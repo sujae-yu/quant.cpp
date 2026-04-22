@@ -3742,9 +3742,24 @@ tq_model_t* tq_load_gguf(const char* path) {
 
     const tq_gguf_tensor_t* out_t = find_gguf_tensor(gguf, "output.weight");
     if (out_t) {
+        /* TQ_OUTPUT_FP32=1: force dequant output.weight to FP32 at load.
+         * 248k × 2048 Q6_K matmul has ~0.5% bpw error on average; at the
+         * ~1500 position of decoding with the model on the edge of
+         * coherence, this could flip top-1 argmax to garbage tokens.
+         * Costs ~2 GB extra RAM on 35B (vocab 248k × 2048 × 4B). */
+        if (getenv("TQ_OUTPUT_FP32") && out_t->type != TQ_GGML_TYPE_F32) {
+            model->output_weight = dequant_tensor_fp32(out_t);
+            model->output_gguf = NULL;
+            model->output_gguf_type = 0;
+            model->output_weight_bf16 = NULL;
+            size_t bytes = (size_t)out_t->shape[0] * out_t->shape[1] * 4;
+            fprintf(stderr, "tq_load_gguf: TQ_OUTPUT_FP32=1 — output.weight "
+                    "force-dequanted %s→FP32 (%zu MB)\n",
+                    tq_ggml_type_name(out_t->type), bytes / (1024 * 1024));
+        }
         /* Separate output weight tensor (untied from embedding).
          * For large vocab: use GGUF fused dot for output projection too. */
-        if (c->vocab_size > 100000 || (emb_t && emb_t->shape[1] > 100000)) {
+        else if (c->vocab_size > 100000 || (emb_t && emb_t->shape[1] > 100000)) {
             /* Override output_gguf with the actual output weight (not embedding) */
             model->output_gguf = out_t->data;
             model->output_gguf_type = out_t->type;
