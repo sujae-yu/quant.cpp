@@ -766,6 +766,9 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
          * per-head per-token — ~2% Schraudolph error at this stage
          * propagates into decay which gates the entire recurrent state. */
         float alpha_sp;
+        /* R12 RULED OUT: tested matching ggml threshold 20.0f instead of
+         * 15.0f. Result was -115 tok regression (53 vs R10's 168 baseline).
+         * Apparently early EOS triggered. Empirically 15 is correct here. */
         if (alpha_biased > 15.0f) {
             alpha_sp = alpha_biased;
         } else {
