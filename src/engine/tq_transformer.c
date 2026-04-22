@@ -3506,6 +3506,15 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
             for (int i = 0; i < dim; i++) { _s += s->x[i]; _sa += (s->x[i]<0?-s->x[i]:s->x[i]); }
             fprintf(stderr, "[fwd]   L%d pos=%d final x sum=%.9f sumabs=%.9f\n", l, pos, _s, _sa);
         }
+        /* R50: TQ_LAYER_TRACE=1 dumps per-layer l_out sum + first-3 elements
+         * in format matching llama.cpp's common_debug_cb_eval: l_out-N sum
+         * for paired diff against llama-debug output. */
+        if (getenv("TQ_LAYER_TRACE")) {
+            double _s = 0.0;
+            for (int i = 0; i < dim; i++) _s += s->x[i];
+            fprintf(stderr, "[trace] l_out-%d pos=%d sum=%.6f first3=%.4f,%.4f,%.4f\n",
+                    l, pos, _s, s->x[0], s->x[1], s->x[2]);
+        }
         {
             char _slot[16]; snprintf(_slot, sizeof(_slot), "h%d", l);
             tq_dump_hidden(_slot, s->x, dim, pos);
