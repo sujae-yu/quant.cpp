@@ -412,6 +412,17 @@ typedef struct {
     int n_threads;
     float rep_penalty;    /* repetition penalty (default: 1.1, 1.0 = disabled) */
     int rep_window;       /* how many recent tokens to penalize (default: 32) */
+    /* DRY (Don't Repeat Yourself) sampler — ported from llama.cpp.
+     * Exponential penalty on tokens that would extend a repeated n-gram
+     * pattern. Much more surgical than rep_penalty which penalizes all
+     * recent tokens regardless of whether they form a repeating pattern.
+     * Defaults match llama.cpp: multiplier=0.0 (DISABLED by default for
+     * backward compat), base=1.75, allowed_length=2, penalty_last_n=128.
+     * Set dry_multiplier > 0 to enable (0.8 is llama.cpp's typical value). */
+    float dry_multiplier;  /* 0.0 = disabled, 0.8 = community typical */
+    float dry_base;        /* penalty base (default 1.75) */
+    int   dry_allowed_length; /* min pattern length to penalize (default 2) */
+    int   dry_penalty_last_n; /* how many recent tokens to scan (default 128) */
     unsigned long long rng_seed; /* sampling seed (default: 42, 0 = use 42 for back-compat) */
     /* KV cache persistence (Document-Level RAG: read once, query forever) */
     const char* save_kv_path; /* save KV cache after generation (NULL = don't save) */

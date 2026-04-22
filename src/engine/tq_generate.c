@@ -25,6 +25,111 @@
 #endif
 
 /* ============================================================
+ * DRY (Don't Repeat Yourself) sampler penalty.
+ * Ported from llama.cpp src/llama-sampler.cpp llama_sampler_dry_apply.
+ *
+ * Penalizes tokens that would EXTEND a repeated n-gram pattern in the
+ * recent context. Penalty is exponential: penalty = multiplier * base^(n-allowed).
+ * Much more surgical than rep_penalty: rep_penalty penalizes ALL recent
+ * tokens uniformly; DRY only penalizes the specific tokens that would
+ * continue a detected repeating sequence.
+ *
+ * Algorithm uses the Z-algorithm in reverse direction to compute, for
+ * each offset k from newest-going-older, the length of the longest
+ * suffix match. Then for each k with match >= allowed_length, the token
+ * at position k-1 (one step newer than the match start) is the token
+ * that if sampled NEXT would continue the pattern — we penalize it.
+ *
+ * Simplified vs llama.cpp: no restart sequence breakers (we just pure
+ * text continuation; breakers like punctuation are handled by logit
+ * ordering implicitly).
+ *
+ * O(N) time where N = min(recent_count, penalty_last_n).
+ * ============================================================ */
+static void apply_dry_penalty(
+    float* logits, int vocab_size,
+    const int* recent_tokens, int recent_count, int recent_cap,
+    float multiplier, float base, int allowed_length, int penalty_last_n)
+{
+    if (multiplier <= 0.0f || base < 1.0f || penalty_last_n == 0) return;
+    int last_n = recent_count < penalty_last_n ? recent_count : penalty_last_n;
+    if (last_n > recent_cap) last_n = recent_cap;
+    if (last_n <= allowed_length) return;
+
+    /* rat(i) convention: i-th token from the newest (0 = newest).
+     * Ring buffer: arr index = (recent_count - 1 - i) mod recent_cap. */
+    #define RAT_IDX(i) ((((recent_count - 1 - (i)) % recent_cap) + recent_cap) % recent_cap)
+    #define RAT(i)     (recent_tokens[RAT_IDX(i)])
+
+    /* rc[k] = length of suffix match starting at offset k (from newest)
+     * that equals the newest suffix. Range [0, last_n). */
+    int* rc = (int*)calloc((size_t)last_n, sizeof(int));
+    if (!rc) return;
+
+    int rt = 0, lt = 0;
+    for (int k = 1; k < last_n; k++) {
+        if (k > rt) {
+            int n = 0;
+            while (n + k < last_n && RAT(n) == RAT(n + k)) n++;
+            rc[k] = n;
+            if (n > 0) { lt = k; rt = k + n - 1; }
+        } else {
+            int p = k - lt;
+            int right_part_len = rt - k + 1;
+            if (rc[p] < right_part_len) {
+                rc[k] = rc[p];
+            } else {
+                int i = rt + 1;
+                while (i < last_n && RAT(i) == RAT(i - k)) i++;
+                rc[k] = i - k;
+                lt = k; rt = i - 1;
+            }
+        }
+    }
+
+    /* For each k with rc[k] >= allowed_length, the token at rat(k-1)
+     * would extend the pattern if sampled. Track max extension per token. */
+    #define DRY_TOP 512
+    int   top_tok[DRY_TOP];
+    int   top_len[DRY_TOP];
+    int   top_count = 0;
+
+    for (int k = 1; k < last_n; k++) {
+        int rep = rc[k];
+        if (rep < allowed_length) continue;
+        int tok = RAT(k - 1);
+        if (tok < 0 || tok >= vocab_size) continue;
+        /* Linear probe — typically very few unique extenders so this is fine. */
+        int found = -1;
+        for (int j = 0; j < top_count; j++) {
+            if (top_tok[j] == tok) { found = j; break; }
+        }
+        if (found >= 0) {
+            if (rep > top_len[found]) top_len[found] = rep;
+        } else if (top_count < DRY_TOP) {
+            top_tok[top_count] = tok;
+            top_len[top_count] = rep;
+            top_count++;
+        }
+    }
+
+    /* Apply penalty. Clamp exponent to avoid overflow of powf. */
+    const float FLOAT_MAX_LOG = 88.7228391f;
+    int max_exp = (base > 1.000001f) ? (int)(FLOAT_MAX_LOG / logf(base)) : 0;
+    for (int j = 0; j < top_count; j++) {
+        int e = top_len[j] - allowed_length;
+        if (max_exp > 0 && e > max_exp) e = max_exp;
+        float pen = multiplier * powf(base, (float)e);
+        logits[top_tok[j]] -= pen;
+    }
+
+    free(rc);
+    #undef RAT_IDX
+    #undef RAT
+    #undef DRY_TOP
+}
+
+/* ============================================================
  * Argmax sampling: return token with highest logit
  * ============================================================ */
 int tq_sample_argmax(const float* logits, int vocab_size) {
@@ -441,6 +546,14 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
         }
     }
 
+    /* DRY penalty before first-token sample (if enabled) */
+    if (config->dry_multiplier > 0.0f) {
+        apply_dry_penalty(state->logits, vocab_size,
+                          recent_tokens, recent_count, 128,
+                          config->dry_multiplier, config->dry_base,
+                          config->dry_allowed_length, config->dry_penalty_last_n);
+    }
+
     /* Sample first generated token. The seed is configurable via
      * config->rng_seed to support reproducible sampling sweeps; 0 falls
      * back to the historical default of 42 so existing callers that
@@ -639,6 +752,14 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
                         state->logits[tok] *= rep_penalty;
                 }
             }
+        }
+
+        /* DRY penalty before sample (if enabled) */
+        if (config->dry_multiplier > 0.0f) {
+            apply_dry_penalty(state->logits, vocab_size,
+                              recent_tokens, recent_count, 128,
+                              config->dry_multiplier, config->dry_base,
+                              config->dry_allowed_length, config->dry_penalty_last_n);
         }
 
         /* Sample next token */

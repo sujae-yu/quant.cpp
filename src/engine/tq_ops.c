@@ -2248,6 +2248,12 @@ tq_gen_config_t tq_default_gen_config(void) {
     config.n_threads = 1;
     config.rep_penalty = 1.1f;
     config.rep_window = 32;
+    /* DRY sampler defaults — DISABLED (multiplier=0) for back-compat.
+     * CLI --dry-multiplier / TQ_DRY_MULT env can enable it. */
+    config.dry_multiplier = 0.0f;
+    config.dry_base = 1.75f;
+    config.dry_allowed_length = 2;
+    config.dry_penalty_last_n = 128;
     config.rng_seed = 42ULL;
     config.on_token = NULL;
     config.user_data = NULL;

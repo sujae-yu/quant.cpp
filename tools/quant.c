@@ -209,6 +209,11 @@ int main(int argc, char** argv) {
     float top_p = 0.9f;
     float rep_penalty = -1.0f;  /* -1 = use engine default (1.1) */
     int   rep_window = -1;
+    /* DRY sampler (disabled by default; enable with --dry-multiplier >0). */
+    float dry_multiplier = -1.0f;
+    float dry_base = -1.0f;
+    int   dry_allowed_length = -1;
+    int   dry_penalty_last_n = -1;
     tq_type kv_type = TQ_TYPE_TURBO_KV_4B;
     /* Default: P-core count on macOS, total core count elsewhere.
      * On Apple Silicon, mixing P+E cores at the same priority makes
@@ -282,6 +287,14 @@ int main(int argc, char** argv) {
             rep_penalty = (float)atof(argv[++i]);
         } else if (strcmp(argv[i], "--rep-window") == 0 && i + 1 < argc) {
             rep_window = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--dry-multiplier") == 0 && i + 1 < argc) {
+            dry_multiplier = (float)atof(argv[++i]);
+        } else if (strcmp(argv[i], "--dry-base") == 0 && i + 1 < argc) {
+            dry_base = (float)atof(argv[++i]);
+        } else if (strcmp(argv[i], "--dry-allowed-length") == 0 && i + 1 < argc) {
+            dry_allowed_length = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--dry-penalty-last-n") == 0 && i + 1 < argc) {
+            dry_penalty_last_n = atoi(argv[++i]);
         } else if (strcmp(argv[i], "-k") == 0 && i + 1 < argc) {
             kv_type = parse_kv_type(argv[++i]);
         } else if (strcmp(argv[i], "-v") == 0 && i + 1 < argc) {
@@ -1414,6 +1427,15 @@ int main(int argc, char** argv) {
     config.top_p = top_p;
     if (rep_penalty >= 0.0f) config.rep_penalty = rep_penalty;
     if (rep_window  >= 0)    config.rep_window  = rep_window;
+    /* DRY sampler (CLI and TQ_DRY_MULT env override) */
+    {
+        const char* dry_env = getenv("TQ_DRY_MULT");
+        if (dry_multiplier < 0.0f && dry_env) dry_multiplier = (float)atof(dry_env);
+    }
+    if (dry_multiplier >= 0.0f)   config.dry_multiplier = dry_multiplier;
+    if (dry_base >= 1.0f)         config.dry_base = dry_base;
+    if (dry_allowed_length >= 1)  config.dry_allowed_length = dry_allowed_length;
+    if (dry_penalty_last_n >= 0)  config.dry_penalty_last_n = dry_penalty_last_n;
     config.max_tokens = max_tokens;
     config.kv_type = kv_type;
     config.value_quant_bits = value_quant_bits;
