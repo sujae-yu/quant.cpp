@@ -1,3 +1,41 @@
+## Qwen3.6-A3B 35B Long-Generation: SE-aware preset (R52)
+
+### R52 Update (2026-04-23): Super Expert FP32 override is the real fix
+
+Replaced R51 ssm_out + LM head + llamacpp_port preset with **per-expert FP32 override** based on outlier-rank super experts. This extends *coherent* portion 30 → 80 tokens (2.7×), the first real coherent improvement on this model.
+
+Mechanism: 40 routed experts (top-1 per layer by max activation) are kept at FP32, preserving outlier-channel weights that uniform IQ4_XS would clip. Memory cost ~480 MB extra. Per arxiv 2507.23279 "Unveiling Super Experts in MoE LLMs", these specific experts hold load-bearing model state; clipping their weights produces "repetitive uninformative output" — exact symptom of pre-fix attractor.
+
+### Results (deterministic -j 1, "Once upon a time in a faraway land")
+
+| Configuration | Total tok | Coherent tok |
+|---|---:|---:|
+| No preset | 54 | ~30 |
+| R51 preset (ssm_out + LM + lcppport) | 234 | ~30 (extension only) |
+| **R52 SE preset (40 SEs FP32)** | **154** | **~80 (REAL coherent)** |
+| llama.cpp same model | ~1500 | ~1500 |
+
+Coherent length is the meaningful metric. R52 gives 2.7× coherent, R51 was 1× coherent.
+
+### Calibration recipe
+
+```bash
+# 1. Run with TQ_MOE_EXPERT_PROBE_ALL=1 on a representative prompt
+TQ_MOE_EXPERT_PROBE=1 TQ_MOE_EXPERT_PROBE_ALL=1 TQ_QWEN35MOE_NO_PRESET=1 \
+  build/quant <model> -p "<calibration prompt>" -n 50 -T 0 -j 1 --chat \
+  > calib.log 2>&1
+
+# 2. Aggregate per (layer, expert) max maxabs
+grep "^\[moe-expert\]" calib.log | awk '...' > agg.txt
+
+# 3. Top-1 routed per layer = SE candidate list
+# 4. Pass via TQ_SE_LIST="L:E,L:E,..."
+```
+
+For Qwen3.6-35B-A3B UD-IQ4_XS, the calibrated list is hardcoded into the auto-preset.
+
+## (R51 documentation below — superseded by R52 above)
+
 ## Qwen3.6-A3B 35B Long-Generation: known limit and preset
 
 ### Status

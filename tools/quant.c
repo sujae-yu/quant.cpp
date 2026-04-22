@@ -396,25 +396,38 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    /* R51 P4: Qwen3.6-A3B preset — auto-enable 3 long-gen fixes that
-     * triple coherent-extension on this specific model.
-     * Empirically tested in deterministic mode (-j 1):
-     *   baseline 54 tok → with preset 234 tok (+180, 4.3×)
+    /* R52: Qwen3.6-A3B preset — Super Expert FP32 override.
+     * Per "Unveiling Super Experts in MoE LLMs" (arxiv 2507.23279),
+     * specific outlier-rank routed experts dominate stability. Uniform
+     * IQ4_XS quant clips their weights, causing repetitive output.
+     * Solution: keep top-1 per layer at FP32 (480 MB extra RAM).
+     *
+     * SE list calibrated on Qwen3.6-35B-A3B UD-IQ4_XS via per-expert
+     * max(|down_proj_out|) over 50-token prefill.
+     *
+     * Empirical (deterministic -j 1) on "Once upon a time...":
+     *   baseline 54 tok (~30 coherent)
+     *   with SE preset: 154 tok (~80 coherent — REAL coherent improvement)
+     *
      * Set TQ_QWEN35MOE_NO_PRESET=1 to opt out.
-     * Note: same fixes REGRESS Qwen3.5-4B (191 → 122) — preset is
-     * filename-gated to "Qwen3.6" or arch keyword.
-     * MUST run before tq_load_model since TQ_SSM_OUT_FP32 is read at load. */
+     * Auto-detects via filename match (Qwen3.6 / A3B / qwen35moe). */
     if (!getenv("TQ_QWEN35MOE_NO_PRESET")) {
         const char* basename = strrchr(model_path, '/');
         basename = basename ? basename + 1 : model_path;
         if (strstr(basename, "Qwen3.6") || strstr(basename, "qwen35moe") ||
             strstr(basename, "Qwen3.5-30B") || strstr(basename, "A3B")) {
-            if (!getenv("TQ_SSM_OUT_FP32"))    setenv("TQ_SSM_OUT_FP32", "1", 0);
-            if (!getenv("TQ_OUTPUT_FP32"))     setenv("TQ_OUTPUT_FP32", "1", 0);
-            if (!getenv("TQ_DN_LLAMACPP_PORT")) setenv("TQ_DN_LLAMACPP_PORT", "1", 0);
-            fprintf(stderr, "tq_main: qwen35moe preset auto-enabled "
-                    "(TQ_SSM_OUT_FP32 + TQ_OUTPUT_FP32 + TQ_DN_LLAMACPP_PORT). "
-                    "Set TQ_QWEN35MOE_NO_PRESET=1 to opt out.\n");
+            if (!getenv("TQ_SE_LIST")) {
+                static const char SE_LIST_QWEN36_35B[] =
+                    "0:112,1:197,2:150,3:199,4:203,5:165,6:31,7:204,"
+                    "8:201,9:142,10:139,11:247,12:249,13:175,14:103,15:110,"
+                    "16:185,17:17,18:114,19:33,20:13,21:58,22:160,23:209,"
+                    "24:93,25:93,26:118,27:165,28:170,29:150,30:250,31:199,"
+                    "32:224,33:5,34:241,35:44,36:110,37:104,38:209,39:231";
+                setenv("TQ_SE_LIST", SE_LIST_QWEN36_35B, 0);
+                fprintf(stderr, "tq_main: qwen35moe SE-aware preset auto-enabled "
+                        "(40 super experts FP32, ~480 MB extra). "
+                        "Set TQ_QWEN35MOE_NO_PRESET=1 to opt out.\n");
+            }
         }
     }
 
