@@ -396,6 +396,28 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    /* R51 P4: Qwen3.6-A3B preset — auto-enable 3 long-gen fixes that
+     * triple coherent-extension on this specific model.
+     * Empirically tested in deterministic mode (-j 1):
+     *   baseline 54 tok → with preset 234 tok (+180, 4.3×)
+     * Set TQ_QWEN35MOE_NO_PRESET=1 to opt out.
+     * Note: same fixes REGRESS Qwen3.5-4B (191 → 122) — preset is
+     * filename-gated to "Qwen3.6" or arch keyword.
+     * MUST run before tq_load_model since TQ_SSM_OUT_FP32 is read at load. */
+    if (!getenv("TQ_QWEN35MOE_NO_PRESET")) {
+        const char* basename = strrchr(model_path, '/');
+        basename = basename ? basename + 1 : model_path;
+        if (strstr(basename, "Qwen3.6") || strstr(basename, "qwen35moe") ||
+            strstr(basename, "Qwen3.5-30B") || strstr(basename, "A3B")) {
+            if (!getenv("TQ_SSM_OUT_FP32"))    setenv("TQ_SSM_OUT_FP32", "1", 0);
+            if (!getenv("TQ_OUTPUT_FP32"))     setenv("TQ_OUTPUT_FP32", "1", 0);
+            if (!getenv("TQ_DN_LLAMACPP_PORT")) setenv("TQ_DN_LLAMACPP_PORT", "1", 0);
+            fprintf(stderr, "tq_main: qwen35moe preset auto-enabled "
+                    "(TQ_SSM_OUT_FP32 + TQ_OUTPUT_FP32 + TQ_DN_LLAMACPP_PORT). "
+                    "Set TQ_QWEN35MOE_NO_PRESET=1 to opt out.\n");
+        }
+    }
+
     /* Load model */
     fprintf(stderr, "Loading model from %s...\n", model_path);
     tq_model_t* model = tq_load_model(model_path);

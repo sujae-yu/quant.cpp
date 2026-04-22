@@ -38,7 +38,8 @@ print(m.ask("What is gravity?"))
 | **gemma3** | ✅ | ✅ | ✅ | ✅ | Supported with hybrid sliding-window attention |
 | **gemma4** (Gemma-4-E2B / E4B) | ✅ | ✅ | ⚠️ | ⚠️ | Partial — some Q4_K_M variants produce garbage; report with file SHA256 |
 | **qwen** / **qwen2** | ✅ | ✅ | ✅ | ✅ | Supported |
-| **qwen3.5** (DeltaNet hybrid) | ✅ | ✅ | partial | ⚠️ | Partial — pure-attention layers work, DeltaNet hybrid still being validated |
+| **qwen3.5** (DeltaNet hybrid, dense FFN) | ✅ | ✅ | ✅ | ✅ | Supported (185-tok natural completion validated) |
+| **qwen35moe** (Qwen3.6-A3B 35B, MoE + DeltaNet) | ✅ | ✅ | ✅ | ⚠️ | Loads + short-form ✅. Long-form has documented coherence ceiling (~30 tok); auto-preset extends total length to ~234 tok. See [`qwen35moe_long_gen.md`](qwen35moe_long_gen.md). |
 
 ✅ = works · ⚠️ = loads but inference is unreliable · ❌ = load fails fast with a clear error (since 2026-04-12)
 

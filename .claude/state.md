@@ -234,6 +234,58 @@ Fix: skip log conversion, use raw values. TQ_DN_ALOG_LEGACY=1 reverts.
 Result: 168 tok vs 147 baseline = +21 tok. **First non-regression in
 9 rounds**, validating the line-by-line vs-llama.cpp approach.
 
+## R51 P4 — Option B: productize 234-tok ceiling as known limit (commit pending)
+
+User chose Option B (5/20 라운드 사용 후). 결과:
+
+### Landed code (auto-preset for qwen35moe)
+
+`tools/quant.c:399-417` — Filename detection auto-enables 3 fixes
+when model path contains `Qwen3.6` / `qwen35moe` / `Qwen3.5-30B` / `A3B`:
+  - TQ_SSM_OUT_FP32=1 (FP32 ssm_out projection)
+  - TQ_OUTPUT_FP32=1 (FP32 LM head, ~2 GB extra RAM)
+  - TQ_DN_LLAMACPP_PORT=1 (verbatim llama.cpp delta_net)
+
+Stderr: `tq_main: qwen35moe preset auto-enabled (...). Set TQ_QWEN35MOE_NO_PRESET=1 to opt out.`
+
+Verified:
+- 35B with auto-preset: 234 tok (4.3× baseline 54)
+- 4B unaffected (preset doesn't trigger): 191 tok preserved
+
+### Documentation
+
+- `docs/qwen35moe_long_gen.md` — full status doc + recommended use
+- `docs/supported_models.md` — Qwen3.6-A3B status updated (✅ short-form, ⚠️ long-form ceiling)
+
+### Honest known limit
+
+| Use | quant.cpp | llama.cpp |
+|---|---:|---:|
+| Qwen3.6-A3B short response (<30 coherent tok) | ✅ works | ✅ works |
+| Qwen3.6-A3B long-form (1000+ tok) | ❌ ceiling ~30 coherent | ✅ 1500+ coherent |
+| Other models (Phi-3.5, 4B, Llama-3.x) | ✅ works | ✅ works |
+
+**Production recommendation**: Use Phi-3.5-mini, Qwen3.5-4B, Llama-3.x for stable long-gen on 16 GB Mac. Qwen3.6-A3B suitable for short tasks only in our engine.
+
+### R51 final tally
+
+20-round budget: used 5 effective rounds (P0-P2 deep, P4 productize).
+Remaining 15 rounds NOT consumed — Option B closure means stopping
+loop here.
+
+Achievements (this session):
+- ✅ Variance methodology established (-j 1 mandatory)
+- ✅ 3 real fixes identified through deterministic testing
+- ✅ R6/R7/R49 anti-pattern reanalysis (most were noise, not regression)
+- ✅ Auto-preset deployed (4.3× length improvement)
+- ✅ Honest limitation documented
+
+Open for future work (next session if user requests):
+- Coherent length still ~30 tok (vs 1500 llama)
+- Bug = early-token logit ordering, not algorithmic
+- Bulk port of llama.cpp's full forward path (multi-week)
+  is the only realistic remaining option
+
 ## R51 — 새 전략: variance-first, paradigm shift (2026-04-22 시작)
 
 ### 16+ 라운드의 메타 교훈
