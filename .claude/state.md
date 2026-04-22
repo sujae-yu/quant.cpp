@@ -172,6 +172,56 @@ This is a significant engineering effort (hundreds of LOC, multiple
 rounds of fixes). Alternative: acknowledge the 147-tok ceiling as
 a known limitation pending architectural surgery.
 
+## Round 9 — TARGET VERIFIED achievable, real engine gap confirmed (2026-04-22)
+
+User raised meta check: "불가능에 도전 vs 잘못된 길" after 8 rounds
+of failed interventions. Before continuing Round 9 work (llama.cpp
+transplant), verified the premise that 1000+ tok is actually reachable.
+
+### Verification method
+
+Ran llama.cpp (built from refs/) on identical inputs:
+  Model:   Qwen3.6-A3B-UD-IQ4_XS.gguf (SAME weights as our tests)
+  Prompt:  `<|im_start|>user\nOnce upon a time in a faraway land<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n`
+           (SAME thinking-off template as our engine)
+  Config:  --temp 0 --seed 42 -t 4 -ngl 0 (SAME T=0 greedy CPU)
+
+### Result
+
+llama.cpp generated a **complete, coherent 2000+ token narrative**:
+- Full fairy-tale: Elara the mapmaker's apprentice, blank scroll, Loom
+  of Seasons, 3 threads quest (Memory/Courage/Tomorrow), resolution,
+  closing moral
+- Thinking process visible before the story (llama-cli UI marker
+  "[Start thinking]"); story itself is the drafted output
+- Finished naturally (not truncated)
+
+### Definitive conclusions
+
+1. **1000+ tok IS achievable** on this model+prompt+quant combo.
+   "Impossible target" hypothesis RULED OUT.
+2. **147 tok is NOT the model's natural limit** — it's OUR engine's
+   coherence ceiling at current implementation. Real gap.
+3. **Localized precision fixes (R3-R8) are the wrong path** — confirmed.
+   All 7 interventions reshuffled attractor, didn't close gap.
+4. **Qwen3.6 strongly prefers thinking mode** on this prompt —
+   llama.cpp re-opened `[Start thinking]` even after our `</think>`
+   close, indicating model-level trained behavior.
+
+### User's framing revised
+
+User's binary ("impossible vs wrong path") got a **third answer**:
+the path WAS wrong, but the destination IS real. Round 9 (llama.cpp
+transplant) is the correct direction — the 8 rounds of localized
+fixes were exactly the kind of "wrong path" the user intuited, but
+the 1000+ target is legitimately achievable by the right surgery.
+
+### Next steps
+
+Proceed with Round 9 (llama.cpp DeltaNet + MoE forward-path transplant)
+with confidence that the target is real. Estimated 3-5 further rounds
+of surgical porting to reconcile our engine path with ggml's.
+
 ## R47 — 35B 1000-tok attempt — 4 approaches all fail short of target (2026-04-22)
 
 User: "계속 진행해주세요. 마지막으로 35b 모델에서 1000+ 토큰까지 성공적으로 완료후 완료 보고 바랍니다."
