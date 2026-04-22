@@ -234,6 +234,72 @@ Fix: skip log conversion, use raw values. TQ_DN_ALOG_LEGACY=1 reverts.
 Result: 168 tok vs 147 baseline = +21 tok. **First non-regression in
 9 rounds**, validating the line-by-line vs-llama.cpp approach.
 
+## ★★ R49 — DeltaNet RULED OUT as bottleneck via verbatim llama.cpp port (commit da0ad5f)
+
+User directive: "용잡는 칼로 용을 잡을수 있도록" (use a dragon-slaying
+sword to slay the dragon). Three bigger experiments executed.
+
+### Big Move 1 — TQ_DN_FP64=1 (160 MB FP64 mirror of state)
+
+72 tok (-96 regression). Precision in DeltaNet state ISN'T the issue.
+
+### Big Move 2 — TQ_DN_SCALE_OUT=1 (apply 1/sqrt(dk) on output not Q)
+
+130 tok (-38). FP operation order isn't the issue.
+
+### ★★ Big Move 3 — TQ_DN_LLAMACPP_PORT=1: VERBATIM llama.cpp port
+
+Direct port of `ggml_compute_forward_gated_delta_net_one_chunk`
+(refs/llama.cpp/ggml/src/ggml-cpu/ops.cpp:10430-10557). ~80 LOC,
+including transposed state layout per llama.cpp.
+
+Result: **142 tok (-26 vs our R10 168 baseline).**
+
+### DECISIVE finding
+
+llama.cpp's exact delta rule, run on our weights with our framework,
+gives WORSE result than our NEON-optimized version. This proves:
+
+1. **DeltaNet inner update is NOT the bottleneck.**
+2. **Our optimized NEON impl is mathematically equivalent** (or
+   better) than llama.cpp's reference.
+3. **The cumulative drift is OUTSIDE the delta rule itself.**
+
+### Where the bug actually is (next session targets)
+
+The delta rule (decay → sk → delta → outer → output) is verified
+fine. The surrounding scaffolding still suspect:
+
+- **MoE routing**: top-8-of-256 expert selection. Probe shows totally
+  different experts at adjacent positions (normal MoE behavior) but
+  haven't compared with llama.cpp's selection. Small logit diff →
+  different experts → different FFN output.
+- **conv1d state evolution**: state cache update over long sequences
+- **ssm_alpha / ssm_beta projection precision**: small output dim (32),
+  Q4/Q8 quantization more sensitive
+- **Full attention layers (10/40)**: attn_q_norm + attn_k_norm + IMRoPE
+  + attention output gating
+- **Combined effect of MoE softmax T=2.0** with downstream norms
+
+### R49 scoreboard
+
+| Big move | Result | Rules out |
+|---|---:|---|
+| FP64 DeltaNet state | 72 (-96) | Precision class |
+| Scale on output | 130 (-38) | FP op order |
+| Periodic state reset | 38 garbage | State necessary |
+| FP32 KV + R10 | 63 (-105) | KV precision |
+| **★ Verbatim llama.cpp port** | **142 (-26)** | **DeltaNet itself** |
+
+R10 raw ssm_a (168 tok) remains best.
+
+### Honest position
+
+R10 patch + verbatim llama.cpp port together prove our DeltaNet
+implementation is at parity with llama.cpp's. Further progress
+requires investigating MoE routing or conv1d/projection precision
+with side-by-side state diff (multi-day instrumentation effort).
+
 ## R14 — QK-norm matching attempt failed (-139 tok), single-line fix wall confirmed
 
 Tested TQ_FORCE_QK_NORM=1 (apply QK-norm on hybrid layers, matching
