@@ -775,8 +775,21 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
         gate_vals[h] = alpha_sp * neg_exp_alog;
         /* Round 27: exact expf for decay (was fast_expf). decay is
          * multiplied with the state matrix every token — any error
-         * accumulates geometrically across generation. */
+         * accumulates geometrically across generation.
+         * R48 round 7: TQ_DN_DECAY_SCALE=X multiplies decay by X for A/B
+         * testing. X < 1 = more aggressive decay (closer to 0). Useful
+         * when state is drifting unbounded (35B DeltaNet state grows
+         * 28× over 70 positions vs 4B which plateaus at 1×). */
         decay_vals[h] = expf(gate_vals[h]);
+        {
+            static float decay_scale = -1.0f; /* sentinel unset */
+            if (decay_scale < 0.0f) {
+                const char* env = getenv("TQ_DN_DECAY_SCALE");
+                decay_scale = env ? (float)atof(env) : 1.0f;
+                if (decay_scale <= 0.0f || decay_scale > 1.0f) decay_scale = 1.0f;
+            }
+            if (decay_scale != 1.0f) decay_vals[h] *= decay_scale;
+        }
     }
 
     /* Step 4: Causal conv1d on QKV + SiLU (batched, NEON-optimized) */
@@ -993,6 +1006,29 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
 
     TQ_PROF_STOP(_tp, matmul_ns);
     if (g_tq_profile_enabled) g_profile.delta_qkv_ns += tq_now_ns() - _tp_dout;
+
+    /* TQ_DN_STATE_PROBE=1: dump DeltaNet recurrent state RMS at end of
+     * layer forward. State size = dn * dk * dv floats per layer.
+     * Tracks drift of the recurrent cell: if state magnitude grows
+     * or shrinks systematically over positions, decay has a bias. */
+    if (getenv("TQ_DN_STATE_PROBE")) {
+        size_t state_sz = (size_t)dn * dk * dv;
+        double ss = 0.0;
+        float maxabs = 0.0f;
+        for (size_t i = 0; i < state_sz; i++) {
+            float v = state[i];
+            ss += (double)v * v;
+            float a = v < 0 ? -v : v;
+            if (a > maxabs) maxabs = a;
+        }
+        float rms = (float)sqrt(ss / (double)state_sz);
+        /* Sample: global pos is unknown here, use layer ptr ID for session ordinal.
+         * Use a global counter so we get pos-like ordering. */
+        static int probe_seq = 0;
+        fprintf(stderr, "[dn-state] seq=%d layer=%d rms=%.4e maxabs=%.4e\n",
+                probe_seq, l, rms, maxabs);
+        probe_seq++;
+    }
 
     /* Residual connection */
     tq_add(s->x, s->x, s->xb2, dim);

@@ -3336,9 +3336,27 @@ tq_model_t* tq_load_gguf(const char* path) {
             /* GGUF stores ssm_a as -exp(a_log), but our forward pass expects a_log.
              * Convert back: a_log = log(-ssm_a) */
             if (layer->delta_a_log) {
+                float vmin = 1e30f, vmax = -1e30f;
+                int n_pos = 0, n_zero = 0;
                 for (int64_t j = 0; j < t->shape[0]; j++) {
                     float v = layer->delta_a_log[j];
+                    if (v < vmin) vmin = v;
+                    if (v > vmax) vmax = v;
+                    if (v > 0) n_pos++;
+                    if (v == 0) n_zero++;
                     layer->delta_a_log[j] = (v < 0) ? logf(-v) : 0.0f;
+                }
+                /* TQ_DN_LOAD_PROBE=1: dump ssm_a raw stats per layer */
+                if (getenv("TQ_DN_LOAD_PROBE")) {
+                    float amin = 1e30f, amax = -1e30f;
+                    for (int64_t j = 0; j < t->shape[0]; j++) {
+                        float a = layer->delta_a_log[j];
+                        if (a < amin) amin = a;
+                        if (a > amax) amax = a;
+                    }
+                    fprintf(stderr, "[ssm_a-load] layer=%d raw_min=%.4e raw_max=%.4e n_pos=%d n_zero=%d "
+                            "alog_min=%.4e alog_max=%.4e\n",
+                            l, vmin, vmax, n_pos, n_zero, amin, amax);
                 }
             }
 
