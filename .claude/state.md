@@ -76,18 +76,28 @@ are what propagate; a 1-2% gate error doesn't fundamentally change
 their impact. Change committed anyway since it matches llama.cpp
 exactly (ggml_sigmoid) and sets correct precedent.
 
-### Round 5 direction (planned)
+### Round 5 — hypotheses (a)(b)(c) RULED OUT (commit 7f39ca0)
 
-Outlier channels are intrinsic to weights. Our engine must handle
-them the same way llama.cpp does, or we diverge. Candidates:
-  - SwiGLU activation precision inside shared expert (silu uses
-    fast path? check tq_silu / activation_fn call in shared expert)
-  - Shared expert matmul kernel differs from routed experts:
-    Routed: IQ2_XXS fused dot (custom NEON)
-    Shared: Q8_0 GGUF on-the-fly dequant
-    Different precision characteristics could interact with outlier
-    channels to produce divergent output
-  - LM head Q8_0 matmul precision (layer 39 output → norm → lm_head)
+- **(a) SwiGLU precision**: Already exact expf since Pillar 1.5 R8. Not the gap.
+- **(b) Matmul kernel asymmetry**: Both shared and routed use FP32-accumulator
+  serial matmul paths; no obvious precision asymmetry.
+- **(c) Missing per-tensor scales**: `strings` on GGUF confirms this model
+  does NOT contain `ffn_*_shexp.scale` tensors. Correctly treated as 1.0.
+- **Critical negative result**: TQ_MOE_NO_SHARED=1 → 30 tok immediate garbage.
+  Shared expert is NECESSARY. Outlier channels (maxabs 2-9) are expected
+  transformer "superweight" behavior, NOT a bug in our production.
+
+### Round 6 direction (planned)
+
+Focus shifts to post-MoE path. The divergence from llama.cpp must occur
+in residual stream processing AFTER layer 39:
+  - **LM head Q6_K matmul** on 248k vocab (our load log shows
+    "separate output.weight, using Q6_K for lm_head"). A/B test:
+    dequant output.weight to FP32 at load time. If coherent window
+    extends, Q6_K matmul is the culprit.
+  - **Output norm** applied to layer 39 residual (RMSNorm)
+  - **Attention output gate** at layer 39 (if layer 39 has one — but
+    39 is DeltaNet not attn, so this may not apply)
 
 ## R47 — 35B 1000-tok attempt — 4 approaches all fail short of target (2026-04-22)
 
