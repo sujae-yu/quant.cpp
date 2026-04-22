@@ -945,6 +945,31 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
             oh[j] = sum;
         }
 #endif
+
+        /* TQ_DN_STATE_CLIP=X: clip per-head state RMS to X. If |state|
+         * RMS exceeds X, scale the state matrix proportionally. Keeps
+         * recurrent state bounded when decay is too weak to balance
+         * new input contributions (observed: 35B Layer 0 grows 28×
+         * while 4B plateaus at 1× — unbounded growth collapses output).
+         * Not a precision change, a stability intervention. */
+        {
+            static float clip_rms = -1.0f;
+            if (clip_rms < 0.0f) {
+                const char* env = getenv("TQ_DN_STATE_CLIP");
+                clip_rms = env ? (float)atof(env) : 0.0f;
+                if (clip_rms < 0.0f) clip_rms = 0.0f;
+            }
+            if (clip_rms > 0.0f) {
+                size_t nh = (size_t)dk * dv;
+                double ss = 0.0;
+                for (size_t i = 0; i < nh; i++) ss += (double)sh[i] * sh[i];
+                float rms = (float)sqrt(ss / (double)nh);
+                if (rms > clip_rms) {
+                    float scale = clip_rms / rms;
+                    for (size_t i = 0; i < nh; i++) sh[i] *= scale;
+                }
+            }
+        }
     }
 
     TQ_PROF_STOP(_tp, recurrent_ns);
