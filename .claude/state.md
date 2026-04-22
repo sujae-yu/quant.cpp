@@ -3,6 +3,49 @@
 **Last updated**: 2026-04-22 (Phase 2 KV clean-bill)
 **Session HEAD**: turbo_kv_4b per-arch per-layer clean-bill LANDED via chunked TQ_KV_PROBE. 7×/+0% PPL claim now validated element-by-element across Llama, Qwen3-0.6B, Qwen3.5-4B, Qwen3.6-35B.
 
+## Phase 3 R42 — Cross-validation of H1-H3 hypotheses from R41 (2026-04-22)
+
+All six architecture-grounded hypotheses from R41 cross-verified
+against refs/llama.cpp and GGUF metadata:
+
+| Hypothesis | Check method | Result |
+|---|---|---|
+| attn_output_gate wrong | layout vs qwen35moe.cpp:129-190 | CORRECT (per-head interleaved matches) |
+| chat template OOD | `enable_thinking` Jinja branches | CORRECT (both modes supported) |
+| QK-norm should be ON | empirical A/B (force on vs off) | OFF is better (on=80-tok crash, off=170) |
+| "1+w" zero-centered norm | ggml_build_norm source | raw `w` matches our impl |
+| IMRoPE (multi-section) | GGUF dimension_sections | `[0]` = NEOX, not IMRoPE |
+| partial_rotary missing | grep partial_rotary_factor | 0.25 hardcoded for hybrid arch |
+
+**All known easily-patchable candidates already correctly implemented.**
+
+### What remains — architectural
+
+**DeltaNet α saturation** (ICLR 2025 Gated DeltaNet paper, §3 fragility):
+When `a_log` weights train to very negative values, `-exp(a_log) ≈ 0`,
+`gate ≈ 0`, `decay = exp(gate) ≈ 1`. Those heads have NO per-step
+state decay. Over 1000 generation steps × 30 DeltaNet layers, any
+numerical noise (quantization, FP summation order) compounds
+geometrically. The paper's own remedy for this is hybridization with
+some full-attention — which Qwen3-Next adopts (25%). But the
+compensation depends on the attention layers being NUMERICALLY
+PERFECT. Under Q4/Q5 weight quantization + quantized KV cache, they
+aren't. So long-gen drift on quantized Qwen3.6-35B is a predictable
+consequence of the architecture's known-fragility meeting our
+quantization stack.
+
+**Implication**: the 1000-tok target may require either:
+1. DRY sampler (external — pattern-level rep penalty, llama.cpp has it)
+2. FP16/FP32 inference (not feasible on 16 GB Mac for 35B)
+3. A smaller hybrid variant with less long-memory head budget
+4. Upstream architectural changes we can't make
+
+R43 plan: port DRY sampler. It's the only mitigation we can ship
+that directly addresses pattern-level loops (Sorry/requirements).
+Does NOT fix residual-collapse or α-saturation but does break
+repetition attractors at sampling time — empirically effective on
+hybrid models per community reports.
+
 ## ★★★ Phase 3 R41 — ARCHITECTURE RESEARCH BREAKTHROUGH (2026-04-22) ★★★
 
 User callout (correct): "모델의 특성에 대해 제대로 이해하지 못한 상태에서
