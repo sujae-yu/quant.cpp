@@ -545,6 +545,7 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
         }
     }
     int gen_history_len = 0;
+    int next_refresh_at = refresh_every;  /* total generated count to trigger */
 
     /* N-gram loop detection: track recent 4-grams to detect infinite loops.
      * Small models with T=0 greedy decoding enter repetition loops where
@@ -837,14 +838,49 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
          * reset all recurrent/KV state, then re-prefill those tokens at
          * positions 0..refresh_keep-1 so subsequent generation has
          * RoPE-correct context without cumulative attention drift. */
-        if (refresh_every > 0 && gen_history && gen_history_len >= refresh_every
-            && gen_history_len % refresh_every == 0) {
+        if (refresh_every > 0 && gen_history && gen_history_len >= next_refresh_at) {
             int K = refresh_keep;
             if (K > gen_history_len) K = gen_history_len;
+
+            /* R62 K49: attractor-aware tail trim.
+             * Before re-prefilling, inspect the last 32 tokens of the
+             * proposed keep window. If their unique-token diversity is
+             * below threshold (model is stuck in an attractor), walk the
+             * keep boundary backward to find a cleaner (more diverse)
+             * 32-token window. This prevents carrying the attractor tail
+             * into the fresh state, which was the root cause of cycle-3+
+             * quality collapse in the base K48 implementation. */
+            int keep_end = gen_history_len;  /* exclusive */
+            while (K >= 64) {
+                int probe_start = keep_end - 32;
+                if (probe_start < gen_history_len - K) break;
+                int unique = 0;
+                /* simple O(32^2) uniqueness scan, 32 items — negligible */
+                for (int a = probe_start; a < keep_end; a++) {
+                    int dup = 0;
+                    for (int b = probe_start; b < a; b++) {
+                        if (gen_history[a] == gen_history[b]) { dup = 1; break; }
+                    }
+                    if (!dup) unique++;
+                }
+                /* Good window: ≥ 20/32 unique tokens (62.5%) */
+                if (unique >= 20) break;
+                /* Bad tail: pull keep_end back 16 tokens and retry */
+                keep_end -= 16;
+            }
+            int keep_start = keep_end - K;
+            if (keep_start < 0) { keep_start = 0; K = keep_end; }
+            if (keep_end < gen_history_len) {
+                fprintf(stderr, "\n[refresh-ctx] trim %d attractor tail tokens before refresh\n",
+                        gen_history_len - keep_end);
+            }
             if (K > 0) {
-                fprintf(stderr, "\n[refresh-ctx] triggered at gen=%d, re-prefilling last %d tokens\n",
-                        gen_history_len, K);
-                int* tail = gen_history + (gen_history_len - K);
+                fprintf(stderr, "[refresh-ctx] triggered at gen=%d, re-prefilling tokens [%d..%d)\n",
+                        gen_history_len, keep_start, keep_end);
+                int* tail = gen_history + keep_start;
+                /* Discard the trimmed tail from gen_history so subsequent
+                 * refresh cycles don't re-see the attractor. */
+                gen_history_len = keep_end;
 
                 /* Reset all recurrent + KV state to zero — these are bulk
                  * calloc'd arrays owned by state. tq_forward will rebuild
@@ -936,6 +972,10 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
                 if (gen_history_len < gen_history_cap) {
                     gen_history[gen_history_len++] = next_token;
                 }
+                /* Schedule next refresh: refresh_every tokens after current
+                 * (post-trim) length. Avoids infinite trigger when trim
+                 * shortens gen_history below previous boundary. */
+                next_refresh_at = gen_history_len + refresh_every;
             }
         }
 
