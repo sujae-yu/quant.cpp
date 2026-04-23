@@ -592,13 +592,36 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
     };
     int n_eos = sizeof(eos_tokens) / sizeof(eos_tokens[0]);
 
+    /* R62 K47: TQ_IGNORE_EOS=1 forces generation past EOS tokens.
+     * Used to push past model's natural termination (~268 tok in
+     * thinking mode) for ultra-long coherent output. Replaces EOS
+     * argmax with rank-2 token effectively. */
+    static int ignore_eos = -1;
+    if (ignore_eos == -1) ignore_eos = getenv("TQ_IGNORE_EOS") ? 1 : 0;
+
     /* Generate loop */
     while (generated < config->max_tokens) {
         int is_eos = 0;
         for (int e = 0; e < n_eos; e++) {
             if (next_token == eos_tokens[e]) { is_eos = 1; break; }
         }
-        if (is_eos) break;
+        if (is_eos && !ignore_eos) break;
+        if (is_eos && ignore_eos) {
+            /* Replace EOS with second-best non-EOS token by searching
+             * the last-computed logits (state->logits). */
+            if (state->logits) {
+                float best_val = -HUGE_VALF;
+                int best_id = -1;
+                int vs = model->config.vocab_size;
+                for (int i = 0; i < vs; i++) {
+                    int is_e = 0;
+                    for (int e = 0; e < n_eos; e++) if (i == eos_tokens[e]) { is_e = 1; break; }
+                    if (is_e) continue;
+                    if (state->logits[i] > best_val) { best_val = state->logits[i]; best_id = i; }
+                }
+                if (best_id >= 0) next_token = best_id;
+            }
+        }
         /* Infinite scrollback: when context is full, shift the KV cache
          * instead of stopping. Keep the last half of the context (including
          * the FP32 hot window) and discard the oldest half. This mirrors
