@@ -449,6 +449,24 @@ int main(int argc, char** argv) {
                         "auto-enabled (~2× coherent tokens in thinking; "
                         "~2.3 GB extra KV buffer). Override via -k.\n");
             }
+            /* R62 K32: thinking-mode DRY sampling. Argmax (T=0) alone
+             * descends into repetition attractors (digit enumerations,
+             * alphabet walks) around pos 200. DRY (Don't Repeat Yourself)
+             * soft-penalizes n-gram repetitions in argmax ranking,
+             * pushing model to rank-2 when rank-1 would repeat.
+             *
+             * Measured: thinking "quantum" 188→268 tok (+43%) with
+             * self-correction dialogue emerging ("Wait, I need to stop...
+             * Let's try again"). Only enabled in thinking mode — direct
+             * mode's alphabet-walk attractor uses unique-token sequences
+             * that 2-gram DRY cannot catch. */
+            if (getenv("TQ_ENABLE_THINKING") && dry_multiplier < 0.0f
+                && !getenv("TQ_NO_DRY_AUTO")) {
+                dry_multiplier = 2.0f;
+                fprintf(stderr, "tq_main: qwen35moe thinking-mode DRY "
+                        "sampling auto-enabled (mult=2.0, allowed=2). "
+                        "Override via --dry-multiplier or TQ_NO_DRY_AUTO=1.\n");
+            }
         }
     }
 
