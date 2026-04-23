@@ -429,6 +429,15 @@ typedef struct {
     int   dry_allowed_length; /* min pattern length to penalize (default 2) */
     int   dry_penalty_last_n; /* how many recent tokens to scan (default 128) */
     unsigned long long rng_seed; /* sampling seed (default: 42, 0 = use 42 for back-compat) */
+    /* R62 K48: Rolling context refresh for ultra-long coherent generation.
+     * When generated tokens reach refresh_ctx_every, reset KV/DeltaNet
+     * state and re-prefill the last refresh_keep tokens at positions 0..K-1.
+     * This rebuilds state with correct RoPE (positions start from 0 again),
+     * unlike infinite-scrollback which has RoPE mismatch between cached K
+     * and new Q. Quality preserved across boundary.
+     * Set refresh_ctx_every=0 to disable (default). Typical: every=250, keep=200. */
+    int refresh_ctx_every;  /* 0 = disabled; N = trigger refresh after N generated tokens */
+    int refresh_ctx_keep;   /* how many recent tokens to re-prefill (must be < every) */
     /* KV cache persistence (Document-Level RAG: read once, query forever) */
     const char* save_kv_path; /* save KV cache after generation (NULL = don't save) */
     const char* load_kv_path; /* load pre-computed KV cache before generation (NULL = normal) */

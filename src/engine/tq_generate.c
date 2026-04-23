@@ -515,6 +515,37 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
     int recent_tokens[128];
     int recent_count = 0;
 
+    /* R62 K48: Rolling context refresh. Keeps all generated token IDs
+     * so we can re-prefill the most recent N at proper RoPE positions
+     * (0..N-1) after a refresh trigger, avoiding the RoPE mismatch that
+     * breaks the infinite-scrollback path for Qwen3.6 DeltaNet models. */
+    int refresh_every = config->refresh_ctx_every;
+    int refresh_keep  = config->refresh_ctx_keep;
+    if (refresh_every < 0) refresh_every = 0;
+    if (refresh_keep  < 0) refresh_keep  = 0;
+    if (refresh_every > 0 && refresh_keep <= 0) refresh_keep = refresh_every / 2;
+    /* Env override — convenient to enable without API change. */
+    {
+        const char* s_every = getenv("TQ_REFRESH_CTX_EVERY");
+        const char* s_keep  = getenv("TQ_REFRESH_CTX_KEEP");
+        if (s_every) refresh_every = atoi(s_every);
+        if (s_keep)  refresh_keep  = atoi(s_keep);
+        if (refresh_every > 0 && refresh_keep <= 0) refresh_keep = refresh_every / 2;
+    }
+    int* gen_history = NULL;
+    int  gen_history_cap = 0;
+    if (refresh_every > 0) {
+        gen_history_cap = config->max_tokens + 32;
+        gen_history = (int*)calloc((size_t)gen_history_cap, sizeof(int));
+        if (!gen_history) {
+            refresh_every = 0;  /* allocation failed, disable feature */
+        } else {
+            fprintf(stderr, "[refresh-ctx] enabled: every=%d tokens, keep=%d\n",
+                    refresh_every, refresh_keep);
+        }
+    }
+    int gen_history_len = 0;
+
     /* N-gram loop detection: track recent 4-grams to detect infinite loops.
      * Small models with T=0 greedy decoding enter repetition loops where
      * the same ~30-token pattern repeats endlessly. KV quantization error
@@ -567,6 +598,9 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
     /* Record first sampled token */
     recent_tokens[recent_count % 128] = next_token;
     recent_count++;
+    if (gen_history && gen_history_len < gen_history_cap) {
+        gen_history[gen_history_len++] = next_token;
+    }
 
     int generated = 0;
     int output_pos = 0;
@@ -793,6 +827,117 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
         /* Record sampled token for repetition penalty */
         recent_tokens[recent_count % 128] = next_token;
         recent_count++;
+        if (gen_history && gen_history_len < gen_history_cap) {
+            gen_history[gen_history_len++] = next_token;
+        }
+
+        /* R62 K48: Rolling context refresh.
+         * Trigger when we've generated `refresh_every` tokens since last
+         * boundary. Keep the most recent `refresh_keep` generated tokens,
+         * reset all recurrent/KV state, then re-prefill those tokens at
+         * positions 0..refresh_keep-1 so subsequent generation has
+         * RoPE-correct context without cumulative attention drift. */
+        if (refresh_every > 0 && gen_history && gen_history_len >= refresh_every
+            && gen_history_len % refresh_every == 0) {
+            int K = refresh_keep;
+            if (K > gen_history_len) K = gen_history_len;
+            if (K > 0) {
+                fprintf(stderr, "\n[refresh-ctx] triggered at gen=%d, re-prefilling last %d tokens\n",
+                        gen_history_len, K);
+                int* tail = gen_history + (gen_history_len - K);
+
+                /* Reset all recurrent + KV state to zero — these are bulk
+                 * calloc'd arrays owned by state. tq_forward will rebuild
+                 * them as we re-prefill. */
+                int n_layers_ = model->config.n_layers;
+                int kv_dim_   = model->config.n_kv_heads * model->config.head_dim;
+                int max_seq_  = model->config.max_seq_len;
+                if (state->key_cache) {
+                    memset(state->key_cache, 0,
+                           (size_t)n_layers_ * max_seq_ * kv_dim_ * sizeof(float));
+                }
+                if (state->value_cache) {
+                    memset(state->value_cache, 0,
+                           (size_t)n_layers_ * max_seq_ * kv_dim_ * sizeof(float));
+                }
+                if (state->value_cache_fp16) {
+                    memset(state->value_cache_fp16, 0,
+                           (size_t)n_layers_ * max_seq_ * kv_dim_ * sizeof(uint16_t));
+                }
+                if (state->delta_state) {
+                    int dn = model->config.delta_n_heads;
+                    int dk = model->config.delta_key_head_dim;
+                    int dv = model->config.delta_value_head_dim;
+                    if (dn > 0 && dk > 0 && dv > 0) {
+                        memset(state->delta_state, 0,
+                               (size_t)n_layers_ * dn * dk * dv * sizeof(float));
+                        if (state->delta_state_fp64) {
+                            memset(state->delta_state_fp64, 0,
+                                   (size_t)n_layers_ * dn * dk * dv * sizeof(double));
+                        }
+                    }
+                }
+                if (state->conv_state) {
+                    int delta_qkv_dim = 0;
+                    if (model->config.delta_n_heads > 0) {
+                        delta_qkv_dim = model->config.delta_n_heads * model->config.delta_value_head_dim
+                                      + 2 * model->config.delta_n_kv_heads * model->config.delta_key_head_dim;
+                    }
+                    int conv_w = model->config.delta_conv_width > 0 ? model->config.delta_conv_width : 4;
+                    if (delta_qkv_dim > 0) {
+                        memset(state->conv_state, 0,
+                               (size_t)n_layers_ * delta_qkv_dim * (conv_w - 1) * sizeof(float));
+                    }
+                }
+
+                /* Re-prefill the kept tail at positions 0..K-1 */
+                for (int i = 0; i < K; i++) {
+                    tq_forward(model, state, tail[i], i);
+                }
+                /* After re-prefill, state->logits reflects token K-1's
+                 * next-token distribution. Subsequent generation continues
+                 * from pos=K with correct RoPE. */
+                pos = K;
+                /* Drop tokens we've "forgotten" from the recent buffer so
+                 * rep-penalty and DRY don't misfire across the boundary. */
+                recent_count = 0;
+                for (int i = 0; i < K && i < 128; i++) {
+                    recent_tokens[i] = tail[i];
+                    recent_count++;
+                }
+                /* Reset n-gram hash history — old 4-gram hashes refer to
+                 * tokens before the refresh. */
+                ngram_hash_count = 0;
+                /* We just sampled next_token that already got logged to
+                 * gen_history above. Apply sampler to fresh state->logits. */
+                if (rep_penalty > 1.0f) {
+                    int window = recent_count < rep_window ? recent_count : rep_window;
+                    for (int r = 0; r < window; r++) {
+                        int idx = (recent_count - 1 - r) % 128;
+                        if (idx < 0) idx += 128;
+                        int tok = recent_tokens[idx];
+                        if (tok >= 0 && tok < vocab_size) {
+                            if (state->logits[tok] > 0) state->logits[tok] /= rep_penalty;
+                            else                         state->logits[tok] *= rep_penalty;
+                        }
+                    }
+                }
+                if (config->dry_multiplier > 0.0f) {
+                    apply_dry_penalty(state->logits, vocab_size,
+                                      recent_tokens, recent_count, 128,
+                                      config->dry_multiplier, config->dry_base,
+                                      config->dry_allowed_length, config->dry_penalty_last_n);
+                }
+                next_token = tq_sample_topp(state->logits, vocab_size,
+                                             config->temperature, config->top_p,
+                                             &rng_state);
+                recent_tokens[recent_count % 128] = next_token;
+                recent_count++;
+                if (gen_history_len < gen_history_cap) {
+                    gen_history[gen_history_len++] = next_token;
+                }
+            }
+        }
 
         /* N-gram loop detection: hash recent 4-gram and check for repeats.
          * TQ_NO_LOOP_DETECT=1 disables this early-stop so long-form benchmarks
@@ -827,6 +972,7 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
         output[output_pos < output_size ? output_pos : output_size - 1] = '\0';
     }
 
+    if (gen_history) free(gen_history);
     tq_free_state(state);
     return generated;
 }

@@ -2254,6 +2254,8 @@ tq_gen_config_t tq_default_gen_config(void) {
     config.dry_base = 1.75f;
     config.dry_allowed_length = 2;
     config.dry_penalty_last_n = 128;
+    config.refresh_ctx_every = 0;   /* R62 K48: disabled by default */
+    config.refresh_ctx_keep  = 200;
     config.rng_seed = 42ULL;
     config.on_token = NULL;
     config.user_data = NULL;
