@@ -4631,6 +4631,23 @@ void tq_matmul_gguf(float* out, const float* x,
     extern void* iq2_s_int_dot_worker(void* arg);
 #endif
 
+    /* R61 P3: env-gated bit-exact llama.cpp path for IQ4_XS.
+     * Intercepts BEFORE the NEON int8 fast path so both prefill
+     * (batch) and decode (single-token) routes use the same kernel,
+     * avoiding inconsistency between paths. Generic C only. */
+    {
+        static int use_llamak_iq4xs = -1;
+        if (use_llamak_iq4xs == -1)
+            use_llamak_iq4xs = getenv("TQ_USE_LLAMA_KERNELS") ? 1 : 0;
+        if (use_llamak_iq4xs && weight_type == TQ_GGML_TYPE_IQ4_XS
+            && (in_dim % 256 == 0)) {
+            extern void tqlk_matmul_iq4_xs(float* out, const void* weight,
+                                            const float* x, int out_dim, int in_dim);
+            tqlk_matmul_iq4_xs(out, weight, x, out_dim, in_dim);
+            return;
+        }
+    }
+
     /* ---- IQ4_XS × int8 fast path (vqtbl1q_s8 + vdotq_s32) ----
      * Used by UD-IQ3_XXS (some routed experts) and UD-IQ4_XS.
      * 16-entry codebook fits in one NEON TBL lookup. */

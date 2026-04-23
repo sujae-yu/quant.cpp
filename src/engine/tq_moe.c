@@ -1262,6 +1262,11 @@ extern int tq_batched_matmul_iq3_s(float* out, const void* weight,
                                     const float* x, int out_dim, int in_dim, int N);
 extern int tq_batched_matmul_iq4_xs(float* out, const void* weight,
                                      const float* x, int out_dim, int in_dim, int N);
+
+/* R61: bit-exact llama.cpp port (src/engine/tq_llama_kernels.c).
+ * Single-activation matmul; for batched call, loop over tokens. */
+extern void tqlk_matmul_iq4_xs(float* out, const void* weight, const float* x,
+                                int out_dim, int in_dim);
 extern int tq_batched_matmul_q3_k(float* out, const void* weight,
                                    const float* x, int out_dim, int in_dim, int N);
 extern void tq_batched_matmul_q8_0(float* out, const void* w_blocks,
@@ -1310,6 +1315,22 @@ static int moe_batched_dispatch(
     } else if (wt == TQ_GGML_TYPE_IQ3_S) {
         return tq_batched_matmul_iq3_s(out, w, x, out_dim, in_dim, M_e);
     } else if (wt == TQ_GGML_TYPE_IQ4_XS) {
+        /* R61 P3: env-gated bit-exact llama.cpp kernel route.
+         * TQ_USE_LLAMA_KERNELS=1 triggers per-token matmul via the
+         * generic C port (IQ4_XS × Q8_K activation), guaranteeing
+         * bit-exact match with llama.cpp. Slower than our NEON int8
+         * kernel but corrects the 1% MoE output delta identified at
+         * R60 paired-diff. Memory cost per call: one Q8_K buffer
+         * (in_dim/256 * ~264 bytes) malloced+freed — cheap. */
+        static int use_llamak = -1;
+        if (use_llamak == -1) use_llamak = getenv("TQ_USE_LLAMA_KERNELS") ? 1 : 0;
+        if (use_llamak) {
+            for (int n = 0; n < M_e; n++) {
+                tqlk_matmul_iq4_xs(out + (size_t)n * out_dim, w,
+                                    x + (size_t)n * in_dim, out_dim, in_dim);
+            }
+            return 0;
+        }
         return tq_batched_matmul_iq4_xs(out, w, x, out_dim, in_dim, M_e);
     } else if (wt == TQ_GGML_TYPE_Q3_K) {
         return tq_batched_matmul_q3_k(out, w, x, out_dim, in_dim, M_e);
