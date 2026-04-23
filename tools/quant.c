@@ -436,6 +436,19 @@ int main(int argc, char** argv) {
                 fprintf(stderr, "tq_main: qwen35moe DN_NORM_FP64 auto-enabled "
                         "(per-head RMSNorm in FP64, negligible memory).\n");
             }
+            /* R62 K8: thinking mode 전용 FP32 KV cache. Direct mode에서는
+             * turbo_kv_4b가 더 나음 (+regularizer effect), 하지만 thinking
+             * mode는 long causal reasoning chain에 KV quant noise가 누적되어
+             * coherent를 제한. TQ_ENABLE_THINKING=1 상태에서만 FP32 KV 활성.
+             * 실측: thinking +86% tok (quantum prompt 102→188,
+             *       dragon prompt 71→136). */
+            if (getenv("TQ_ENABLE_THINKING") &&
+                kv_type == TQ_TYPE_TURBO_KV_4B /* user didn't override -k */) {
+                kv_type = TQ_TYPE_COUNT;  /* sentinel for FP32 KV */
+                fprintf(stderr, "tq_main: qwen35moe thinking-mode FP32 KV "
+                        "auto-enabled (~2× coherent tokens in thinking; "
+                        "~2.3 GB extra KV buffer). Override via -k.\n");
+            }
         }
     }
 
