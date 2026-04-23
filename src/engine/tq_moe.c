@@ -477,7 +477,11 @@ void tq_moe_route(const float* hidden, const float* router_weight,
         int best = -1;
         float best_val = -HUGE_VALF;
         for (int e = 0; e < num_experts; e++) {
-            if (!used[e] && logits[e] >= best_val) {
+            /* R57: strict > for first-wins tie-breaking (matches llama.cpp
+             * ggml_argsort_top_k stable sort). Previously >= was used, which
+             * gave last-wins and produced divergent top-K ordering from
+             * llama.cpp. Init best to 0 to handle NaN/all-equal case. */
+            if (!used[e] && (best < 0 || logits[e] > best_val)) {
                 best_val = logits[e];
                 best = e;
             }
