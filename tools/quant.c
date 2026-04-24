@@ -416,26 +416,6 @@ int main(int argc, char** argv) {
         basename = basename ? basename + 1 : model_path;
         if (strstr(basename, "Qwen3.6") || strstr(basename, "qwen35moe") ||
             strstr(basename, "Qwen3.5-30B") || strstr(basename, "A3B")) {
-            if (!getenv("TQ_SE_LIST")) {
-                static const char SE_LIST_QWEN36_35B[] =
-                    "0:112,1:197,2:150,3:199,4:203,5:165,6:31,7:204,"
-                    "8:201,9:142,10:139,11:247,12:249,13:175,14:103,15:110,"
-                    "16:185,17:17,18:114,19:33,20:13,21:58,22:160,23:209,"
-                    "24:93,25:93,26:118,27:165,28:170,29:150,30:250,31:199,"
-                    "32:224,33:5,34:241,35:44,36:110,37:104,38:209,39:231";
-                setenv("TQ_SE_LIST", SE_LIST_QWEN36_35B, 0);
-                fprintf(stderr, "tq_main: qwen35moe SE-aware preset auto-enabled "
-                        "(40 super experts FP32, ~480 MB extra). "
-                        "Set TQ_QWEN35MOE_NO_PRESET=1 to opt out.\n");
-            }
-            /* R53 P3 R14-b: DeltaNet per-head RMSNorm in FP64.
-             * Stacks additively with SE override (+62 tok, +30 coh).
-             * Standalone gain w/o SE is noise; with SE it's real. */
-            if (!getenv("TQ_DN_NORM_FP64")) {
-                setenv("TQ_DN_NORM_FP64", "1", 0);
-                fprintf(stderr, "tq_main: qwen35moe DN_NORM_FP64 auto-enabled "
-                        "(per-head RMSNorm in FP64, negligible memory).\n");
-            }
             /* R63 P4 (2026-04-24): verbatim llama.cpp gated_delta_net port.
              * Root cause of late-layer divergence was FP32 summation order
              * in the delta-rule state update. Our default uses state[i][j]
@@ -452,19 +432,30 @@ int main(int argc, char** argv) {
                 fprintf(stderr, "tq_main: qwen35moe DN_LLAMACPP_PORT auto-enabled "
                         "(verbatim llama.cpp delta-rule FP32 accumulation order).\n");
             }
-            /* R62 K8: thinking mode 전용 FP32 KV cache. Direct mode에서는
-             * turbo_kv_4b가 더 나음 (+regularizer effect), 하지만 thinking
-             * mode는 long causal reasoning chain에 KV quant noise가 누적되어
-             * coherent를 제한. TQ_ENABLE_THINKING=1 상태에서만 FP32 KV 활성.
-             * 실측: thinking +86% tok (quantum prompt 102→188,
-             *       dragon prompt 71→136). */
-            if (getenv("TQ_ENABLE_THINKING") &&
-                kv_type == TQ_TYPE_TURBO_KV_4B /* user didn't override -k */) {
-                kv_type = TQ_TYPE_COUNT;  /* sentinel for FP32 KV */
-                fprintf(stderr, "tq_main: qwen35moe thinking-mode FP32 KV "
-                        "auto-enabled (~2× coherent tokens in thinking; "
-                        "~2.3 GB extra KV buffer). Override via -k.\n");
-            }
+
+            /* R63 strategic pivot (2026-04-25): SE list, DN_NORM_FP64, and
+             * FP32 KV were compensating hacks for the buggy default DN path.
+             * Now that DN_PORT fixes the root cause, stacking these puts us
+             * in a DIFFERENT basin (alphabet-walk attractor, 349 tok with
+             * ~20 coh words), REGRESSING quality vs DN_PORT alone (149 tok
+             * with ~100 coh physics concepts).
+             *
+             * Measured 2026-04-25 on Qwen3.6-A3B UD-IQ4_XS quantum prompt:
+             *   DN_PORT only:        149 tok / ~100 coh (real concepts)
+             *   DN_PORT + SE + KV:   349 tok / ~20  coh (alphabet attractor)
+             *
+             * Per the FP32 basin theory (see memory), each engine has ONE
+             * stable basin per model. Our post-DN-fix basin is 149/~100.
+             * These compensations belong to the PRE-fix basin and should
+             * not be auto-applied. Users can opt in explicitly if they
+             * want a different basin trade-off.
+             *
+             * See: memory/project_fp32_basin_theory.md
+             *      memory/project_strategic_pivot_2026_04_25.md
+             *      docs/engine_basin_tiers.md
+             */
+            /* (Compensating hacks intentionally NOT auto-enabled. Opt in via
+             *  TQ_SE_LIST=<spec>, TQ_DN_NORM_FP64=1, or -k fp32 if desired.) */
             /* R62 K32 retracted (2026-04-24): DRY auto-preset removed.
              * llama.cpp produces 499+ coherent on the same model+prompt
              * without any sampler tricks — pure argmax. If our engine
@@ -1029,18 +1020,31 @@ int main(int argc, char** argv) {
                         "for deterministic correctness (TQ_NO_AUTO_SERIAL=1 to opt out)\n");
     }
 
-    /* R28: qwen35moe auto-default TQ_MOE_ROUTE_TEMP=2.0 unless user already set it.
-     * R26 measured: default T=1.0 causes 117-tok "It could do math!" repetition
-     * cliff via peaky MoE routing × DeltaNet feedback. T=2.0 spreads the softmax
-     * and the cliff disappears on the standard drift-trigger prompt. 5/5 short-
-     * prompt A/B (Paris/fibonacci/math/ML/story) show identical factual accuracy
-     * and similar quality at T=2.0. Opt out: TQ_NO_MOE_TEMP_AUTO=1 or set
-     * TQ_MOE_ROUTE_TEMP explicitly. */
+    /* R28 -> R63 (2026-04-25): auto-temp changed from T=2.0 to T=1.0.
+     *
+     * R26 originally measured T=1.0 caused "117-tok repetition cliff" and
+     * T=2.0 resolved it. But R63 proved the underlying cause was buggy
+     * DeltaNet FP32 ordering — the peaky-routing-into-DN-feedback loop
+     * failed because DN's recurrent state was diverging from llama's.
+     *
+     * With DN_LLAMACPP_PORT auto-enabled (commit f6a65bb fixes the root
+     * cause), T=1.0 now produces coherent long-generation matching
+     * llama.cpp's basin (~100 coh words with real physics concepts on
+     * quantum prompt). T=2.0 with DN_PORT puts us in a different basin
+     * with longer but less-coherent output (alphabet-walk attractor).
+     *
+     * Rationale: llama.cpp uses T=1.0 natively. With DN_PORT making our
+     * DeltaNet numerically compatible, matching llama's T is the right
+     * default. Opt-out remains via TQ_NO_MOE_TEMP_AUTO=1 or explicit
+     * TQ_MOE_ROUTE_TEMP=X. Historical T=2.0 available via the opt-out.
+     *
+     * See: memory/project_fp32_basin_theory.md
+     *      memory/project_strategic_pivot_2026_04_25.md */
     if (model && model->config.is_moe && model->config.delta_n_heads > 0
         && !getenv("TQ_MOE_ROUTE_TEMP") && !getenv("TQ_NO_MOE_TEMP_AUTO")) {
-        setenv("TQ_MOE_ROUTE_TEMP", "2.0", 0);
-        fprintf(stderr, "Auto-temp: qwen35moe router softmax T=2.0 "
-                        "(TQ_NO_MOE_TEMP_AUTO=1 to opt out)\n");
+        setenv("TQ_MOE_ROUTE_TEMP", "1.0", 0);
+        fprintf(stderr, "Auto-temp: qwen35moe router softmax T=1.0 "
+                        "(matches llama.cpp; TQ_NO_MOE_TEMP_AUTO=1 to opt out)\n");
     }
     /* Set thread count for matmul parallelism */
     tq_set_threads(n_threads);

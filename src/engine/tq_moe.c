@@ -542,6 +542,68 @@ void tq_moe_route(const float* hidden, const float* router_weight,
         }
     }
 
+    /* R63 P5 (2026-04-24): TQ_MOE_LLAMACPP_ROUTE=1 replicates llama.cpp's
+     * exact routing pipeline: softmax-over-256 → top-K → renorm-by-sum.
+     * Our default partial-sort-then-softmax-top-K is mathematically
+     * equivalent but uses different FP32 sum order, producing ~3% weight
+     * differences on close-ranked experts. This manifests as weighted-sum
+     * divergence at late-layer MoE output (L34-L39 ffn_out diff). */
+    static int llamacpp_route = -1;
+    if (llamacpp_route == -1) llamacpp_route = getenv("TQ_MOE_LLAMACPP_ROUTE") ? 1 : 0;
+    if (llamacpp_route) {
+        /* Step A: softmax over ALL num_experts logits */
+        float lmax = -HUGE_VALF;
+        for (int e = 0; e < num_experts; e++) {
+            if (logits[e] > lmax) lmax = logits[e];
+        }
+        float probs_all[512];   /* num_experts <= 512 */
+        double sum_all = 0.0;
+        for (int e = 0; e < num_experts; e++) {
+            float p = expf(logits[e] - lmax);
+            probs_all[e] = p;
+            sum_all += (double)p;
+        }
+        if (sum_all > 0.0) {
+            float inv = 1.0f / (float)sum_all;
+            for (int e = 0; e < num_experts; e++) probs_all[e] *= inv;
+        }
+
+        /* Step B: argsort DESC on probs, pick top num_active.
+         * Use stable order (tie -> lower index first) to match our default
+         * but operate on PROBS, not logits. */
+        memset(used, 0, num_experts);
+        for (int k = 0; k < num_active; k++) {
+            int best = -1;
+            float best_val = -HUGE_VALF;
+            for (int e = 0; e < num_experts; e++) {
+                if (!used[e] && (best < 0 || probs_all[e] > best_val)) {
+                    best_val = probs_all[e];
+                    best = e;
+                }
+            }
+            out_expert_ids[k] = best;
+            if (best >= 0) used[best] = 1;
+        }
+
+        /* Step C: gather top-K probs and renormalize by their sum */
+        float wsum = 0.0f;
+        for (int k = 0; k < num_active; k++) {
+            int eid = out_expert_ids[k];
+            float w = (eid >= 0) ? probs_all[eid] : 0.0f;
+            out_expert_weights[k] = w;
+            wsum += w;
+        }
+        if (wsum > 6.103515625e-5f) {   /* llama's F16 min, prevent div-by-zero */
+            float inv = 1.0f / wsum;
+            for (int k = 0; k < num_active; k++)
+                out_expert_weights[k] *= inv;
+        }
+
+        if (used != tls_used) free(used);
+        if (logits != tls_logits) free(logits);
+        return;
+    }
+
     /* Step 3: Softmax over selected experts (renormalize top-K) */
     if (n_valid == 0) {
         /* All experts invalid (NaN logits or num_experts=0) — uniform fallback */
