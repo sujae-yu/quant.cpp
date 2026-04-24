@@ -469,9 +469,26 @@ void tq_moe_route(const float* hidden, const float* router_weight,
 
     /* Step 1: Compute router logits — logits[e] = dot(hidden, router_weight[e])
      * NEON-vectorized: 4 FMA pipes × 4 lanes = 16 floats/cycle peak.
-     * Per-token cost on Qwen3.6 (256×2048): ~1ms scalar → ~0.1ms NEON. */
+     * Per-token cost on Qwen3.6 (256×2048): ~1ms scalar → ~0.1ms NEON.
+     *
+     * R63 P3 (2026-04-24): TQ_MOE_ROUTER_FP64=1 uses double accumulation.
+     * Rationale: at late layers (L33+) on Qwen3.6-A3B, the hidden input
+     * has accumulated ~0.1-0.2 FP32 rounding drift vs llama. The router
+     * dot product then amplifies this through softmax exp(), flipping
+     * the top-K ordering of close-ranked experts. FP64 accumulation in
+     * the dot product removes our compute-side contribution to the drift.
+     * Small hot-path cost (~2-3× slower router) — opt-in only. */
+    static int router_fp64 = -1;
+    if (router_fp64 == -1) router_fp64 = getenv("TQ_MOE_ROUTER_FP64") ? 1 : 0;
     for (int e = 0; e < num_experts; e++) {
         const float* row = router_weight + (size_t)e * hidden_dim;
+        if (router_fp64) {
+            double acc = 0.0;
+            for (int j = 0; j < hidden_dim; j++)
+                acc += (double)hidden[j] * (double)row[j];
+            logits[e] = (float)acc;
+            continue;
+        }
 #if TQ_MOE_HAS_NEON
         float32x4_t a0 = vdupq_n_f32(0.f);
         float32x4_t a1 = vdupq_n_f32(0.f);
