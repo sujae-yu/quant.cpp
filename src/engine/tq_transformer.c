@@ -3413,6 +3413,10 @@ float* tq_forward(tq_model_t* model, tq_state_t* s, int token, int pos) {
                            (tq_moe_state_t*)s->moe_state,
                            s->xb, s->xb2, dim, l);
             TQ_PROF_STOP(_tp, moe_ns);
+            if (getenv("TQ_MOE_ALL_PROBE")) {
+                double s_ = 0; for (int i = 0; i < dim; i++) s_ += s->xb2[i];
+                fprintf(stderr, "[moe-all] L%d xb2_sum=%.6f\n", l, s_);
+            }
 
             /* TQ_MOE_RMS_PROBE=1: dump per-layer MoE output RMS at each pos.
              * Used to localize where MoE precision drift first diverges from

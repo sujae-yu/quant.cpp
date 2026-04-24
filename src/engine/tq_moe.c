@@ -47,6 +47,36 @@ static inline float fast_expf_moe(float x) {
     return v.f;
 }
 
+static __thread float tq_tls_route_temp_override = 0.0f;
+
+static float tq_moe_effective_route_temp(void) {
+    static float route_temp = 0.0f;
+    if (route_temp == 0.0f) {
+        const char* s = getenv("TQ_MOE_ROUTE_TEMP");
+        route_temp = (s && atof(s) > 0.0f) ? (float)atof(s) : 1.0f;
+    }
+    return tq_tls_route_temp_override > 0.0f ? tq_tls_route_temp_override : route_temp;
+}
+
+static void tq_moe_set_route_temp_for_token(int token_idx_1based) {
+    static int checked = 0;
+    static int early_tokens = 0;
+    static float early_temp = 0.0f;
+    if (!checked) {
+        const char* n = getenv("TQ_MOE_ROUTE_TEMP_EARLY_TOKENS");
+        const char* t = getenv("TQ_MOE_ROUTE_TEMP_EARLY");
+        early_tokens = n ? atoi(n) : 0;
+        early_temp = (t && atof(t) > 0.0f) ? (float)atof(t) : 0.0f;
+        checked = 1;
+    }
+    if (early_tokens > 0 && early_temp > 0.0f &&
+        token_idx_1based > 0 && token_idx_1based <= early_tokens) {
+        tq_tls_route_temp_override = early_temp;
+    } else {
+        tq_tls_route_temp_override = 0.0f;
+    }
+}
+
 #if TQ_MOE_HAS_NEON
 /* Vectorized Schraudolph exp — 4 float lanes in one shot.
  * For |x|>~16 result saturates (exponent field overflow); the SiLU /
@@ -1263,14 +1293,53 @@ extern int tq_batched_matmul_iq3_s(float* out, const void* weight,
 extern int tq_batched_matmul_iq4_xs(float* out, const void* weight,
                                      const float* x, int out_dim, int in_dim, int N);
 
-/* R61: bit-exact llama.cpp port (src/engine/tq_llama_kernels.c).
+/* R61/R63: bit-exact llama.cpp ports (src/engine/tq_llama_kernels.c).
  * Single-activation matmul; for batched call, loop over tokens. */
 extern void tqlk_matmul_iq4_xs(float* out, const void* weight, const float* x,
+                                int out_dim, int in_dim);
+extern void tqlk_matmul_iq3_s(float* out, const void* weight, const float* x,
                                 int out_dim, int in_dim);
 extern int tq_batched_matmul_q3_k(float* out, const void* weight,
                                    const float* x, int out_dim, int in_dim, int N);
 extern void tq_batched_matmul_q8_0(float* out, const void* w_blocks,
                                     const float* x, int n_rows, int d, int N);
+
+static int tq_env_layer_selected(const char* spec, int layer_idx) {
+    if (!spec || !*spec) return 0;
+    const char* p = spec;
+    while (*p) {
+        while (*p == ' ' || *p == ',') p++;
+        if (!*p) break;
+        char* endptr = NULL;
+        long lo = strtol(p, &endptr, 10);
+        if (endptr == p) break;
+        long hi = lo;
+        p = endptr;
+        if (*p == '-') {
+            p++;
+            hi = strtol(p, &endptr, 10);
+            if (endptr == p) hi = lo;
+            else p = endptr;
+        }
+        if (layer_idx >= (int)lo && layer_idx <= (int)hi) return 1;
+        while (*p && *p != ',') p++;
+        if (*p == ',') p++;
+    }
+    return 0;
+}
+
+static int tq_use_llama_kernels_for_layer(int layer_idx) {
+    static int checked = 0;
+    static int global_on = 0;
+    static const char* layer_spec = NULL;
+    if (!checked) {
+        global_on = getenv("TQ_USE_LLAMA_KERNELS") ? 1 : 0;
+        layer_spec = getenv("TQ_USE_LLAMA_KERNELS_LAYERS");
+        checked = 1;
+    }
+    if (layer_spec && *layer_spec) return tq_env_layer_selected(layer_spec, layer_idx);
+    return global_on;
+}
 
 /* Dispatch ONE batched matmul for the [M_e, out_dim] = X[M_e, in_dim] @ W.
  * Returns 0 on success, -1 if no batched kernel available (caller falls
@@ -1278,7 +1347,7 @@ extern void tq_batched_matmul_q8_0(float* out, const void* w_blocks,
 static int moe_batched_dispatch(
     float* out, const tq_expert_weights_t* exp,
     int which, /* 0=gate, 1=up, 2=down */
-    const float* x, int out_dim, int in_dim, int M_e)
+    const float* x, int out_dim, int in_dim, int M_e, int layer_idx)
 {
     const void* w = NULL;
     int wt = 0;
@@ -1313,6 +1382,18 @@ static int moe_batched_dispatch(
     if (wt == TQ_GGML_TYPE_IQ3_XXS) {
         return tq_batched_matmul_iq3_xxs(out, w, x, out_dim, in_dim, M_e);
     } else if (wt == TQ_GGML_TYPE_IQ3_S) {
+        /* R63 P1: env-gated bit-exact llama.cpp kernel route for IQ3_S.
+         * IQ3_S is 67% of routed expert tensors on Qwen3.6-35B-A3B UD-IQ4_XS
+         * (80 of 120). Without this kernel, the majority of experts use
+         * our per-32 int8 activation quant instead of llama's Q8_K,
+         * which is the measured source of the MoE output delta. */
+        if (tq_use_llama_kernels_for_layer(layer_idx)) {
+            for (int n = 0; n < M_e; n++) {
+                tqlk_matmul_iq3_s(out + (size_t)n * out_dim, w,
+                                   x + (size_t)n * in_dim, out_dim, in_dim);
+            }
+            return 0;
+        }
         return tq_batched_matmul_iq3_s(out, w, x, out_dim, in_dim, M_e);
     } else if (wt == TQ_GGML_TYPE_IQ4_XS) {
         /* R61 P3: env-gated bit-exact llama.cpp kernel route.
@@ -1322,9 +1403,7 @@ static int moe_batched_dispatch(
          * kernel but corrects the 1% MoE output delta identified at
          * R60 paired-diff. Memory cost per call: one Q8_K buffer
          * (in_dim/256 * ~264 bytes) malloced+freed — cheap. */
-        static int use_llamak = -1;
-        if (use_llamak == -1) use_llamak = getenv("TQ_USE_LLAMA_KERNELS") ? 1 : 0;
-        if (use_llamak) {
+        if (tq_use_llama_kernels_for_layer(layer_idx)) {
             for (int n = 0; n < M_e; n++) {
                 tqlk_matmul_iq4_xs(out + (size_t)n * out_dim, w,
                                     x + (size_t)n * in_dim, out_dim, in_dim);
@@ -1392,6 +1471,7 @@ typedef struct {
     int                         N_total;
     int                         hidden_dim;
     int                         expert_dim;
+    int                         layer_idx;
     int                         eid;             /* global expert id */
     int                         M_e;             /* tokens routed to this expert */
     const int*                  tokens_idx;      /* [M_e] token indices */
@@ -1478,9 +1558,9 @@ static void* moe_batch_expert_worker(void* arg) {
 
         /* Gate + up projections */
         int rc_gate = moe_batched_dispatch(gate_out, exp, 0,
-                                            X_sub, expert_dim, hidden_dim, M_c);
+                                            X_sub, expert_dim, hidden_dim, M_c, t->layer_idx);
         int rc_up   = moe_batched_dispatch(up_out, exp, 1,
-                                            X_sub, expert_dim, hidden_dim, M_c);
+                                            X_sub, expert_dim, hidden_dim, M_c, t->layer_idx);
         if (rc_gate != 0 || rc_up != 0) {
             for (int m = 0; m < M_c; m++) {
                 tq_matmul_gguf(gate_out + (size_t)m * expert_dim,
@@ -1500,7 +1580,7 @@ static void* moe_batch_expert_worker(void* arg) {
 
         /* Down projection */
         int rc_down = moe_batched_dispatch(down_out, exp, 2,
-                                            gate_out, hidden_dim, expert_dim, M_c);
+                                            gate_out, hidden_dim, expert_dim, M_c, t->layer_idx);
         if (rc_down != 0) {
             for (int m = 0; m < M_c; m++) {
                 tq_matmul_gguf(down_out + (size_t)m * hidden_dim,
@@ -1782,6 +1862,7 @@ void tq_moe_forward_batch(const tq_moe_layer_t* layer,
                 tasks_d[i].N_total = N;
                 tasks_d[i].hidden_dim = hidden_dim;
                 tasks_d[i].expert_dim = expert_dim;
+                tasks_d[i].layer_idx = layer_idx;
                 tasks_d[i].eid = eid;
                 tasks_d[i].M_e = tokens_per_expert_count[eid];
                 tasks_d[i].tokens_idx = tokens_per_expert_idx[eid];
@@ -1828,6 +1909,7 @@ void tq_moe_forward_batch(const tq_moe_layer_t* layer,
                 tasks[w].N_total = N;
                 tasks[w].hidden_dim = hidden_dim;
                 tasks[w].expert_dim = expert_dim;
+                tasks[w].layer_idx = layer_idx;
                 tasks[w].eid = eid;
                 tasks[w].M_e = tokens_per_expert_count[eid];
                 tasks[w].tokens_idx = tokens_per_expert_idx[eid];

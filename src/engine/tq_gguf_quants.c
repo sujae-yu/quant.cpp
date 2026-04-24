@@ -4836,6 +4836,49 @@ void tq_matmul_gguf(float* out, const float* x,
     }
 #endif
 
+    /* R63 P2: env-gated bit-exact llama.cpp path for Q6_K.
+     * Covers lm_head (single vocab-projection matmul, hit every token)
+     * and 3 Q6_K routed expert tensors on Qwen3.6-A3B UD-IQ4_XS.
+     *
+     * Separate opt-in: TQ_USE_LLAMA_KERNELS_Q6K=1 (NOT enabled by the
+     * global TQ_USE_LLAMA_KERNELS=1 flag) because measurement shows
+     * our per-32 int8 activation is often MORE precise than llama's
+     * per-256 Q8_K for Q6_K lm_head, and forcing Q8_K regresses
+     * coherent generation on Qwen3.6-A3B. */
+    {
+        static int use_llamak_q6k = -1;
+        if (use_llamak_q6k == -1)
+            use_llamak_q6k = getenv("TQ_USE_LLAMA_KERNELS_Q6K") ? 1 : 0;
+        if (use_llamak_q6k && weight_type == TQ_GGML_TYPE_Q6_K
+            && (in_dim % 256 == 0)) {
+            extern void tqlk_matmul_q6_K(float* out, const void* weight,
+                                          const float* x, int out_dim, int in_dim);
+            tqlk_matmul_q6_K(out, weight, x, out_dim, in_dim);
+            return;
+        }
+    }
+
+    /* R63 P1: env-gated bit-exact llama.cpp path for IQ3_S.
+     * Same pattern as the IQ4_XS intercept above. IQ3_S is 67% of
+     * routed expert tensors on Qwen3.6-35B-A3B UD-IQ4_XS (80 of 120).
+     * Enabled by TQ_USE_LLAMA_KERNELS=1 (same global flag as IQ4_XS).
+     * Separate TQ_USE_LLAMA_KERNELS_IQ3S=0 disables this specifically. */
+    {
+        static int use_llamak_iq3s = -1;
+        if (use_llamak_iq3s == -1) {
+            const char* spec = getenv("TQ_USE_LLAMA_KERNELS_IQ3S");
+            if (spec) use_llamak_iq3s = (*spec == '1') ? 1 : 0;
+            else use_llamak_iq3s = getenv("TQ_USE_LLAMA_KERNELS") ? 1 : 0;
+        }
+        if (use_llamak_iq3s && weight_type == TQ_GGML_TYPE_IQ3_S
+            && (in_dim % 256 == 0)) {
+            extern void tqlk_matmul_iq3_s(float* out, const void* weight,
+                                           const float* x, int out_dim, int in_dim);
+            tqlk_matmul_iq3_s(out, weight, x, out_dim, in_dim);
+            return;
+        }
+    }
+
     /* ---- IQ3_S × int8 fast path (vdotq_s32) ----
      * UD-IQ2_XXS quantizations embed IQ3_S for some layers (e.g., Qwen3.6
      * routed-expert critical paths). The float fused-dot is scalar; sample
