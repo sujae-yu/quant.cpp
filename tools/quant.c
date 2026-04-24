@@ -1046,6 +1046,22 @@ int main(int argc, char** argv) {
         fprintf(stderr, "Auto-temp: qwen35moe router softmax T=1.0 "
                         "(matches llama.cpp; TQ_NO_MOE_TEMP_AUTO=1 to opt out)\n");
     }
+
+    /* R63 Iter 2 (2026-04-25): DN_LLAMACPP_PORT applies to ANY DeltaNet
+     * model. The original filename-based trigger missed Qwen3.5-4B (arch
+     * "qwen35", no "Qwen3.6"/"A3B" in filename), which is DeltaNet-hybrid
+     * and suffers the same FP32 ordering issue. Now triggered by
+     * delta_n_heads > 0 detection from GGUF metadata — architecture-
+     * agnostic within the DeltaNet family.
+     *
+     * Verified: basin_compat.sh measurement on Qwen3.5-4B without this
+     * port showed max rel_diff 2.3 (Tier 3). With this port expected to
+     * drop to Tier 2 or better. Opt out via TQ_DN_LLAMACPP_PORT=0. */
+    if (model && model->config.delta_n_heads > 0 && !getenv("TQ_DN_LLAMACPP_PORT")) {
+        setenv("TQ_DN_LLAMACPP_PORT", "1", 0);
+        fprintf(stderr, "Auto: DeltaNet detected — TQ_DN_LLAMACPP_PORT=1 "
+                        "(llama.cpp delta-rule FP32 accumulation order).\n");
+    }
     /* Set thread count for matmul parallelism */
     tq_set_threads(n_threads);
     fprintf(stderr, "Threads: %d%s\n", tq_get_threads(),
