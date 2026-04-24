@@ -436,6 +436,22 @@ int main(int argc, char** argv) {
                 fprintf(stderr, "tq_main: qwen35moe DN_NORM_FP64 auto-enabled "
                         "(per-head RMSNorm in FP64, negligible memory).\n");
             }
+            /* R63 P4 (2026-04-24): verbatim llama.cpp gated_delta_net port.
+             * Root cause of late-layer divergence was FP32 summation order
+             * in the delta-rule state update. Our default uses state[i][j]
+             * layout with i-outer-j-inner FMA; llama uses state[j][i]
+             * (transposed) with j-outer-i-inner. Mathematically identical
+             * but FP32-non-associative: our per-layer ~1e-5 drift compounds
+             * across 40 layers into L33+ cos gap and expert-boundary flips.
+             * Measurement on "Hello" prompt: L33 rel_diff 14.5% -> 4.3%.
+             * Long-gen on quantum prompt: 35 coh -> ~100 coh words with
+             * real physics concepts (Schrödinger's cat, Entanglement,
+             * Wave-particle duality). */
+            if (!getenv("TQ_DN_LLAMACPP_PORT")) {
+                setenv("TQ_DN_LLAMACPP_PORT", "1", 0);
+                fprintf(stderr, "tq_main: qwen35moe DN_LLAMACPP_PORT auto-enabled "
+                        "(verbatim llama.cpp delta-rule FP32 accumulation order).\n");
+            }
             /* R62 K8: thinking mode 전용 FP32 KV cache. Direct mode에서는
              * turbo_kv_4b가 더 나음 (+regularizer effect), 하지만 thinking
              * mode는 long causal reasoning chain에 KV quant noise가 누적되어
