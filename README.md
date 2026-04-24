@@ -533,17 +533,33 @@ cc my_app.c -Ibuild/include -Lbuild -lllama -lm -lstdc++ -o my_app
 
 ## Supported Models
 
-| Model | Params | Architecture | Speed (M1 Pro, 8T) | KV Compression |
-|:------|-------:|:-------------|-------------------:|:--------------:|
-| SmolLM2 135M | 135M | Llama | **103 tok/s** | 2.4x |
-| Llama 3.2 3B Instruct | 3B | Llama 3 (GQA) | **10 tok/s** | 6.9x |
-| Gemma 4 26B-A4B-it | 26B (4B active) | MoE 128 experts | **3.9 tok/s** | 3.5x |
-| Qwen3.5 0.8B | 752M | DeltaNet hybrid | 80 tok/s | 3.8x |
-| Qwen3.5 4B | 4B | DeltaNet hybrid | 20 tok/s | 3.8x |
-| SmolLM2 1.7B | 1.7B | Llama | 25 tok/s | 3.8x |
-| Gemma 3 270M | 270M | Gemma 3 | 176 tok/s | 3.8x |
+Each model is classified by **FP32 basin compatibility** (see [`docs/engine_basin_tiers.md`](docs/engine_basin_tiers.md) for theory). Tier 1 = our basin matches reference closely; Tier 2 = functional but measurable divergence at late layers; Tier 3 = needs engine-specific calibration research.
 
-GGUF format. Load any llama.cpp-compatible model.
+| Model | Params | Architecture | Tier | Speed (M1 Pro, 8T) | KV Compression |
+|:------|-------:|:-------------|:----:|-------------------:|:--------------:|
+| SmolLM2 135M | 135M | Llama | 1 | **103 tok/s** | 2.4x |
+| Llama 3.2 3B Instruct | 3B | Llama 3 (GQA) | 1 | **10 tok/s** | 6.9x |
+| Phi-3.5-mini | 3.8B | Phi-3 | 1 | fast + coherent | 3.8x |
+| Gemma 4 26B-A4B-it | 26B (4B active) | MoE 128 experts | 1 | **3.9 tok/s** | 3.5x |
+| Qwen3.5 0.8B | 752M | DeltaNet hybrid | 1 | 80 tok/s | 3.8x |
+| Qwen3.5 4B | 4B | DeltaNet hybrid | 1 | 20 tok/s | 3.8x |
+| SmolLM2 1.7B | 1.7B | Llama | 1 | 25 tok/s | 3.8x |
+| Gemma 3 270M | 270M | Gemma 3 | 1 | 176 tok/s | 3.8x |
+| **Qwen3.6-35B-A3B** | 35B (3B active) | DeltaNet + MoE hybrid | **2** | 16 tok/s | 3.8x |
+
+GGUF format. Load any llama.cpp-compatible model. The Tier column reflects measured basin compatibility with llama.cpp as reference — it's not a quality judgement of the model itself. See the benchmark methodology below.
+
+### Tier 2 caveat — Qwen3.6-35B-A3B
+
+Long-generation coherent output caps at ~100 coherent words on the thinking-mode quantum prompt (vs llama.cpp's ~1090 words on the same model, same weights). Root cause identified (FP32 summation-order compounding in hybrid DeltaNet × MoE recurrent paths) and partially mitigated (commit `f6a65bb`: 5 → ~100 coherent words). Remaining gap is **system-wide numerical basin mismatch**, not a single-operator bug — see the [FP32 basin theory discussion](docs/engine_basin_tiers.md). Use for short-to-medium reasoning only; for long thinking-mode generation on this specific model, llama.cpp remains the right tool.
+
+### Benchmark your own
+
+```bash
+./tools/basin_compat.sh models/your-model.gguf
+```
+
+Produces per-layer residual-sum divergence and suggests a tier. Designed for DeltaNet-class hybrid models where llama-debug emits per-layer dumps; pure-feedforward comparison is more limited.
 
 <details>
 <summary><b>Gemma 4 26B-A4B architecture details</b></summary>
