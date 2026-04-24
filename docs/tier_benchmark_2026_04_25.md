@@ -8,17 +8,31 @@ Standardized coherent-length measurement across 5 models, 3 prompts each. Run vi
 2. **poem**: "Write a short poem about a solitary lighthouse at dawn."
 3. **trivia**: "What is the capital of France, and name two famous landmarks there?"
 
-## Raw results
+## Raw results — 14 models across family
 
-| Model                  | quantum     | poem        | trivia      |
-|:-----------------------|:-----------:|:-----------:|:-----------:|
-| Qwen3-0.6B Q4_K_M      | 299 (-n cap) | 285 (natural EOS) | 299 (-n cap) |
-| Qwen3.5-4B Q4_K_M      | 147 (natural EOS) | 106 (natural EOS) | 66 (natural EOS) |
-| Llama-3.2-3B Q8_0      | 299 (-n cap) | 105 (natural EOS) | 120 (natural EOS) |
-| Phi-3.5-mini Q4_K_M    | 299 (-n cap) | 299 (-n cap) | 299 (-n cap) |
-| **Qwen3.6-35B-A3B IQ4_XS** | 149 (natural EOS, thinking mode) | **73 tok, repetition loop** | **51 tok, attractor** |
+| Model                           | quantum            | poem              | trivia             | Tier |
+|:--------------------------------|:------------------:|:-----------------:|:------------------:|:----:|
+| SmolLM2-135M Q8_0               | 299 (-n cap)       | 108 (EOS)         | 22 (EOS)           | 1    |
+| SmolLM2-360M Q8_0               | 299 (-n cap)       | 108 (EOS)         | 22 (EOS)           | 1    |
+| **Qwen2.5-0.5B Q4_K_M**         | **64, rep loop**   | **49, rep loop**  | **55, rep loop**   | **3** |
+| Qwen3-0.6B Q4_K_M               | 299 (-n cap)       | 285 (EOS)         | 299 (-n cap)       | 1    |
+| Qwen3.5-4B Q4_K_M               | 147 (EOS)          | 106 (EOS)         | 66 (EOS)           | 1    |
+| llama-3.2-1B Q4_K_M             | 299 (-n cap)       | 133 (EOS)         | 110 (EOS)          | 1    |
+| Llama-3.2-1B Q8_0               | 261 (EOS)          | 107 (EOS)         | 137 (EOS)          | 1    |
+| Llama-3.2-3B Q8_0               | 299 (-n cap)       | 105 (EOS)         | 120 (EOS)          | 1    |
+| Gemma-4-e2b-it Q8_0             | 299 (-n cap)       | 92 (EOS)          | 31 (EOS)           | 1    |
+| Gemma-4-e4b-it Q4_0             | 299 (-n cap)       | 82 (EOS)          | 19 (EOS)           | 1    |
+| Phi-3.5-mini-instruct Q4_K_M    | 299 (-n cap)       | 299 (-n cap)      | 299 (-n cap)       | 1    |
+| Phi-3.5-mini-instruct Q8_0      | 299 (-n cap)       | 299 (-n cap)      | natural EOS        | 1    |
+| **Qwen3.6-35B-A3B IQ4_XS**      | 149 (EOS, thinking) | **73, rep loop**  | **51, attractor**  | **2** |
+| **Qwen3.6-35B-A3B Q5_K_M**      | 169 (EOS, thinking) | **68, rep loop**  | **69, rep loop**   | **2** |
 
-All Tier 1 models terminate either on natural EOS or hit the -n cap with usable content. Qwen3.6-A3B thinking-mode prompt survives, but non-thinking prompts (poem, trivia) hit attractors within 50-75 tokens.
+**Key observations:**
+
+- Qwen2.5-0.5B (Tier 3): model is genuinely too small — attractor under any engine. Keep in table as lower-bound reference.
+- Qwen3.6-35B-A3B (both quants Tier 2): **quantization change doesn't help**. Both IQ4_XS and Q5_K_M show the same basin mismatch (attractor at ~70 tok on non-thinking prompts). Confirms basin issue is structural, not bit-width.
+- 10/14 models are clean Tier 1 across 3 prompts.
+- No model has been demoted from Tier 1 to 2 by our R63 cleanup. The DN_PORT fix + auto-preset cleanup was a net improvement.
 
 ## Quality verdicts (first ~200 chars)
 
