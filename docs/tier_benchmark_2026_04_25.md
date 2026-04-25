@@ -64,6 +64,26 @@ Max rel_diff: **3.87** (L3). For comparison:
 2. MoE-only code paths firing on dense model (load message "Fused MoE kernels ready" appeared on dense model — likely harmless but worth confirming).
 3. Tensor layout interpretation differences in 27B GGUF.
 
+**Validated this session (2026-04-25)**:
+- Tensor names match A3B exactly (`attn_qkv`, `attn_gate`, `ssm_a/alpha/beta/dt/norm/out/conv1d`)
+- All tensor shapes consistent with config (qkv split = 16×128×2 + 48×128 = 10240 ✓)
+- GGUF metadata matches expected (rope sections [11,11,10,0], eps 1e-7, ssm.conv_kernel=4)
+- Layer pattern (16 attn at L3,7,11,...,63) matches llama-debug
+- ssm_a values in sensible range (-0.34 to -0.004 at L0, similar A3B pattern)
+- `is_moe = (num_experts > 0) = false` ✓ (MoE code paths gated correctly)
+- TQ_FORCE_QK_NORM=1 does NOT help (max rel_diff stays at 3.87 — not a QK-norm issue)
+- TQ_DN_LLAMACPP_PORT auto-enabled (DeltaNet detect via delta_n_heads > 0) ✓
+
+**Remaining investigation** (next session, multi-hour):
+- Element-level sub-op trace at L0 pos=0: qkv-proj output, conv1d output, Q/K/V split, L2-norm, decay, delta, state update, output, ssm_norm
+- Compare each sub-op against llama-debug's `cb(...)` named tensors at L0
+- First materially divergent sub-op identifies the bug
+
+**Quick paths to try first** (not done this session):
+- Q4_K dequant validation — 27B has hidden_dim 5120; Q4_K block size is 256 (5120/256=20 blocks). For previous models hidden 2048/3072/4096 (8/12/16 blocks). 5120 is unusual — verify dequant produces correct values.
+- TQ_DELTANET_FP32=1 to bypass DN quant entirely and compare
+- Run on smaller quant (UD-IQ2_M 10.1 GB) to see if Tier 3 persists across bit-widths
+
 **Memory**: at 16.8 GB Q4_K_M model size on 16 GB RAM Mac, evaluation is impractical (constant swap, ~0.3 tok/s, -n 30 test took 15+ min). For users wanting to test 27B, smaller quants are available:
 - UD-IQ2_M: 10.1 GB (recommended for 16 GB RAM)
 - UD-Q2_K_XL: 11.0 GB
