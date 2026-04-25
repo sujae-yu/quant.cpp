@@ -26,13 +26,49 @@ Standardized coherent-length measurement across 5 models, 3 prompts each. Run vi
 | Phi-3.5-mini-instruct Q8_0      | 299 (-n cap)       | 299 (-n cap)      | natural EOS        | 1    |
 | **Qwen3.6-35B-A3B IQ4_XS**      | 149 (EOS, thinking) | **73, rep loop**  | **51, attractor**  | **2** |
 | **Qwen3.6-35B-A3B Q5_K_M**      | 169 (EOS, thinking) | **68, rep loop**  | **69, rep loop**   | **2** |
+| **Qwen3.6-27B Q4_K_M** (NEW)    | not measured        | not measured       | not measured       | **3** |
 
 **Key observations:**
 
 - Qwen2.5-0.5B (Tier 3): model is genuinely too small — attractor under any engine. Keep in table as lower-bound reference.
 - Qwen3.6-35B-A3B (both quants Tier 2): **quantization change doesn't help**. Both IQ4_XS and Q5_K_M show the same basin mismatch (attractor at ~70 tok on non-thinking prompts). Confirms basin issue is structural, not bit-width.
+- **Qwen3.6-27B Q4_K_M (Tier 3, 2026-04-25)**: newly released dense DeltaNet hybrid (arch `qwen35`, 64 layers, dim 5120, time_step_rank=48 / ssm_inner=6144 — different config from 35B-A3B). basin_compat shows max rel_diff **3.87 at L3** with sign flips throughout. This is NOT basin mismatch (which preserves sign) — it's a fundamental forward-pass bug (likely in DeltaNet config variants we haven't validated, or MoE-code-path leak into dense models). 16.8 GB Q4_K_M file also exceeds 16 GB RAM, causing constant disk swap. Marked Tier 3 pending engineering investigation.
 - 10/14 models are clean Tier 1 across 3 prompts.
-- No model has been demoted from Tier 1 to 2 by our R63 cleanup. The DN_PORT fix + auto-preset cleanup was a net improvement.
+- No prior Tier 1 model was demoted by R63 cleanup. The DN_PORT fix + auto-preset cleanup was a net improvement.
+
+## Qwen3.6-27B Q4_K_M — full diagnostic (2026-04-25)
+
+basin_compat measurement (sums over 5120 elements per layer):
+
+| Layer | ours | llama | rel_diff | Notes |
+|-------|------|-------|----------|-------|
+| 0 | 23.5 | 6.8 | 2.47 | already off, same sign |
+| 1 | 28.1 | 6.5 | 3.35 | growing |
+| 3 | **-52.2** | **+18.2** | **3.87** | **sign flip — fundamental** |
+| 7 | 117 | 33.5 | 2.49 | |
+| 33 | 14 | 268 | 0.95 | huge magnitude diff |
+| 51 | -196 | 84 | 3.33 | sign flip |
+| 57 | -339 | 138 | 3.46 | sign flip |
+| 59 | -481 | 219 | 3.20 | sign flip |
+| 63 | 160 | -121 | 2.32 | sign flip on FINAL layer |
+
+Max rel_diff: **3.87** (L3). For comparison:
+- Qwen3.6-35B-A3B (Tier 2): max 0.41, sign preserved everywhere
+- Qwen3.5-4B (Tier 1 quality, Tier 3 by basin): max 2.30, sign mostly preserved
+- Qwen3.6-27B (Tier 3): max 3.87, sign flips at L3 onwards
+
+**Sign flips at early layers are the diagnostic signature of fundamental forward-pass bug** (not FP32 basin drift). Recommended action: skip 27B until bug is investigated.
+
+**Suspected causes** (not validated this session):
+1. DeltaNet config variant (time_step_rank=48 vs A3B's 32, ssm_inner=6144 vs 4096) handling.
+2. MoE-only code paths firing on dense model (load message "Fused MoE kernels ready" appeared on dense model — likely harmless but worth confirming).
+3. Tensor layout interpretation differences in 27B GGUF.
+
+**Memory**: at 16.8 GB Q4_K_M model size on 16 GB RAM Mac, evaluation is impractical (constant swap, ~0.3 tok/s, -n 30 test took 15+ min). For users wanting to test 27B, smaller quants are available:
+- UD-IQ2_M: 10.1 GB (recommended for 16 GB RAM)
+- UD-Q2_K_XL: 11.0 GB
+- Q3_K_S: 11.5 GB
+But the same Tier 3 basin issue would apply regardless of bit-width.
 
 ## Quality verdicts (first ~200 chars)
 
