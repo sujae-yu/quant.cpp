@@ -702,7 +702,14 @@ static void deltanet_forward(tq_model_t* model, tq_state_t* s, int l) {
     if (dn_trace) {
         double xb_sum = 0;
         for (int i = 0; i < dim; i++) xb_sum += s->xb[i];
-        fprintf(stderr, "[dn-trace] L%d attn_norm_out sum=%.6f\n", l, xb_sum);
+        fprintf(stderr, "[dn-trace] L%d attn_norm_out sum=%.6f first3=%.4f,%.4f,%.4f last3=%.4f,%.4f,%.4f\n",
+                l, xb_sum, s->xb[0], s->xb[1], s->xb[2],
+                s->xb[dim-3], s->xb[dim-2], s->xb[dim-1]);
+        /* Also dump pre-norm input (s->x) for embedding probe */
+        double xs = 0;
+        for (int i = 0; i < dim; i++) xs += s->x[i];
+        fprintf(stderr, "[dn-trace] L%d pre_norm_input sum=%.6f first3=%.4f,%.4f,%.4f\n",
+                l, xs, s->x[0], s->x[1], s->x[2]);
     }
 
     /* Pre-quantize activation to Q8 once for all Q2/Q4 projections in this layer.

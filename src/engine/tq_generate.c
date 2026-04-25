@@ -356,10 +356,51 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
                 }
                 if (bos_id >= 0) add_bos = 1;
             }
+            /* Qwen3.6 family (27B dense, 35B-A3B): GGUF metadata sets
+             * BOS=<|endoftext|> id 248044. tokenizer.ggml.add_bos_token=false
+             * but llama-cli adds BOS by default in main, and our basin_compat
+             * measurements showed missing BOS causes 100× outlier divergence
+             * at L0 (tokenization mismatch with reference). Detect by
+             * presence of <|endoftext|> in vocab. */
+            if (!add_bos) {
+                /* <|endoftext|> for Qwen3.6 lives in 248040-248050 range (vocab=248320) */
+                int lo = 248040, hi = 248060;
+                if (hi > tokenizer->vocab_size) hi = tokenizer->vocab_size;
+                for (int i = lo; i < hi; i++) {
+                    if (tokenizer->vocab[i] && strcmp(tokenizer->vocab[i], "<|endoftext|>") == 0) {
+                        add_bos = 1; break;
+                    }
+                }
+            }
+        }
+        /* Qwen3.6 BOS-id fix: tq_encode str_lookup chain checks <|im_start|>
+         * before <|endoftext|>, picking id 248045 instead of correct 248044
+         * for Qwen3.6 family (27B, 35B-A3B). For these models, override the
+         * BOS to <|endoftext|> directly. Detected by large vocab (>240K) +
+         * presence of <|endoftext|>. */
+        int qwen36_bos_override = -1;
+        if (add_bos && tokenizer->vocab_size > 240000) {
+            int lo = 248040, hi = 248060;
+            if (hi > tokenizer->vocab_size) hi = tokenizer->vocab_size;
+            for (int i = lo; i < hi; i++) {
+                if (tokenizer->vocab[i] && strcmp(tokenizer->vocab[i], "<|endoftext|>") == 0) {
+                    qwen36_bos_override = i; break;
+                }
+            }
         }
         n_prompt = tq_encode(tokenizer, prompt, prompt_tokens,
                               (int)(sizeof(prompt_tokens)/sizeof(prompt_tokens[0])),
                               add_bos);
+        /* Qwen3.6 BOS override: tq_encode picked <|im_start|> (248045) but
+         * GGUF metadata BOS = <|endoftext|> (248044). Replace at index 0. */
+        if (qwen36_bos_override >= 0 && n_prompt > 0 && add_bos) {
+            prompt_tokens[0] = qwen36_bos_override;
+        }
+        if (getenv("TQ_DEBUG_TOKENS")) {
+            fprintf(stderr, "[tq_encode] add_bos=%d n_prompt=%d tokens=[", add_bos, n_prompt);
+            for (int i = 0; i < n_prompt && i < 20; i++) fprintf(stderr, "%d%s", prompt_tokens[i], i+1<n_prompt?",":"");
+            fprintf(stderr, "]\n");
+        }
     } else {
         prompt_tokens[0] = (model->config.model_type == 1) ? 2 : 1;
         n_prompt = 1;

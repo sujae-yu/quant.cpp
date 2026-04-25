@@ -1203,13 +1203,16 @@ int tq_encode(const tq_tokenizer_t* tok, const char* text,
     int n_tokens = 0;
 
     /* Add BOS token if requested.
-     * Gemma: BOS=2, Qwen: no BOS (uses <|im_start|> instead) */
+     * Gemma: BOS=2, Qwen: no BOS (uses <|im_start|> instead).
+     * Qwen3.6 (27B dense, 35B-A3B): GGUF metadata has BOS=<|endoftext|> id 248044.
+     * Added for Qwen3.6 family to match llama.cpp tokenization. */
     if (add_bos) {
         /* Look up <bos> token in vocab; default to id 2 (Gemma convention) */
         int bos_id = str_lookup(tok, "<bos>");
         if (bos_id < 0) { bos_id = str_lookup(tok, "<s>"); }
         if (bos_id < 0) { bos_id = str_lookup(tok, "<|begin_of_text|>"); }
         if (bos_id < 0) { bos_id = str_lookup(tok, "<|im_start|>"); }
+        if (bos_id < 0) { bos_id = str_lookup(tok, "<|endoftext|>"); }
         if (bos_id >= 0) {
             tokens[n_tokens++] = bos_id;
         }
