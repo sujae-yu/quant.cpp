@@ -81,8 +81,25 @@ Max rel_diff: **3.87** (L3). For comparison:
 
 **Quick paths to try first** (not done this session):
 - Q4_K dequant validation — 27B has hidden_dim 5120; Q4_K block size is 256 (5120/256=20 blocks). For previous models hidden 2048/3072/4096 (8/12/16 blocks). 5120 is unusual — verify dequant produces correct values.
-- TQ_DELTANET_FP32=1 to bypass DN quant entirely and compare
+- TQ_DELTANET_FP32=1 to bypass DN quant entirely and compare ✓ TESTED — same Tier 3, max 3.87. Quant is NOT the cause.
 - Run on smaller quant (UD-IQ2_M 10.1 GB) to see if Tier 3 persists across bit-widths
+
+**Element-level L0 comparison** (2026-04-25, after BOS alignment confirmed):
+```
+position 0 (BOS), L0 first 3 elements:
+  ours:   [-0.0548,  0.3547, -0.7901]
+  llama:  [-0.1097, -0.0390,  0.0355]
+  diff:   [ 2× off, SIGN FLIP, SIGN FLIP + 22× magnitude ]
+```
+
+Sum-level diff was 247% (23.5 vs 6.77). Element-level shows OUTLIER CHANNELS pattern — specific dimensions blown up while sum stays manageable.
+
+**Outlier-channel pattern suggests**:
+- Specific norm weight reading mis-aligned (e.g., attn_norm dim 5120 — boundary issue?)
+- Embedding lookup scaling factor missing (some Qwen variants have embed_scale = sqrt(hidden_dim))
+- Specific projection (qkv split offsets, conv1d channel split) shifting dim assignments
+
+**Concrete next investigation step**: dump first 20 elements of each named tensor at L0 (post_embed, attn_norm_out, qkv_proj_out, conv1d_out, q_split, k_split, v_split, q_l2norm, k_l2norm, gate_silu, delta_state, delta_out, ssm_norm_out, residual). First materially-divergent step localizes the bug.
 
 **Memory**: at 16.8 GB Q4_K_M model size on 16 GB RAM Mac, evaluation is impractical (constant swap, ~0.3 tok/s, -n 30 test took 15+ min). For users wanting to test 27B, smaller quants are available:
 - UD-IQ2_M: 10.1 GB (recommended for 16 GB RAM)
