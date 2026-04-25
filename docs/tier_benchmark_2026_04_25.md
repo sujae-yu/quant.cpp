@@ -101,6 +101,29 @@ Sum-level diff was 247% (23.5 vs 6.77). Element-level shows OUTLIER CHANNELS pat
 
 **Concrete next investigation step**: dump first 20 elements of each named tensor at L0 (post_embed, attn_norm_out, qkv_proj_out, conv1d_out, q_split, k_split, v_split, q_l2norm, k_l2norm, gate_silu, delta_state, delta_out, ssm_norm_out, residual). First materially-divergent step localizes the bug.
 
+**llama sub-op tensor names captured (2026-04-25)** for paired-diff:
+```
+attn_norm-N      = MUL(norm output × attn_norm.weight)
+linear_attn_qkv_mixed-N  shape {10240, n_tokens}
+conv_states_reshaped-N   shape {3, 10240}        (conv buffer state)
+conv_input-N             shape {5, 10240}        (concat states + new)
+conv_output_raw-N        SSM_CONV(input, conv1d.weight)
+conv_output_silu-N       SILU(conv_output_raw)
+q_conv-N                 VIEW shape {128, 16, n_tokens}     ← Q at offset 0
+q_conv_predelta-N        L2_NORM(q_conv)
+k_conv-N                 VIEW shape {128, 16, n_tokens}     ← K at offset 16×128=2048
+k_conv_predelta-N        L2_NORM(k_conv)
+v_conv_predelta-N        VIEW shape {128, 48, n_tokens}     ← V at offset 2×16×128=4096
+```
+
+**Verified split offsets match ours**: Q at 0, K at 2048, V at 4096. Our `delta_qkv[0:2048]` Q, `delta_qkv[2048:4096]` K, `delta_qkv[4096:10240]` V — ✓ identical.
+
+**Suspected at this point** (since shape/split/load all verified):
+- ssm_conv1d weight: shape `{4, 10240}` in GGUF. Our load assumes specific layout. May need to verify how we read this 2-D weight with channel dim 10240 (different from A3B's 8192).
+- L2_NORM op specifics — we may apply differently than llama's `ggml_l2_norm`.
+- input_layernorm to DN: we use `attn_norm` weight; verify boundary handling for hidden=5120.
+- BOS token handling differences (both engines DO add BOS, confirmed).
+
 **Memory**: at 16.8 GB Q4_K_M model size on 16 GB RAM Mac, evaluation is impractical (constant swap, ~0.3 tok/s, -n 30 test took 15+ min). For users wanting to test 27B, smaller quants are available:
 - UD-IQ2_M: 10.1 GB (recommended for 16 GB RAM)
 - UD-Q2_K_XL: 11.0 GB
