@@ -100,3 +100,36 @@ attention(q, k_full, v_full)
 5. Decide: build forward pass from scratch, or adapt our existing hybrid-attention path?
 
 Owner: future session(s). This plan is the handoff.
+
+## Phase 1 results (2026-04-26)
+
+Downloaded `bartowski/DeepSeek-Coder-V2-Lite-Instruct-IQ3_XXS.gguf` (6.96 GB, 16B-MoE/2.4B-active, MLA + YaRN, 27 layers).
+
+**Load: SUCCESS, no engine changes required.**
+- arch detected as `deepseek2` (already passes through our generic loader)
+- 27 blocks parsed, MoE config (64 experts × 6 active, expert_dim=1408, shared=2) recognised
+- IQ3_XXS dequant fired correctly (existing R3 infrastructure)
+- 6.5 GB mlock — fits cleanly in 16 GB RAM, no paging
+- Decode: **5.1 tok/s** on M1 Pro single-thread — order-of-magnitude faster than 27B-dense Tier 3 attempts
+
+**Forward pass: BROKEN, as expected.**
+- Output on `Hello` prompt: `肯定里<\/ Includingatha` — multilingual garbage
+- Our generic transformer treats `attn_q`/`attn_kv_a_mqa`/`attn_kv_b` as if they were `wq`/`wk`/`wv`. Shape mismatch produces nonsensical attention scores.
+- MLA invariants the loader does NOT yet honour:
+  - `attn_kv_a_mqa` shape `[2048, 576]` = 512 latent + 64 RoPE-K (down-proj, single head, MQA-style)
+  - `attn_kv_a_norm` shape `[512]` (latent norm before up-proj)
+  - `attn_kv_b` shape `[512, 4096]` (latent → full K|V split, 16 heads × (128 nope-K + 128 V))
+  - `attn_q` shape `[2048, 3072]` = 16 heads × (64 nope-Q + 128 rope-Q) — Q has its own RoPE/no-RoPE split
+  - `kv_lora_rank=512`, `key_length=192`, `value_length=128`
+- KV-cache layout would change from `2 × n_heads × head_dim × seq_len` to `(kv_lora_rank + qk_rope_head_dim) × seq_len = 576 × seq_len`
+  → **10.7× compression at the architectural level**, before our turbo_kv_4b's 8× → **~85× total** target (MLA × turbo_kv_4b), unblocking 256 K context on 16 GB.
+- YaRN RoPE scaling (factor 40, original ctx 4096, log_multiplier 0.0707) needs distinct math from standard RoPE.
+
+**Phase 1 verdict**: loader path through existing GGUF reader works without modification — the architectural change is entirely in the forward pass. Move directly to Phase 2 (MLA attention compute) when next picked up.
+
+**Phase 2 entry plan**:
+1. Detect `gctx->arch == "deepseek2"` and dispatch to a new `deepseek2_attention_forward` instead of the standard hybrid path.
+2. Allocate latent KV cache `[max_seq, kv_lora_rank + qk_rope_head_dim]` per layer.
+3. Implement compressed forward: latent = x @ kv_a_mqa → split → norm latent → cache; on read, K|V = latent @ kv_b → split → standard attention with Q from `attn_q`.
+4. YaRN RoPE for the rope-Q / rope-K subset.
+5. Validate: bit-exact L0 attn output vs llama.cpp on the same prompt before going to multi-layer.
