@@ -176,6 +176,21 @@ But the same Tier 3 basin issue would apply regardless of bit-width.
 - Conclusion: the cliff lives at ~8 GB on a 16 GB Mac, and we now have an engine path through it. But coh_bench evaluation needs a quality-preserving quant, which means either (i) downloading source BF16/F16 (~54 GB) and quantizing once, or (ii) waiting for Unsloth/bartowski to publish a calibrated TQ2_0/IQ1_M for 27B.
 - Engine takeaway: TQ1_0 enum is reserved (54 B/block) but dequant not implemented; TQ2_0 dequant is in.
 
+**R6 — Q8_0 (28.6 GB) → TQ2_0: source quality irrelevant, TQ2_0 is from-scratch quant**
+- Hypothesis: R5 garbled output came from `--allow-requantize` doubling the quality loss (BF16 → Q4_K_M → TQ2_0). Re-quantize from Q8_0 (8.5 BPW, near-BF16) and quality should recover.
+- Procedure: downloaded `unsloth/Qwen3.6-27B-Q8_0.gguf` (28.6 GB, ~30 min @ ~500 MB/min), `llama-quantize --allow-requantize Q8_0 → TQ2_0` (45 s, 7674 MB output identical to R5).
+- Sanity test (`-n 30`, chat mode, single thread):
+  - Decode 29 tok in 514s = **0.056 tok/s** (R5: 0.052, R4 IQ2_XXS: 0.038)
+  - TTFT **305s** (R5: 340s, R4: 406s)
+  - Output: `رانMutexご覧amatFormatExceptionSA享erb忌tape和改善heckmemo済大道ilder…` — **same multilingual garbage as R5**
+- **Hypothesis refuted**: Q8_0 source produced *exactly* the same garbled output as Q4_K_M source. Quality difference between the two sources is invisible at the TQ2_0 output. **TQ2_0 (2.06 bpw ternary) is a from-scratch-only format for 27B dense** — post-training requantize cannot preserve coherence regardless of source bpw, because the ternary value space {−d, 0, +d} can't represent the weight distribution Qwen3.6 was trained for. This matches BitNet b1.58's design (trained ternary from step 0, never quantized after).
+- Speed/cliff results consistent with R5: 0.05 tok/s, ~60 % CPU utilisation, paging cliff cleared.
+- **Path forward** (next session, not in this hardware budget):
+  - (a) Download a calibrated IQ1_M (~6.5 GB) when Unsloth/bartowski publish one (none exists today for 27B)
+  - (b) Build imatrix locally (`llama-imatrix` on a calibration corpus; forward pass cost is paging-bound on this Mac, multi-hour) and quantize Q8_0 → IQ1_M
+  - (c) Use ≥32 GB RAM hardware to skip the cliff entirely and run Q4_K_M directly
+- Permanent assets from R1–R6: BOS fix, IQ2_XS dequant, TQ2_0 dequant, paging-cliff measurement (~8 GB on 16 GB Mac), and the empirical fact that low-bpw ternary requires training-time integration on this model family.
+
 ## Quality verdicts (first ~200 chars)
 
 ### Qwen3-0.6B — Tier 1
