@@ -333,9 +333,17 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
          * Gemma 3/4: model_type==1, BOS=2 (required)
          * Phi-3 / LLaMA 2: vocab has <s> as BOS (required)
          * LLaMA 3: BOS=128000 (<|begin_of_text|>) — tq_encode lookup chain handles it
-         * Qwen3.5 / GPT-2 BPE: no native BOS, skip */
+         * Qwen3.5 / GPT-2 BPE: no native BOS, skip
+         *
+         * Precedence: GGUF metadata `tokenizer.ggml.add_bos_token` wins over
+         * heuristics. -1 = explicit false (suppress), +1 = explicit true,
+         * 0 = unset (fall through to heuristic). */
         int add_bos = 0;
-        if (model->config.model_type == 1) {
+        if (tokenizer->add_bos_token == -1) {
+            /* explicit false — Qwen3.6 27B/35B-A3B path; skip everything */
+        } else if (tokenizer->add_bos_token == 1) {
+            add_bos = 1;
+        } else if (model->config.model_type == 1) {
             add_bos = 1; /* Gemma: always prepend BOS=2 */
         } else {
             /* Auto-detect BOS: check if vocab contains <s> (LLaMA 2, Phi-3)

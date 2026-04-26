@@ -950,8 +950,20 @@ tq_tokenizer_t* tq_load_tokenizer_from_gguf(const void* gguf_ctx_ptr) {
         }
     }
 
-    fprintf(stderr, "tq_load_tokenizer_from_gguf: loaded %d tokens (max_len=%d)\n",
-            tok->vocab_size, tok->max_token_len);
+    /* tokenizer.ggml.add_bos_token (bool, optional)
+     *   true  → tok->add_bos_token = +1 (force BOS prepend)
+     *   false → tok->add_bos_token = -1 (suppress BOS prepend)
+     *   unset →  0 (let tq_generate fall back to vocab heuristic) */
+    int64_t add_bos_idx = tq_gguf_find_key(gguf, "tokenizer.ggml.add_bos_token");
+    if (add_bos_idx >= 0) {
+        const tq_gguf_kv_t* kv = &gguf->kv[add_bos_idx];
+        if (kv->type == TQ_GGUF_TYPE_BOOL) {
+            tok->add_bos_token = kv->value.bool_val ? 1 : -1;
+        }
+    }
+
+    fprintf(stderr, "tq_load_tokenizer_from_gguf: loaded %d tokens (max_len=%d) add_bos=%d\n",
+            tok->vocab_size, tok->max_token_len, tok->add_bos_token);
     return tok;
 }
 

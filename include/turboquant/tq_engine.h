@@ -459,6 +459,11 @@ typedef struct {
     int* sorted_indices;
     /* Merge table: pairs of token IDs that merge into a result */
     int* merge_pairs;    /* [n_merges * 3]: (token_a, token_b, result_id) */
+    /* GGUF metadata flag: tokenizer.ggml.add_bos_token
+     *   1  = explicitly true  (force BOS prepend)
+     *  -1  = explicitly false (suppress BOS prepend regardless of vocab lookup)
+     *   0  = unset (use heuristic vocab lookup) */
+    int add_bos_token;
 } tq_tokenizer_t;
 
 /* ============================================================
