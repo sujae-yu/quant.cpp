@@ -1245,9 +1245,10 @@ moe_cpu_fallback: ;
         }
     }
 
-#ifdef TQ_HAS_METAL
 moe_shared_expert:
-#endif
+    /* Label is referenced by goto from non-Metal code paths (R5+ MoE
+     * fast-path skip, line ~1065). Keep the label unconditional so
+     * non-Metal builds compile. */
     /* Step 4: Shared expert (always-active, if present).
      * TQ_MOE_NO_SHARED=1 disables it entirely for A/B testing against
      * llama.cpp's presumed identical path. If disabling improves
