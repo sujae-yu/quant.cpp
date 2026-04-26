@@ -533,7 +533,7 @@ cc my_app.c -Ibuild/include -Lbuild -lllama -lm -lstdc++ -o my_app
 
 ## Supported Models
 
-Each model is classified by **FP32 basin compatibility** (see [`docs/engine_basin_tiers.md`](docs/engine_basin_tiers.md) for theory). Tier 1 = our basin matches reference closely; Tier 2 = functional but measurable divergence at late layers; Tier 3 = needs engine-specific calibration research.
+Each model is classified by **measured coherent-length performance** (see [`docs/tier_benchmark_2026_04_25.md`](docs/tier_benchmark_2026_04_25.md) for the 14-model standardized benchmark and [`docs/engine_basin_tiers.md`](docs/engine_basin_tiers.md) for theory). Tier 1 = 3/3 prompts complete naturally; Tier 2 = some attractor at long length; Tier 3 = consistent attractor across prompts or hardware-blocked.
 
 | Model | Params | Architecture | Tier | Speed (M1 Pro, 8T) | KV Compression |
 |:------|-------:|:-------------|:----:|-------------------:|:--------------:|
@@ -546,12 +546,17 @@ Each model is classified by **FP32 basin compatibility** (see [`docs/engine_basi
 | SmolLM2 1.7B | 1.7B | Llama | 1 | 25 tok/s | 3.8x |
 | Gemma 3 270M | 270M | Gemma 3 | 1 | 176 tok/s | 3.8x |
 | **Qwen3.6-35B-A3B** | 35B (3B active) | DeltaNet + MoE hybrid | **2** | 16 tok/s | 3.8x |
+| **Qwen3.6-27B** (dense) | 27B | DeltaNet + self-attn hybrid (16 attn / 64 layers) | **3** | hardware-blocked on 16 GB Mac (Q4_K_M = 16.8 GB; smallest published quant UD-IQ2_XXS = 9.39 GB still paging-bound) | 3.8x |
 
-GGUF format. Load any llama.cpp-compatible model. The Tier column reflects measured basin compatibility with llama.cpp as reference — it's not a quality judgement of the model itself. See the benchmark methodology below.
+GGUF format. Load any llama.cpp-compatible model. The Tier column reflects measured coherent-length performance — it is not a quality judgement of the model itself. See the benchmark methodology below.
 
 ### Tier 2 caveat — Qwen3.6-35B-A3B
 
 Long-generation coherent output caps at ~100 coherent words on the thinking-mode quantum prompt (vs llama.cpp's ~1090 words on the same model, same weights). Root cause identified (FP32 summation-order compounding in hybrid DeltaNet × MoE recurrent paths) and partially mitigated (commit `f6a65bb`: 5 → ~100 coherent words). Remaining gap is **system-wide numerical basin mismatch**, not a single-operator bug — see the [FP32 basin theory discussion](docs/engine_basin_tiers.md). Use for short-to-medium reasoning only; for long thinking-mode generation on this specific model, llama.cpp remains the right tool.
+
+### Tier 3 caveat — Qwen3.6-27B (dense)
+
+The 27B dense variant (released 2026-04, arch `qwen35` with 16 self-attn + 48 DeltaNet layers, dim 5120) loads correctly after the 2026-04-26 BOS fix (`<|endoftext|>` = 248044, commit `12e4d94` — verified bit-exact at L0 attn_norm vs llama.cpp). Coherent-length measurement on a 16 GB Mac is **hardware-blocked**: Q4_K_M (16.8 GB) exceeds RAM and the smallest published quant UD-IQ2_XXS (9.39 GB) is still paging-bound (~0.04 tok/s, 78% I/O wait). Self-quantize-to-TQ2_0 (8 GB, commit `55fa3d9`) clears the paging cliff but post-training ternary requantize destroys quality (verified across both Q4 and Q8 source quantizes — see R5/R6 in the tier benchmark). The engine path works on ≥32 GB hardware; the missing piece for 16 GB is a quality-preserving ≤8 GB calibrated quant (none published for 27B today).
 
 ### Benchmark your own
 
