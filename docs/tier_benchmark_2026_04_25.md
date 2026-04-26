@@ -152,6 +152,17 @@ But the same Tier 3 basin issue would apply regardless of bit-width.
 
 **Tier verdict**: Qwen3.6-27B Q4_K_M remains Tier 3 (cannot be promoted without coherent-length measurement on this hardware). The BOS fix + IQ2_XS impl are real improvements that will pay off on hardware that fits the model, but the original goal "Tier 3→1 promotion via Karpathy loop" is **hardware-blocked on a 16 GB Mac**, not engine-blocked.
 
+**R4 — UD-IQ2_XXS (9.39 GB, Unsloth's smallest published 27B quant) — same RAM ceiling**
+- Web research (2026-04-26): the only published Qwen3.6-27B quants are ≥9.39 GB (Unsloth UD-IQ2_XXS). IQ1_S/IQ1_M would be ~5-6 GB but no 27B file exists, and BitNet b1.58 / PowerInfer / Deja Vu / TurboSparse all require pre-training or ReLU activation (Qwen3.6 uses SwiGLU). Apple's "LLM in a Flash" assumes sparse FFN. PowerInfer-style mmap layer streaming is the only post-training option for dense SwiGLU and would take a multi-session refactor. None of these enable a 27B dense to fit a 16 GB box at usable speed.
+- Hypothesis tested: 9.39 GB sits below the IQ2_M (10.1 GB) paging cliff, should give measurable tok/s.
+- Result: **partially refuted**. UD-IQ2_XXS sanity test on chat-mode `"What is the capital of France?"` -n 30:
+  - TTFT 406s (~7 min) — 27B prefill is paging-bound regardless of quant width
+  - Decode 10 tok in 266s = **0.038 tok/s** (IQ2_M was 0.03, +27% — direction is right, magnitude is not)
+  - CPU/wall = 21% (78% I/O wait — same paging signature as IQ2_M's 84%)
+  - Quality improvement: output was clean token IDs (`22121\n\n5032`) instead of IQ2_M's garbled mixed-script `" t.\n\nt。\n\n t tว่า"` — **incidentally validates that the R3 IQ2_XS dequant is functioning correctly**; the IQ2_M garbage was the quant's own quality limit on 27B dense, not a bug in our impl.
+- coh_bench projection: each `-n=80` prompt would take ~35 min; 3 prompts ≈ 105 min per measurement. Not Karpathy-loop tractable.
+- **Final verdict for this hardware**: 27B Tier 3→1 promotion is hardware-blocked. Path forward is either (a) ≥32 GB RAM, (b) a Qwen3.6-27B IQ1_M quant (not yet published, ~6.5 GB would fit), or (c) implement post-training mmap layer streaming for dense SwiGLU (multi-session refactor, see PowerInfer / prima.cpp references).
+
 ## Quality verdicts (first ~200 chars)
 
 ### Qwen3-0.6B — Tier 1
