@@ -356,22 +356,15 @@ int tq_generate(tq_model_t* model, tq_tokenizer_t* tokenizer,
                 }
                 if (bos_id >= 0) add_bos = 1;
             }
-            /* Qwen3.6 family (27B dense, 35B-A3B): GGUF metadata sets
-             * BOS=<|endoftext|> id 248044. tokenizer.ggml.add_bos_token=false
-             * but llama-cli adds BOS by default in main, and our basin_compat
-             * measurements showed missing BOS causes 100× outlier divergence
-             * at L0 (tokenization mismatch with reference). Detect by
-             * presence of <|endoftext|> in vocab. */
-            if (!add_bos) {
-                /* <|endoftext|> for Qwen3.6 lives in 248040-248050 range (vocab=248320) */
-                int lo = 248040, hi = 248060;
-                if (hi > tokenizer->vocab_size) hi = tokenizer->vocab_size;
-                for (int i = lo; i < hi; i++) {
-                    if (tokenizer->vocab[i] && strcmp(tokenizer->vocab[i], "<|endoftext|>") == 0) {
-                        add_bos = 1; break;
-                    }
-                }
-            }
+            /* Qwen3.6 family note: GGUF metadata declares
+             * tokenizer.ggml.add_bos_token=false for both 27B and 35B-A3B.
+             * The chat template is self-contained and prepending BOS breaks
+             * coherent generation. Earlier R1 code force-enabled BOS via
+             * <|endoftext|> presence detection; that caused a deterministic
+             * Qwen3.6-35B-A3B IQ4_XS regression (149 EOS quantum → 94 rep
+             * loop, bisected to 12e4d94, fixed 2026-04-26). Do not
+             * auto-enable BOS for this family. The qwen36_bos_override
+             * below only fires if add_bos was set by an earlier path. */
         }
         /* Qwen3.6 BOS-id fix: tq_encode str_lookup chain checks <|im_start|>
          * before <|endoftext|>, picking id 248045 instead of correct 248044

@@ -26,16 +26,16 @@ Standardized coherent-length measurement across 5 models, 3 prompts each. Run vi
 | Gemma-4-e4b-it Q4_0             | 299 / 82 / 19  (3/3 EOS)     | 299 EOS / 82 EOS / 19 EOS     | 1 | = |
 | Phi-3.5-mini Q4_K_M             | 299 / 299 / 299  (3/3 -n)    | 299 -n / 299 -n / 299 -n      | 1 | = |
 | Phi-3.5-mini Q8_0               | 299 / 299 / EOS  (3/3 OK)    | 299 -n / 299 -n / 299 -n      | 1 | = |
-| **Qwen3.6-35B-A3B IQ4_XS**      | 149 EOS / 73 rep / 51 rep    | **94 rep / 76 rep / 60 rep**  | **3** | ↓1 |
+| **Qwen3.6-35B-A3B IQ4_XS**      | 149 EOS / 73 rep / 51 rep    | 149 EOS / 76 rep / 60 rep (post-R7) | **2** | = |
 | **Qwen3.6-35B-A3B Q5_K_M**      | 169 EOS / 68 rep / 69 rep    | **24 EOS / 225 rep / 46 EOS** | **2** | = |
 | **Qwen3.6-27B Q4_K_M**          | not measurable on 16 GB Mac (R2)                            | not measurable (R2) | **3** | n/a |
 | Qwen3.6-27B-TQ2_0 (R5/R6)       | engine path verified (paging-cliff cleared) but quality is requantize-artifact garbage | requantize-from-Q4 or Q8 both garbled | **n/a (engine-only)** | new |
 
-**Summary of post-R1–R6 changes**:
-- **Qwen3.5-4B trivia +217%** (66 → 209 tok natural EOS) — direct R1 BOS-fix benefit, since Qwen3.5 shares the Qwen3.6 tokenizer's `<|endoftext|>` BOS path.
-- **Qwen3.6-35B-A3B IQ4_XS Tier 2 → 3** — single-run regression (149 EOS quantum → 94 rep). Likely measurement noise (35B-A3B has known ±20-40 tok variance per `feedback_multithread_variance.md`); needs `-j 1` deterministic re-run with multiple seeds to confirm. Marked tier 3 conservatively pending re-test.
-- **SmolLM2-135M Tier 1 → 2** — poem regressed 108 EOS → 241 rep loop. Possible noise on a 135M model at -T 0.
-- **All other 11 Tier 1 models unchanged** — R1 BOS fix and R3/R5 IQ-impl additions did not break any prior-passing model.
+**Summary of post-R1–R6 changes** (and R7 follow-up regression-fix):
+- **Qwen3.5-4B trivia +217%** (66 → 209 tok natural EOS) — direct R1 BOS-fix benefit, since Qwen3.5 shares the Qwen3.6 tokenizer family.
+- **R7 regression bisect (2026-04-26)**: deterministic 35B-A3B IQ4_XS regression (149 EOS quantum → 94 rep loop) was bisected to commit `12e4d94` (R1 BOS fix). Root cause: GGUF metadata declares `tokenizer.ggml.add_bos_token=false` for both Qwen3.6-27B and 35B-A3B; R1 force-enabled BOS via `<|endoftext|>` presence detection regardless of the metadata flag. Chat template is self-contained — prepending BOS broke generation. **R7 fix removes the auto-enable path; 35B-A3B IQ4_XS quantum restored to 149 tok EOS (Tier 2 confirmed).**
+- **SmolLM2-135M poem rep loop is a measurement-only artifact**: re-running on the `0829285` baseline tokenizer produces the *same* 241 rep loop, so the original 4-25 doc value (108 EOS) is the outlier. The 4-26 column reflects current behavior; SmolLM2-135M is genuinely Tier 2 on this prompt under both pre-R1 and post-R7 codebases.
+- **All other 11 Tier 1 models unchanged** — R1 BOS fix (post-R7), R3 IQ2_XS impl, and R5 TQ2_0 impl did not break any prior-passing model.
 
 **Key observations:**
 
