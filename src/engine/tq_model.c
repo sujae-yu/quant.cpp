@@ -3975,6 +3975,23 @@ tq_model_t* tq_load_gguf(const char* path) {
             c->is_moe ? ", MoE" : "",
             c->hidden_dim, c->n_heads, c->n_kv_heads, c->vocab_size);
 
+    /* deepseek2 (DeepSeek V2/V3, Coder-V2) uses Multi-head Latent Attention
+     * (MLA): the GGUF reader and quant kernels handle the model's tensors
+     * fine, but our standard attention forward path treats attn_kv_a_mqa /
+     * attn_kv_b as if they were wk / wv. That produces multilingual garbage
+     * tokens — see docs/research/mla_support_plan.md (Phase 1 results,
+     * 2026-04-26) for the architectural details and the Phase 2 entry plan.
+     * Print a loud one-time warning so users do not mistake garbage output
+     * for a quantization artifact. */
+    if (strcmp(gguf->arch, "deepseek2") == 0) {
+        fprintf(stderr,
+            "tq_load_gguf: WARNING — arch 'deepseek2' uses MLA "
+            "(Multi-head Latent Attention).\n"
+            "  Our forward pass does NOT yet implement MLA decompression.\n"
+            "  Output WILL be incoherent until Phase 2 lands.\n"
+            "  See docs/research/mla_support_plan.md for the roadmap.\n");
+    }
+
     /* Hard-fail when no attention layers were detected. Without this,
      * the forward pass runs against zero-initialized weights → garbage.
      * This was the root cause of the Phi-3 first-time experience bug:
