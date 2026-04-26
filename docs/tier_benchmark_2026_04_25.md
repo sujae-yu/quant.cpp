@@ -125,10 +125,32 @@ v_conv_predelta-N        VIEW shape {128, 48, n_tokens}     ← V at offset 2×1
 - BOS token handling differences (both engines DO add BOS, confirmed).
 
 **Memory**: at 16.8 GB Q4_K_M model size on 16 GB RAM Mac, evaluation is impractical (constant swap, ~0.3 tok/s, -n 30 test took 15+ min). For users wanting to test 27B, smaller quants are available:
-- UD-IQ2_M: 10.1 GB (recommended for 16 GB RAM)
+- UD-IQ2_M: 10.1 GB (still paging-bound on 16 GB — see R3 update below)
 - UD-Q2_K_XL: 11.0 GB
 - Q3_K_S: 11.5 GB
 But the same Tier 3 basin issue would apply regardless of bit-width.
+
+## R1–R3 update (2026-04-26) — BOS fix verified, IQ2_XS implemented, measurement still RAM-blocked
+
+**R1 — BOS root cause found and fixed (commit 12e4d94)**
+- Symptom: L0 attn_norm_out elements sign-flipped vs llama (ours +0.25, llama −0.29)
+- Root cause: Qwen3.6 GGUF declares `bos_token_id = 248044` (`<|endoftext|>`), but our str_lookup chain hit `<|im_start|>` (248045) first
+- Fix: added `<|endoftext|>` to BOS lookup chain in `tq_tokenizer.c`; added Qwen3.6 BOS auto-detection + post-encode override in `tq_generate.c` (vocab > 240K models)
+- **Verification**: with corrected BOS, L0 attn_norm first3 = `[-0.2891, -0.6430, 0.4991]` — bit-exact match with llama-debug. Sign flip and outlier-channel pattern from Q4_K_M diagnostic resolved at the prefill layer.
+- Regression check: Qwen3.5-4B remains Tier 1 (3/3 natural EOS), trivia improved 66→209 tok with the new BOS path.
+
+**R2 — Q4_K_M coh_bench attempt: blocked by RAM**
+- 16.8 GB file vs 16 GB physical RAM ⇒ severe swap, RSS dropped to 752 KB after 54 min, no decode progress.
+- Confirms previous "evaluation is impractical" finding; not a path forward on this hardware.
+
+**R3 — IQ2_XS dequant implemented to unblock UD-IQ2_M; measurement still RAM-bound**
+- Discovery: UD-IQ2_M (10.1 GB) uses IQ2_XS internally for some tensors. Our engine had stub returning zeros (`tq_gguf_quants.c:1664`), producing garbled output: `tq_gguf_quants: WARNING: IQ2_XS dequant not yet implemented, returning zeros`.
+- Fix: ported `dequant_iq2_xs` from `refs/llama.cpp/ggml/src/ggml-quants.c:2440` — 74-byte block, 512-entry codebook (`iq2xs_grid`), 9-bit grid index + 7-bit signs index per qs uint16. Reuses existing `kmask_iq2xs` and `ksigns_iq2xs` tables.
+- Build: clean. Stub warning gone.
+- coh_bench attempt: still paging-bound. 30-tok chat test ran 16 min wall / 2.6 min CPU (84% time in I/O). Output partial: `" t.\n\nt。\n\n t tว่า"` — same garbled mixed-script pattern as before. Cannot disambiguate "IQ2_M too lossy for 27B dense" from "subtle IQ2_XS impl bug" without working llama.cpp reference, but llama.cpp also couldn't load alongside ours due to RAM contention.
+- Conclusion: 10 GB+ models on 16 GB Mac are paging-bound regardless of compute backend. **Reliable Qwen3.6-27B coh_bench measurement requires either ≥32 GB RAM, or a quant ≤8 GB (Q2_K plain, IQ2_XXS standard — neither commonly published for 27B).**
+
+**Tier verdict**: Qwen3.6-27B Q4_K_M remains Tier 3 (cannot be promoted without coherent-length measurement on this hardware). The BOS fix + IQ2_XS impl are real improvements that will pay off on hardware that fits the model, but the original goal "Tier 3→1 promotion via Karpathy loop" is **hardware-blocked on a 16 GB Mac**, not engine-blocked.
 
 ## Quality verdicts (first ~200 chars)
 
