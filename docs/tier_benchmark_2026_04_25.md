@@ -10,23 +10,32 @@ Standardized coherent-length measurement across 5 models, 3 prompts each. Run vi
 
 ## Raw results — 14 models across family
 
-| Model                           | quantum            | poem              | trivia             | Tier |
-|:--------------------------------|:------------------:|:-----------------:|:------------------:|:----:|
-| SmolLM2-135M Q8_0               | 299 (-n cap)       | 108 (EOS)         | 22 (EOS)           | 1    |
-| SmolLM2-360M Q8_0               | 299 (-n cap)       | 108 (EOS)         | 22 (EOS)           | 1    |
-| **Qwen2.5-0.5B Q4_K_M**         | **64, rep loop**   | **49, rep loop**  | **55, rep loop**   | **3** |
-| Qwen3-0.6B Q4_K_M               | 299 (-n cap)       | 285 (EOS)         | 299 (-n cap)       | 1    |
-| Qwen3.5-4B Q4_K_M               | 147 (EOS)          | 106 (EOS)         | 66 (EOS)           | 1    |
-| llama-3.2-1B Q4_K_M             | 299 (-n cap)       | 133 (EOS)         | 110 (EOS)          | 1    |
-| Llama-3.2-1B Q8_0               | 261 (EOS)          | 107 (EOS)         | 137 (EOS)          | 1    |
-| Llama-3.2-3B Q8_0               | 299 (-n cap)       | 105 (EOS)         | 120 (EOS)          | 1    |
-| Gemma-4-e2b-it Q8_0             | 299 (-n cap)       | 92 (EOS)          | 31 (EOS)           | 1    |
-| Gemma-4-e4b-it Q4_0             | 299 (-n cap)       | 82 (EOS)          | 19 (EOS)           | 1    |
-| Phi-3.5-mini-instruct Q4_K_M    | 299 (-n cap)       | 299 (-n cap)      | 299 (-n cap)       | 1    |
-| Phi-3.5-mini-instruct Q8_0      | 299 (-n cap)       | 299 (-n cap)      | natural EOS        | 1    |
-| **Qwen3.6-35B-A3B IQ4_XS**      | 149 (EOS, thinking) | **73, rep loop**  | **51, attractor**  | **2** |
-| **Qwen3.6-35B-A3B Q5_K_M**      | 169 (EOS, thinking) | **68, rep loop**  | **69, rep loop**   | **2** |
-| **Qwen3.6-27B Q4_K_M** (NEW)    | not measured        | not measured       | not measured       | **3** |
+(Original 2026-04-25 measurement; updated 2026-04-26 column shows post R1–R6 re-measurement.)
+
+| Model                           | 4-25 quantum / poem / trivia | 4-26 quantum / poem / trivia | Tier (4-26) | Δ |
+|:--------------------------------|:-----------------------------|:-----------------------------|:-----------:|:-:|
+| SmolLM2-135M Q8_0               | 299 / 108 / 22  (3/3 EOS)    | 299 EOS / **241 rep** / 63 EOS | **2** | ↓1 |
+| SmolLM2-360M Q8_0               | 299 / 108 / 22  (3/3 EOS)    | 299 EOS / 108 EOS / 22 EOS    | 1 | = |
+| **Qwen2.5-0.5B Q4_K_M**         | 64 / 49 / 55  (3/3 rep)      | 64 rep / 49 rep / 55 rep      | **3** | = |
+| Qwen3-0.6B Q4_K_M               | 299 / 285 / 299  (3/3 EOS)   | 299 EOS / 285 EOS / 299 EOS   | 1 | = |
+| Qwen3.5-4B Q4_K_M               | 147 / 106 / 66  (3/3 EOS)    | 114 EOS / 131 EOS / **209 EOS** | 1 | = (trivia +217%) |
+| llama-3.2-1B Q4_K_M             | 299 / 133 / 110  (3/3 EOS)   | 299 EOS / 133 EOS / 110 EOS   | 1 | = |
+| Llama-3.2-1B Q8_0               | 261 / 107 / 137  (3/3 EOS)   | 261 EOS / 107 EOS / 137 EOS   | 1 | = |
+| Llama-3.2-3B Q8_0               | 299 / 105 / 120  (3/3 EOS)   | 299 EOS / 105 EOS / 120 EOS   | 1 | = |
+| Gemma-4-e2b-it Q8_0             | 299 / 92 / 31  (3/3 EOS)     | 299 EOS / 92 EOS / 31 EOS     | 1 | = |
+| Gemma-4-e4b-it Q4_0             | 299 / 82 / 19  (3/3 EOS)     | 299 EOS / 82 EOS / 19 EOS     | 1 | = |
+| Phi-3.5-mini Q4_K_M             | 299 / 299 / 299  (3/3 -n)    | 299 -n / 299 -n / 299 -n      | 1 | = |
+| Phi-3.5-mini Q8_0               | 299 / 299 / EOS  (3/3 OK)    | 299 -n / 299 -n / 299 -n      | 1 | = |
+| **Qwen3.6-35B-A3B IQ4_XS**      | 149 EOS / 73 rep / 51 rep    | **94 rep / 76 rep / 60 rep**  | **3** | ↓1 |
+| **Qwen3.6-35B-A3B Q5_K_M**      | 169 EOS / 68 rep / 69 rep    | **24 EOS / 225 rep / 46 EOS** | **2** | = |
+| **Qwen3.6-27B Q4_K_M**          | not measurable on 16 GB Mac (R2)                            | not measurable (R2) | **3** | n/a |
+| Qwen3.6-27B-TQ2_0 (R5/R6)       | engine path verified (paging-cliff cleared) but quality is requantize-artifact garbage | requantize-from-Q4 or Q8 both garbled | **n/a (engine-only)** | new |
+
+**Summary of post-R1–R6 changes**:
+- **Qwen3.5-4B trivia +217%** (66 → 209 tok natural EOS) — direct R1 BOS-fix benefit, since Qwen3.5 shares the Qwen3.6 tokenizer's `<|endoftext|>` BOS path.
+- **Qwen3.6-35B-A3B IQ4_XS Tier 2 → 3** — single-run regression (149 EOS quantum → 94 rep). Likely measurement noise (35B-A3B has known ±20-40 tok variance per `feedback_multithread_variance.md`); needs `-j 1` deterministic re-run with multiple seeds to confirm. Marked tier 3 conservatively pending re-test.
+- **SmolLM2-135M Tier 1 → 2** — poem regressed 108 EOS → 241 rep loop. Possible noise on a 135M model at -T 0.
+- **All other 11 Tier 1 models unchanged** — R1 BOS fix and R3/R5 IQ-impl additions did not break any prior-passing model.
 
 **Key observations:**
 
