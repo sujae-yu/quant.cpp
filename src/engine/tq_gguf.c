@@ -159,6 +159,8 @@ size_t tq_ggml_type_size(tq_ggml_dtype type) {
         case TQ_GGML_TYPE_IQ4_NL:   return 18;
         case TQ_GGML_TYPE_IQ4_XS:   return 136;
         case TQ_GGML_TYPE_IQ1_S:    return 50;
+        case TQ_GGML_TYPE_TQ1_0:    return 54;
+        case TQ_GGML_TYPE_TQ2_0:    return 66;
         default:                     return 0;
     }
 }
@@ -188,6 +190,8 @@ int tq_ggml_type_blck(tq_ggml_dtype type) {
         case TQ_GGML_TYPE_IQ4_NL:   return 32;
         case TQ_GGML_TYPE_IQ4_XS:   return 256;
         case TQ_GGML_TYPE_IQ1_S:    return 256;
+        case TQ_GGML_TYPE_TQ1_0:    return 256;
+        case TQ_GGML_TYPE_TQ2_0:    return 256;
         default:                     return 0;
     }
 }
@@ -217,6 +221,8 @@ const char* tq_ggml_type_name(tq_ggml_dtype type) {
         case TQ_GGML_TYPE_IQ4_NL:   return "IQ4_NL";
         case TQ_GGML_TYPE_IQ4_XS:   return "IQ4_XS";
         case TQ_GGML_TYPE_IQ1_S:    return "IQ1_S";
+        case TQ_GGML_TYPE_TQ1_0:    return "TQ1_0";
+        case TQ_GGML_TYPE_TQ2_0:    return "TQ2_0";
         default:                     return "unknown";
     }
 }

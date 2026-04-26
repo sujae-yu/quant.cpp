@@ -163,6 +163,19 @@ But the same Tier 3 basin issue would apply regardless of bit-width.
 - coh_bench projection: each `-n=80` prompt would take ~35 min; 3 prompts ≈ 105 min per measurement. Not Karpathy-loop tractable.
 - **Final verdict for this hardware**: 27B Tier 3→1 promotion is hardware-blocked. Path forward is either (a) ≥32 GB RAM, (b) a Qwen3.6-27B IQ1_M quant (not yet published, ~6.5 GB would fit), or (c) implement post-training mmap layer streaming for dense SwiGLU (multi-session refactor, see PowerInfer / prima.cpp references).
 
+**R5 — TQ2_0 self-quantize (8.06 GB) clears the cliff but loses quality**
+- Idea: bypass Unsloth's lower limit by self-quantizing Q4_K_M → TQ2_0 (2.06 bpw ternary) via `llama-quantize --allow-requantize`. TQ2_0 needs no imatrix and is structurally simple (66-byte block, ternary {-d, 0, +d}).
+- Quantize: 16028 MB Q4_K_M → 7674 MB TQ2_0, 28.9 s wall.
+- Engine impl: ported `dequant_tq2_0` (~30 LOC) plus enum/dispatch entries. Build clean.
+- Sanity test (`-n 30`, chat mode, single thread):
+  - **Decode 29 tok in 559s = 0.052 tok/s** (vs IQ2_M 0.030 / IQ2_XXS 0.038 — **+73% / +37%**)
+  - **TTFT 340s** (vs IQ2_XXS 406s, −16%)
+  - **CPU/wall = 62%** (vs IQ2_M 16% / IQ2_XXS 21% — **paging cliff cleared**)
+  - madvise(DONTNEED) on the 7.5 GB mmap ran cleanly
+  - **Output garbled** (`_actorriguesurindezמותenuquetal做一名…`) — `--allow-requantize` from already-Q4_K_M warned about this and was right
+- Conclusion: the cliff lives at ~8 GB on a 16 GB Mac, and we now have an engine path through it. But coh_bench evaluation needs a quality-preserving quant, which means either (i) downloading source BF16/F16 (~54 GB) and quantizing once, or (ii) waiting for Unsloth/bartowski to publish a calibrated TQ2_0/IQ1_M for 27B.
+- Engine takeaway: TQ1_0 enum is reserved (54 B/block) but dequant not implemented; TQ2_0 dequant is in.
+
 ## Quality verdicts (first ~200 chars)
 
 ### Qwen3-0.6B — Tier 1

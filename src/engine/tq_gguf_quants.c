@@ -537,6 +537,41 @@ static void dequant_q6_k(const void* src, float* dst, int n) {
 }
 
 /* ============================================================
+ * TQ2_0 dequantization — 2.06 bpw ternary
+ *
+ * Block: 66 bytes per 256 elements (2.0625 bpw)
+ *   - qs[64] (uint8): 2 bits per element, 4 sub-rows of 32 elements
+ *     interleaved within each 32-byte chunk (rows distinguished by bit shift)
+ *   - d (fp16, 2 bytes): super-block scale at end
+ *
+ * Decoded value: (q - 1) × d, where q ∈ {0, 1, 2}
+ * Result range: {-d, 0, +d} (true ternary)
+ * ============================================================ */
+
+static void dequant_tq2_0(const void* src, float* dst, int n) {
+    const int nb = n / 256;
+    const uint8_t* base = (const uint8_t*)src;
+
+    for (int b = 0; b < nb; b++) {
+        const uint8_t* blk = base + b * 66;
+        const uint8_t* qs = blk;
+        uint16_t d_raw;
+        memcpy(&d_raw, blk + 64, 2);
+        const float d = fp16_to_fp32(d_raw);
+
+        float* y = dst + b * 256;
+        for (int j = 0; j < 64; j += 32) {
+            for (int l = 0; l < 4; l++) {
+                for (int m = 0; m < 32; m++) {
+                    int8_t q = (qs[j + m] >> (l * 2)) & 3;
+                    *y++ = (float)(q - 1) * d;
+                }
+            }
+        }
+    }
+}
+
+/* ============================================================
  * IQ2_XXS dequantization — E8 lattice codebook
  *
  * Block: 66 bytes per 256 elements (2.0625 bpw)
@@ -1828,6 +1863,11 @@ void tq_dequant_row_gguf(tq_ggml_dtype type, const void* src, float* dst, int n)
             break;
         case TQ_GGML_TYPE_Q6_K:
             dequant_q6_k(src, dst, n);
+            break;
+
+        /* TQ2_0 ternary 2.06 bpw */
+        case TQ_GGML_TYPE_TQ2_0:
+            dequant_tq2_0(src, dst, n);
             break;
 
         /* IQ stubs */

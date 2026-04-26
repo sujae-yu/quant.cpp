@@ -76,7 +76,9 @@ typedef enum {
     TQ_GGML_TYPE_IQ2_S     = 22,
     TQ_GGML_TYPE_IQ4_XS    = 23,
     TQ_GGML_TYPE_BF16      = 30,
-    TQ_GGML_TYPE_COUNT     = 31,
+    TQ_GGML_TYPE_TQ1_0     = 34,
+    TQ_GGML_TYPE_TQ2_0     = 35,
+    TQ_GGML_TYPE_COUNT     = 36,
 } tq_ggml_dtype;
 
 /* ============================================================
