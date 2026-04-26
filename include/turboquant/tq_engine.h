@@ -74,6 +74,25 @@ typedef struct {
     /* Phi-3 fused-tensor flags — drive state buffer sizing */
     int has_fused_qkv;                 /* any layer has gguf_w_qkv */
     int has_fused_up_gate;             /* any layer has gguf_w_up_gate */
+
+    /* MLA (Multi-head Latent Attention) — DeepSeek V2/V3, Coder-V2.
+     * 0 = standard attention; 1 = MLA. When set, the standard wq/wk/wv
+     * pointers are NULL; instead each layer uses gguf_w_q,
+     * gguf_w_kv_a_mqa, gguf_w_kv_b plus an attn_kv_a_norm vector.
+     *
+     * Q has its own RoPE/no-RoPE split: head_dim = qk_nope_head_dim +
+     * qk_rope_head_dim. V uses v_head_dim (typically 128). The KV cache
+     * stores only the latent (kv_lora_rank dims) plus a single shared
+     * RoPE-K of qk_rope_head_dim — total per-token KV is
+     * (kv_lora_rank + qk_rope_head_dim) instead of
+     * (n_heads * (key_dim + v_dim)). For DeepSeek-V2-Lite that is
+     * 576 vs 6144 dims, a 10.7× architectural compression that
+     * stacks with our turbo_kv_4b 8× for ~85× total. */
+    int is_mla;
+    int kv_lora_rank;          /* latent dim, e.g., 512 */
+    int qk_rope_head_dim;      /* per-head RoPE dim, e.g., 64 */
+    int qk_nope_head_dim;      /* per-head no-RoPE dim, e.g., 128 */
+    int v_head_dim;            /* per-head value dim, e.g., 128 */
 } tq_model_config_t;
 
 /* ============================================================

@@ -3047,6 +3047,36 @@ tq_model_t* tq_load_gguf(const char* path) {
         }
     }
 
+    /* MLA detection (deepseek2): no attn_k, but attn_kv_a_mqa + attn_kv_b
+     * exist. Capture kv_lora_rank, qk_rope/nope_head_dim, v_head_dim from
+     * GGUF metadata so the future Phase 2 forward pass can size buffers
+     * and dispatch correctly. The forward path itself is still TBD —
+     * loader-level recording only. */
+    if (strcmp(gguf->arch, "deepseek2") == 0) {
+        const tq_gguf_tensor_t* kv_a = tq_gguf_find_tensor(gguf, "blk.0.attn_kv_a_mqa.weight");
+        const tq_gguf_tensor_t* kv_b = tq_gguf_find_tensor(gguf, "blk.0.attn_kv_b.weight");
+        if (kv_a && kv_b) {
+            c->is_mla = 1;
+            c->kv_lora_rank     = tq_gguf_get_i32(gguf, GGUF_KEY("attention.kv_lora_rank"), 512);
+            int key_length      = tq_gguf_get_i32(gguf, GGUF_KEY("attention.key_length"), 192);
+            c->v_head_dim       = tq_gguf_get_i32(gguf, GGUF_KEY("attention.value_length"), 128);
+            c->qk_rope_head_dim = tq_gguf_get_i32(gguf, GGUF_KEY("rope.dimension_count"), 64);
+            c->qk_nope_head_dim = key_length - c->qk_rope_head_dim;
+            /* Override head_dim to the MLA key length (used for Q proj sizing) */
+            c->head_dim = key_length;
+            fprintf(stderr,
+                "tq_load_gguf: MLA — kv_lora_rank=%d, key_length=%d "
+                "(rope=%d + nope=%d), v_head_dim=%d  "
+                "(KV cache compression %d→%d = %.1fx vs standard)\n",
+                c->kv_lora_rank, key_length,
+                c->qk_rope_head_dim, c->qk_nope_head_dim, c->v_head_dim,
+                c->n_heads * (key_length + c->v_head_dim),
+                c->kv_lora_rank + c->qk_rope_head_dim,
+                (double)(c->n_heads * (key_length + c->v_head_dim)) /
+                (double)(c->kv_lora_rank + c->qk_rope_head_dim));
+        }
+    }
+
     /* MoE configuration */
     c->num_experts        = tq_gguf_get_i32(gguf, GGUF_KEY("expert_count"), 0);
     c->num_active_experts = tq_gguf_get_i32(gguf, GGUF_KEY("expert_used_count"), 0);
